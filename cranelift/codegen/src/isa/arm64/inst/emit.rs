@@ -353,7 +353,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::MSub64 => (0b1_00_11011_000, 1),
                     ALUOp::SMulH => (0b1_00_11011_010, 0),
                     ALUOp::UMulH => (0b1_00_11011_110, 0),
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 sink.put4(enc_arith_rrrr(top11, rm, bit15, ra, rn, rd));
             }
@@ -372,7 +372,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::AddS64 => 0b101_10001,
                     ALUOp::SubS32 => 0b011_10001,
                     ALUOp::SubS64 => 0b111_10001,
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 sink.put4(enc_arith_rr_imm12(
                     top8,
@@ -401,7 +401,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::AndNot64 => (0b100_100100, true),
                     ALUOp::EorNot32 => (0b010_100100, true),
                     ALUOp::EorNot64 => (0b110_100100, true),
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 let imml = if inv { imml.invert() } else { imml.clone() };
                 sink.put4(enc_arith_rr_imml(top9, imml.enc_bits(), rn, rd));
@@ -423,7 +423,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::Asr64 => (0b1001001101, amt as u32, 0b111111),
                     ALUOp::Lsl32 => (0b0101001100, (32 - amt) as u32, (31 - amt) as u32),
                     ALUOp::Lsl64 => (0b1101001101, (64 - amt) as u32, (63 - amt) as u32),
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 sink.put4(
                     (top10 << 22)
@@ -450,7 +450,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::Sub64 => 0b110_01011000,
                     ALUOp::SubS32 => 0b011_01011000,
                     ALUOp::SubS64 => 0b111_01011000,
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 let top11 = top11 | ((shiftop.op().bits() as u16) << 1);
                 let bits_15_10 = shiftop.amt().value();
@@ -473,7 +473,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     ALUOp::AddS64 => 0b10101011001,
                     ALUOp::SubS32 => 0b01101011001,
                     ALUOp::SubS64 => 0b11101011001,
-                    _ => unimplemented!(),
+                    _ => unimplemented!("{:?}", alu_op),
                 };
                 let bits_15_10 = extendop.bits() << 3;
                 sink.put4(enc_arith_rrr(top11, bits_15_10, rd, rn, rm));

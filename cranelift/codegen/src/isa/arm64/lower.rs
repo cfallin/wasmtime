@@ -847,8 +847,13 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             let rd = output_to_reg(ctx, outputs[0]);
             let rn = input_to_reg(ctx, inputs[0], narrow_mode);
             if !is_rem {
-                let rm = input_to_rse_imm12(ctx, inputs[1], narrow_mode);
-                ctx.emit(alu_inst_imm12(div_op, rd, rn, rm));
+                let rm = input_to_reg(ctx, inputs[1], narrow_mode);
+                ctx.emit(Inst::AluRRR {
+                    alu_op: div_op,
+                    rd,
+                    rn,
+                    rm,
+                });
             } else {
                 let rm = input_to_reg(ctx, inputs[1], narrow_mode);
                 // Remainder (rn % rm) is implemented as:
