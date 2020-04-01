@@ -565,12 +565,14 @@ pub enum Inst {
         dest: ExternalName,
         uses: Set<Reg>,
         defs: Set<Writable<Reg>>,
+        loc: SourceLoc,
     },
     /// A machine indirect-call instruction.
     CallInd {
         rn: Reg,
         uses: Set<Reg>,
         defs: Set<Writable<Reg>>,
+        loc: SourceLoc,
     },
 
     // ---- branches (exactly one must appear at end of BB) ----
@@ -659,6 +661,7 @@ pub enum Inst {
     LoadExtName {
         rd: Writable<Reg>,
         name: ExternalName,
+        srcloc: SourceLoc,
         offset: i64,
     },
 }
@@ -1421,11 +1424,17 @@ fn arm64_map_regs(
             ref uses,
             ref defs,
             ref dest,
+            loc,
         } => {
             let uses = uses.map(|r| map(u, *r));
             let defs = defs.map(|r| map_wr(d, *r));
             let dest = dest.clone();
-            Inst::Call { dest, uses, defs }
+            Inst::Call {
+                dest,
+                uses,
+                defs,
+                loc,
+            }
         }
         &mut Inst::Ret {} => Inst::Ret {},
         &mut Inst::EpiloguePlaceholder {} => Inst::EpiloguePlaceholder {},
@@ -1433,6 +1442,7 @@ fn arm64_map_regs(
             ref uses,
             ref defs,
             rn,
+            loc,
         } => {
             let uses = uses.map(|r| map(u, *r));
             let defs = defs.map(|r| map_wr(d, *r));
@@ -1440,6 +1450,7 @@ fn arm64_map_regs(
                 uses,
                 defs,
                 rn: map(u, rn),
+                loc,
             }
         }
         &mut Inst::CondBr {
@@ -1498,10 +1509,12 @@ fn arm64_map_regs(
             rd,
             ref name,
             offset,
+            srcloc,
         } => Inst::LoadExtName {
             rd: map_wr(d, rd),
             name: name.clone(),
             offset,
+            srcloc,
         },
     };
     *inst = newval;
@@ -2338,6 +2351,7 @@ impl ShowWithRRU for Inst {
                 rd,
                 ref name,
                 offset,
+                srcloc: _srcloc,
             } => {
                 let rd = rd.show_rru(mb_rru);
                 format!("ldr {}, 8 ; b 12 ; data {:?} + {}", rd, name, offset)

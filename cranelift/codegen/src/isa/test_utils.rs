@@ -56,7 +56,13 @@ impl CodeSink for TestCodeSink {
 
     fn reloc_block(&mut self, _rel: Reloc, _block_offset: CodeOffset) {}
 
-    fn reloc_external(&mut self, _: SourceLoc, _rel: Reloc, _name: &ExternalName, _addend: Addend) {
+    fn reloc_external(
+        &mut self,
+        _srcloc: SourceLoc,
+        _rel: Reloc,
+        _name: &ExternalName,
+        _addend: Addend,
+    ) {
     }
 
     fn reloc_constant(&mut self, _rel: Reloc, _constant_offset: ConstantOffset) {}

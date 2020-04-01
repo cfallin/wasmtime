@@ -589,6 +589,7 @@ pub struct ARM64ABICall {
     uses: Set<Reg>,
     defs: Set<Writable<Reg>>,
     dest: CallDest,
+    loc: ir::SourceLoc,
 }
 
 fn abisig_to_uses_and_defs(sig: &ABISig) -> (Set<Reg>, Set<Writable<Reg>>) {
@@ -614,9 +615,12 @@ fn abisig_to_uses_and_defs(sig: &ABISig) -> (Set<Reg>, Set<Writable<Reg>>) {
 }
 
 impl ARM64ABICall {
-    /// Create a callsite ABI object for a call directly to the
-    /// specified function.
-    pub fn from_func(sig: &ir::Signature, extname: &ir::ExternalName) -> ARM64ABICall {
+    /// Create a callsite ABI object for a call directly to the specified function.
+    pub fn from_func(
+        sig: &ir::Signature,
+        extname: &ir::ExternalName,
+        loc: ir::SourceLoc,
+    ) -> ARM64ABICall {
         let sig = ABISig::from_func_sig(sig);
         let (uses, defs) = abisig_to_uses_and_defs(&sig);
         ARM64ABICall {
@@ -624,12 +628,13 @@ impl ARM64ABICall {
             uses,
             defs,
             dest: CallDest::ExtName(extname.clone()),
+            loc,
         }
     }
 
     /// Create a callsite ABI object for a call to a function pointer with the
     /// given signature.
-    pub fn from_ptr(sig: &ir::Signature, ptr: Reg) -> ARM64ABICall {
+    pub fn from_ptr(sig: &ir::Signature, ptr: Reg, loc: ir::SourceLoc) -> ARM64ABICall {
         let sig = ABISig::from_func_sig(sig);
         let (uses, defs) = abisig_to_uses_and_defs(&sig);
         ARM64ABICall {
@@ -637,6 +642,7 @@ impl ARM64ABICall {
             uses,
             defs,
             dest: CallDest::Reg(ptr),
+            loc,
         }
     }
 }
@@ -709,11 +715,13 @@ impl ABICall<Inst> for ARM64ABICall {
                 dest: name.clone(),
                 uses,
                 defs,
+                loc: self.loc,
             }],
             &CallDest::Reg(reg) => vec![Inst::CallInd {
                 rn: reg,
                 uses,
                 defs,
+                loc: self.loc,
             }],
         }
     }

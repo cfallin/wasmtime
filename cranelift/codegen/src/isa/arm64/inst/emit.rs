@@ -1012,8 +1012,8 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
             &Inst::EpiloguePlaceholder {} => {
                 // Noop; this is just a placeholder for epilogues.
             }
-            &Inst::Call { ref dest, .. } => {
-                sink.add_reloc(Reloc::Arm64Call, dest, 0);
+            &Inst::Call { ref dest, loc, .. } => {
+                sink.add_reloc(loc, Reloc::Arm64Call, dest, 0);
                 sink.put4(enc_jump26(0b100101, 0));
             }
             &Inst::CallInd { rn, .. } => {
@@ -1163,6 +1163,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 rd,
                 ref name,
                 offset,
+                srcloc,
             } => {
                 let inst = Inst::ULoad64 {
                     rd,
@@ -1173,7 +1174,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     dest: BranchTarget::ResolvedOffset(12),
                 };
                 inst.emit(sink);
-                sink.add_reloc(Reloc::Abs8, name, offset);
+                sink.add_reloc(srcloc, Reloc::Abs8, name, offset);
                 sink.put8(0);
             }
         }
@@ -3174,6 +3175,7 @@ mod test {
                 dest: ExternalName::testcase("test0"),
                 uses: Set::empty(),
                 defs: Set::empty(),
+                loc: SourceLoc::default(),
             },
             "00000094",
             "bl 0",
@@ -3184,6 +3186,7 @@ mod test {
                 rn: xreg(10),
                 uses: Set::empty(),
                 defs: Set::empty(),
+                loc: SourceLoc::default(),
             },
             "40013FD6",
             "blr x10",

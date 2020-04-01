@@ -132,7 +132,7 @@ pub trait MachSectionOutput {
     fn put_data(&mut self, data: &[u8]);
 
     /// Add a relocation at the current offset.
-    fn add_reloc(&mut self, kind: Reloc, name: &ExternalName, addend: Addend);
+    fn add_reloc(&mut self, loc: SourceLoc, kind: Reloc, name: &ExternalName, addend: Addend);
 
     /// Add a trap record at the current offset.
     fn add_trap(&mut self, loc: SourceLoc, code: TrapCode);
@@ -188,7 +188,7 @@ impl MachSection {
             if next_reloc < self.relocs.len() {
                 let reloc = &self.relocs[next_reloc];
                 if reloc.offset == idx as CodeOffset {
-                    sink.reloc_external(SourceLoc::default(), reloc.kind, &reloc.name, reloc.addend);
+                    sink.reloc_external(reloc.srcloc, reloc.kind, &reloc.name, reloc.addend);
                     next_reloc += 1;
                 }
             }
@@ -223,10 +223,11 @@ impl MachSectionOutput for MachSection {
         self.data.extend_from_slice(data);
     }
 
-    fn add_reloc(&mut self, kind: Reloc, name: &ExternalName, addend: Addend) {
+    fn add_reloc(&mut self, srcloc: SourceLoc, kind: Reloc, name: &ExternalName, addend: Addend) {
         let name = name.clone();
         self.relocs.push(MachReloc {
             offset: self.data.len() as CodeOffset,
+            srcloc,
             kind,
             name,
             addend,
@@ -284,7 +285,7 @@ impl MachSectionOutput for MachSectionSize {
         self.offset += data.len() as CodeOffset;
     }
 
-    fn add_reloc(&mut self, _: Reloc, _: &ExternalName, _: Addend) {}
+    fn add_reloc(&mut self, _: SourceLoc, _: Reloc, _: &ExternalName, _: Addend) {}
 
     fn add_trap(&mut self, _: SourceLoc, _: TrapCode) {}
 }
@@ -294,6 +295,8 @@ pub struct MachReloc {
     /// The offset at which the relocation applies, *relative to the
     /// containing section*.
     pub offset: CodeOffset,
+    /// The original source location.
+    pub srcloc: SourceLoc,
     /// The kind of relocation.
     pub kind: Reloc,
     /// The external symbol / name to which this relocation refers.

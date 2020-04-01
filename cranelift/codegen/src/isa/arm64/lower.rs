@@ -1675,9 +1675,11 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
         Opcode::FuncAddr => {
             let rd = output_to_reg(ctx, outputs[0]);
             let extname = ctx.call_target(insn).unwrap().clone();
+            let loc = ctx.srcloc(insn);
             ctx.emit(Inst::LoadExtName {
                 rd,
                 name: extname,
+                srcloc: loc,
                 offset: 0,
             });
         }
@@ -1690,40 +1692,45 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             let rd = output_to_reg(ctx, outputs[0]);
             let (extname, offset) = ctx.symbol_value(insn).unwrap();
             let extname = extname.clone();
+            let loc = ctx.srcloc(insn);
             ctx.emit(Inst::LoadExtName {
                 rd,
                 name: extname,
+                srcloc: loc,
                 offset,
             });
         }
 
         Opcode::Call | Opcode::CallIndirect => {
+            let loc = ctx.srcloc(insn);
             let (abi, inputs) = match op {
                 Opcode::Call => {
                     let extname = ctx.call_target(insn).unwrap();
                     let extname = extname.clone();
-                    // HACK: get the function address with an Abs8 reloc in teh constant pool.
+                    // HACK: get the function address with an Abs8 reloc in the constant pool.
                     let tmp = ctx.tmp(RegClass::I64, I64);
                     ctx.emit(Inst::LoadExtName {
                         rd: tmp,
                         name: extname,
+                        srcloc: loc,
                         offset: 0,
                     });
                     let sig = ctx.call_sig(insn).unwrap();
                     assert!(inputs.len() == sig.params.len());
                     assert!(outputs.len() == sig.returns.len());
                     // (ARM64ABICall::from_func(sig, extname), &inputs[..])
-                    (ARM64ABICall::from_ptr(sig, tmp.to_reg()), &inputs[..])
+                    (ARM64ABICall::from_ptr(sig, tmp.to_reg(), loc), &inputs[..])
                 }
                 Opcode::CallIndirect => {
                     let ptr = input_to_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
                     let sig = ctx.call_sig(insn).unwrap();
                     assert!(inputs.len() - 1 == sig.params.len());
                     assert!(outputs.len() == sig.returns.len());
-                    (ARM64ABICall::from_ptr(sig, ptr), &inputs[1..])
+                    (ARM64ABICall::from_ptr(sig, ptr, loc), &inputs[1..])
                 }
                 _ => unreachable!(),
             };
+
             for inst in abi.gen_stack_pre_adjust().into_iter() {
                 ctx.emit(inst);
             }
