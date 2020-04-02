@@ -36,12 +36,14 @@ struct ABISig {
     stack_arg_space: i64,
 }
 
+static BALDRDASH_TLS_REG: u8 = 23;
+
 /// Process a list of parameters or return values and allocate them to X-regs,
 /// V-regs, and stack slots.
 ///
 /// Returns the list of argument locations, and the stack-space used (rounded up
 /// to a 16-byte-aligned boundary).
-fn compute_arg_locs(params: &[ir::AbiParam]) -> (Vec<ABIArg>, i64) {
+fn compute_arg_locs(call_conv: isa::CallConv, params: &[ir::AbiParam]) -> (Vec<ABIArg>, i64) {
     // See AArch64 ABI (https://c9x.me/compile/bib/abi-arm64.pdf), sections 5.4.
     let mut next_xreg = 0;
     let mut next_vreg = 0;
@@ -58,7 +60,12 @@ fn compute_arg_locs(params: &[ir::AbiParam]) -> (Vec<ABIArg>, i64) {
         }
 
         if in_int_reg(param.value_type) {
-            if next_xreg < 8 {
+            if param.purpose == ir::ArgumentPurpose::VMContext && call_conv.extends_baldrdash() {
+                ret.push(ABIArg::Reg(
+                    xreg(BALDRDASH_TLS_REG).to_real_reg(),
+                    param.value_type,
+                ));
+            } else if next_xreg < 8 {
                 ret.push(ABIArg::Reg(xreg(next_xreg).to_real_reg(), param.value_type));
                 next_xreg += 1;
             } else {
@@ -93,8 +100,8 @@ impl ABISig {
         // Compute args and retvals from signature.
         // TODO: pass in arg-mode or ret-mode. (Does not matter
         // for the types of arguments/return values that we support.)
-        let (args, stack_arg_space) = compute_arg_locs(&sig.params);
-        let (rets, _) = compute_arg_locs(&sig.returns);
+        let (args, stack_arg_space) = compute_arg_locs(sig.call_conv, &sig.params);
+        let (rets, _) = compute_arg_locs(sig.call_conv, &sig.returns);
 
         // Verify that there are no arguments in return-memory area.
         assert!(args.iter().all(|a| match a {
