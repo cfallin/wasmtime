@@ -1,6 +1,6 @@
 use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc};
 use crate::ir::Value;
-use crate::ir::{ConstantOffset, ExternalName, Function, JumpTable, SourceLoc, TrapCode};
+use crate::ir::{ConstantOffset, ExternalName, Function, JumpTable, Opcode, SourceLoc, TrapCode};
 use crate::isa::TargetIsa;
 
 use alloc::vec::Vec;
@@ -78,4 +78,6 @@ impl CodeSink for TestCodeSink {
     fn end_codegen(&mut self) {}
 
     fn add_stackmap(&mut self, _val_list: &[Value], _func: &Function, _isa: &dyn TargetIsa) {}
+
+    fn add_call_site(&mut self, _opcode: Opcode, _srcloc: SourceLoc) {}
 }
