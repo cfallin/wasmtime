@@ -620,9 +620,11 @@ pub enum Inst {
     },
 
     /// A "break" instruction, used for e.g. traps and debug breakpoints.
-    Brk {
-        trap_info: Option<(SourceLoc, TrapCode)>,
-    },
+    Brk,
+
+    /// An instruction guaranteed to always be undefined and to trigger an illegal instruction at
+    /// runtime.
+    Udf { trap_info: (SourceLoc, TrapCode) },
 
     /// Load the address (using a PC-relative offset) of a MemLabel, using the
     /// `ADR` instruction.
@@ -1036,7 +1038,8 @@ fn arm64_get_regs(inst: &Inst) -> InstRegUses {
             iru.used.insert(rn);
         }
         &Inst::Nop | Inst::Nop4 => {}
-        &Inst::Brk { .. } => {}
+        &Inst::Brk => {}
+        &Inst::Udf { .. } => {}
         &Inst::Adr { rd, .. } => {
             iru.defined.insert(rd);
         }
@@ -1481,7 +1484,8 @@ fn arm64_map_regs(
         },
         &mut Inst::Nop => Inst::Nop,
         &mut Inst::Nop4 => Inst::Nop4,
-        &mut Inst::Brk { trap_info } => Inst::Brk { trap_info },
+        &mut Inst::Brk => Inst::Brk,
+        &mut Inst::Udf { trap_info } => Inst::Udf { trap_info },
         &mut Inst::Adr { rd, ref label } => Inst::Adr {
             rd: map_wr(d, rd),
             label: label.clone(),
@@ -2314,7 +2318,8 @@ impl ShowWithRRU for Inst {
                 let rn = rn.show_rru(mb_rru);
                 format!("br {}", rn)
             }
-            &Inst::Brk { .. } => "brk #0".to_string(),
+            &Inst::Brk => "brk #0".to_string(),
+            &Inst::Udf { .. } => "udf".to_string(),
             &Inst::Adr { rd, ref label } => {
                 let rd = rd.show_rru(mb_rru);
                 let label = label.show_rru(mb_rru);

@@ -5,7 +5,7 @@ block0:
   trap user0
 }
 
-; check: brk #0
+; check: udf
 
 function %g(i64) {
 block0(v0: i64):
@@ -17,7 +17,7 @@ block0(v0: i64):
 
 ; check: subs xzr, x0, #42
 ; nextln: b.ne 8
-; nextln: brk #0
+; nextln: udf
 
 function %h() {
 block0:

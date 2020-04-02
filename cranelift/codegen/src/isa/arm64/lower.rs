@@ -1620,44 +1620,47 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             panic!("Should not appear: we handle BrTable directly");
         }
 
-        Opcode::Debugtrap | Opcode::Trap | Opcode::Trapif | Opcode::Trapff => {
-            let maybe_trapinfo = inst_trapcode(ctx.data(insn)).map(|code| (ctx.srcloc(insn), code));
+        Opcode::Debugtrap => {
+            ctx.emit(Inst::Brk);
+        }
+
+        Opcode::Trap => {
+            let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
+            ctx.emit(Inst::Udf { trap_info })
+        }
+
+        Opcode::Trapif | Opcode::Trapff => {
+            let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
 
             let cond = if op == Opcode::Trapif {
                 let condcode = inst_condcode(ctx.data(insn)).unwrap();
                 let cond = lower_condcode(condcode);
                 let is_signed = condcode_is_signed(condcode);
-                // Verification ensures that the input is always a
-                // single-def ifcmp.
+
+                // Verification ensures that the input is always a single-def ifcmp.
                 let ifcmp_insn = maybe_input_insn(ctx, inputs[0], Opcode::Ifcmp).unwrap();
                 lower_icmp_or_ifcmp_to_flags(ctx, ifcmp_insn, is_signed);
-                Some(cond)
-            } else if op == Opcode::Trapff {
+                cond
+            } else {
                 let condcode = inst_fp_condcode(ctx.data(insn)).unwrap();
                 let cond = lower_fp_condcode(condcode);
+
                 // Verification ensures that the input is always a
                 // single-def ffcmp.
                 let ffcmp_insn = maybe_input_insn(ctx, inputs[0], Opcode::Ffcmp).unwrap();
                 lower_fcmp_or_ffcmp_to_flags(ctx, ffcmp_insn);
-                Some(cond)
-            } else {
-                None
+                cond
             };
 
-            if op == Opcode::Trapif || op == Opcode::Trapff {
-                // Branch around the break instruction with inverted cond. Go straight
-                // to lowered one-target form; this is logically part of a single-in
-                // single-out template lowering.
-                let cond = cond.unwrap().invert();
-                ctx.emit(Inst::CondBrLowered {
-                    target: BranchTarget::ResolvedOffset(8),
-                    kind: CondBrKind::Cond(cond),
-                });
-            }
-
-            ctx.emit(Inst::Brk {
-                trap_info: maybe_trapinfo,
+            // Branch around the break instruction with inverted cond. Go straight to lowered
+            // one-target form; this is logically part of a single-in single-out template lowering.
+            let cond = cond.invert();
+            ctx.emit(Inst::CondBrLowered {
+                target: BranchTarget::ResolvedOffset(8),
+                kind: CondBrKind::Cond(cond),
             });
+
+            ctx.emit(Inst::Udf { trap_info })
         }
 
         Opcode::Safepoint => {

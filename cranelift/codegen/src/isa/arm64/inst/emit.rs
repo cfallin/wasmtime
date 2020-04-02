@@ -11,6 +11,8 @@ use crate::isa::arm64::inst::*;
 use crate::machinst::*;
 use cranelift_entity::EntityRef;
 
+use std::env;
+
 use regalloc::{
     RealReg, RealRegUniverse, Reg, RegClass, RegClassInfo, SpillSlot, VirtualReg, Writable,
     NUM_REG_CLASSES,
@@ -1072,11 +1074,13 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
             &Inst::Nop4 => {
                 sink.put4(0xd503201f);
             }
-            &Inst::Brk { trap_info } => {
-                if let Some((srcloc, code)) = trap_info {
-                    sink.add_trap(srcloc, code);
-                }
+            &Inst::Brk => {
                 sink.put4(0xd4200000);
+            }
+            &Inst::Udf { trap_info } => {
+                let (srcloc, code) = trap_info;
+                sink.add_trap(srcloc, code);
+                sink.put4(0xd4a00000);
             }
             &Inst::Adr { rd, ref label } => {
                 let off = memlabel_finalize(sink.cur_offset_from_start(), label);
@@ -3201,7 +3205,7 @@ mod test {
             "br x3",
         ));
 
-        insns.push((Inst::Brk { trap_info: None }, "000020D4", "brk #0"));
+        insns.push((Inst::Brk, "000020D4", "brk #0"));
 
         insns.push((
             Inst::Adr {
