@@ -1550,7 +1550,7 @@ impl MachInst for Inst {
 
     fn is_term<'a>(&'a self) -> MachTerminator<'a> {
         match self {
-            &Inst::Ret {} => MachTerminator::Ret,
+            &Inst::Ret {} | &Inst::EpiloguePlaceholder {} => MachTerminator::Ret,
             &Inst::Jump { dest } => MachTerminator::Uncond(dest.as_block_index().unwrap()),
             &Inst::CondBr {
                 taken, not_taken, ..
