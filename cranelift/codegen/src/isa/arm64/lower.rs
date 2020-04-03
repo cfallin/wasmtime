@@ -1323,15 +1323,22 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             let mem = lower_address(ctx, elem_ty, &inputs[..], off);
             let rd = output_to_reg(ctx, outputs[0]);
 
+            let memflags = ctx.memflags(insn).expect("memory flags");
+            let srcloc = if !memflags.notrap() {
+                Some(ctx.srcloc(insn))
+            } else {
+                None
+            };
+
             ctx.emit(match (ty_bits(elem_ty), sign_extend) {
-                (1, _) => Inst::ULoad8 { rd, mem },
-                (8, false) => Inst::ULoad8 { rd, mem },
-                (8, true) => Inst::SLoad8 { rd, mem },
-                (16, false) => Inst::ULoad16 { rd, mem },
-                (16, true) => Inst::SLoad16 { rd, mem },
-                (32, false) => Inst::ULoad32 { rd, mem },
-                (32, true) => Inst::SLoad32 { rd, mem },
-                (64, _) => Inst::ULoad64 { rd, mem },
+                (1, _) => Inst::ULoad8 { rd, mem, srcloc },
+                (8, false) => Inst::ULoad8 { rd, mem, srcloc },
+                (8, true) => Inst::SLoad8 { rd, mem, srcloc },
+                (16, false) => Inst::ULoad16 { rd, mem, srcloc },
+                (16, true) => Inst::SLoad16 { rd, mem, srcloc },
+                (32, false) => Inst::ULoad32 { rd, mem, srcloc },
+                (32, true) => Inst::SLoad32 { rd, mem, srcloc },
+                (64, _) => Inst::ULoad64 { rd, mem, srcloc },
                 _ => panic!("Unsupported size in load"),
             });
         }
@@ -1356,11 +1363,18 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             let mem = lower_address(ctx, elem_ty, &inputs[1..], off);
             let rd = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
 
+            let memflags = ctx.memflags(insn).expect("memory flags");
+            let srcloc = if !memflags.notrap() {
+                Some(ctx.srcloc(insn))
+            } else {
+                None
+            };
+
             ctx.emit(match ty_bits(elem_ty) {
-                1 | 8 => Inst::Store8 { rd, mem },
-                16 => Inst::Store16 { rd, mem },
-                32 => Inst::Store32 { rd, mem },
-                64 => Inst::Store64 { rd, mem },
+                1 | 8 => Inst::Store8 { rd, mem, srcloc},
+                16 => Inst::Store16 { rd, mem, srcloc },
+                32 => Inst::Store32 { rd, mem, srcloc },
+                64 => Inst::Store64 { rd, mem, srcloc },
                 _ => panic!("Unsupported size in store"),
             });
         }
@@ -1729,7 +1743,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
                     let sig = ctx.call_sig(insn).unwrap();
                     assert!(inputs.len() - 1 == sig.params.len());
                     assert!(outputs.len() == sig.returns.len());
-                    (ARM64ABICall::from_ptr(sig, ptr, loc), &inputs[1..])
+                    (ARM64ABICall::from_ptr(sig, ptr, loc, op), &inputs[1..])
                 }
                 _ => unreachable!(),
             };

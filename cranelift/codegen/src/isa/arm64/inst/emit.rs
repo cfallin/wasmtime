@@ -6,7 +6,7 @@
 use crate::binemit::{CodeOffset, CodeSink, Reloc};
 use crate::ir::constant::ConstantData;
 use crate::ir::types::*;
-use crate::ir::Type;
+use crate::ir::{Opcode, TrapCode, Type};
 use crate::isa::arm64::inst::*;
 use crate::machinst::*;
 use cranelift_entity::EntityRef;
@@ -536,16 +536,57 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 sink.put4(enc_bit_rr(size, op1, op2, rn, rd))
             }
 
-            &Inst::ULoad8 { rd, ref mem }
-            | &Inst::SLoad8 { rd, ref mem }
-            | &Inst::ULoad16 { rd, ref mem }
-            | &Inst::SLoad16 { rd, ref mem }
-            | &Inst::ULoad32 { rd, ref mem }
-            | &Inst::SLoad32 { rd, ref mem }
-            | &Inst::ULoad64 { rd, ref mem }
-            | &Inst::FpuLoad32 { rd, ref mem }
-            | &Inst::FpuLoad64 { rd, ref mem }
-            | &Inst::FpuLoad128 { rd, ref mem } => {
+            &Inst::ULoad8 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::SLoad8 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::ULoad16 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::SLoad16 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::ULoad32 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::SLoad32 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::ULoad64 {
+                rd,
+                ref mem,
+                srcloc,
+                ..
+            }
+            | &Inst::FpuLoad32 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::FpuLoad64 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::FpuLoad128 {
+                rd,
+                ref mem,
+                srcloc,
+            } => {
                 let (mem_insts, mem) = mem_finalize(sink.cur_offset_from_start(), mem);
 
                 for inst in mem_insts.into_iter() {
@@ -571,6 +612,12 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     &Inst::FpuLoad128 { .. } => 0b0011110011,
                     _ => unreachable!(),
                 };
+
+                if let Some(srcloc) = srcloc {
+                    // Register the offset at which the actual load instruction starts.
+                    sink.add_trap(srcloc, TrapCode::OutOfBounds);
+                }
+
                 match &mem {
                     &MemArg::Unscaled(reg, simm9) => {
                         sink.put4(enc_ldst_simm9(op, simm9, 0b00, reg, rd));
@@ -646,13 +693,42 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 }
             }
 
-            &Inst::Store8 { rd, ref mem }
-            | &Inst::Store16 { rd, ref mem }
-            | &Inst::Store32 { rd, ref mem }
-            | &Inst::Store64 { rd, ref mem }
-            | &Inst::FpuStore32 { rd, ref mem }
-            | &Inst::FpuStore64 { rd, ref mem }
-            | &Inst::FpuStore128 { rd, ref mem } => {
+            &Inst::Store8 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::Store16 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::Store32 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::Store64 {
+                rd,
+                ref mem,
+                srcloc,
+                ..
+            }
+            | &Inst::FpuStore32 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::FpuStore64 {
+                rd,
+                ref mem,
+                srcloc,
+            }
+            | &Inst::FpuStore128 {
+                rd,
+                ref mem,
+                srcloc,
+            } => {
                 let (mem_insts, mem) = mem_finalize(sink.cur_offset_from_start(), mem);
 
                 for inst in mem_insts.into_iter() {
@@ -669,6 +745,12 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     &Inst::FpuStore128 { .. } => 0b0011110010,
                     _ => unreachable!(),
                 };
+
+                if let Some(srcloc) = srcloc {
+                    // Register the offset at which the actual load instruction starts.
+                    sink.add_trap(srcloc, TrapCode::OutOfBounds);
+                }
+
                 match &mem {
                     &MemArg::Unscaled(reg, simm9) => {
                         sink.put4(enc_ldst_simm9(op, simm9, 0b00, reg, rd));
@@ -707,6 +789,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                     }
                 }
             }
+
             &Inst::StoreP64 { rt, rt2, ref mem } => match mem {
                 &PairMemArg::SignedOffset(reg, simm7) => {
                     assert_eq!(simm7.scale_ty, I64);
@@ -856,6 +939,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 let inst = Inst::FpuLoad32 {
                     rd,
                     mem: MemArg::Label(MemLabel::PCRel(8)),
+                    srcloc: None,
                 };
                 inst.emit(sink);
                 let inst = Inst::Jump {
@@ -868,6 +952,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 let inst = Inst::FpuLoad64 {
                     rd,
                     mem: MemArg::Label(MemLabel::PCRel(8)),
+                    srcloc: None,
                 };
                 inst.emit(sink);
                 let inst = Inst::Jump {
@@ -1014,12 +1099,25 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
             &Inst::EpiloguePlaceholder {} => {
                 // Noop; this is just a placeholder for epilogues.
             }
-            &Inst::Call { ref dest, loc, .. } => {
+            &Inst::Call {
+                ref dest,
+                loc,
+                opcode,
+                ..
+            } => {
                 sink.add_reloc(loc, Reloc::Arm64Call, dest, 0);
                 sink.put4(enc_jump26(0b100101, 0));
+                if opcode.is_call() {
+                    sink.add_call_site(loc, opcode);
+                }
             }
-            &Inst::CallInd { rn, .. } => {
+            &Inst::CallInd {
+                rn, loc, opcode, ..
+            } => {
                 sink.put4(0b1101011_0001_11111_000000_00000_00000 | (machreg_to_gpr(rn) << 5));
+                if opcode.is_call() {
+                    sink.add_call_site(loc, opcode);
+                }
             }
             &Inst::CondBr { .. } => panic!("Unlowered CondBr during binemit!"),
             &Inst::CondBrLowered { target, kind } => match kind {
@@ -1127,6 +1225,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                         I32,
                         ExtendOp::UXTW,
                     ),
+                    srcloc: None, // can't cause a user trap.
                 };
                 inst.emit(sink);
                 // Add base of jump table to jump-table-sourced block offset
@@ -1155,6 +1254,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 let inst = Inst::ULoad64 {
                     rd,
                     mem: MemArg::Label(MemLabel::PCRel(8)),
+                    srcloc: None, // can't cause a user trap.
                 };
                 inst.emit(sink);
                 let inst = Inst::Jump {
@@ -1172,6 +1272,7 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 let inst = Inst::ULoad64 {
                     rd,
                     mem: MemArg::Label(MemLabel::PCRel(8)),
+                    srcloc: None, // can't cause a user trap.
                 };
                 inst.emit(sink);
                 let inst = Inst::Jump {
@@ -2151,6 +2252,7 @@ mod test {
             Inst::ULoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "41004038",
             "ldurb w1, [x2]",
@@ -2159,6 +2261,7 @@ mod test {
             Inst::ULoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::UnsignedOffset(xreg(2), UImm12Scaled::zero(I8)),
+                srcloc: None,
             },
             "41004039",
             "ldrb w1, [x2]",
@@ -2167,6 +2270,7 @@ mod test {
             Inst::ULoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegReg(xreg(2), xreg(5)),
+                srcloc: None,
             },
             "41686538",
             "ldrb w1, [x2, x5]",
@@ -2175,6 +2279,7 @@ mod test {
             Inst::SLoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "41008038",
             "ldursb x1, [x2]",
@@ -2183,6 +2288,7 @@ mod test {
             Inst::SLoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::UnsignedOffset(xreg(2), UImm12Scaled::maybe_from_i64(63, I8).unwrap()),
+                srcloc: None,
             },
             "41FC8039",
             "ldrsb x1, [x2, #63]",
@@ -2191,6 +2297,7 @@ mod test {
             Inst::SLoad8 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegReg(xreg(2), xreg(5)),
+                srcloc: None,
             },
             "4168A538",
             "ldrsb x1, [x2, x5]",
@@ -2199,6 +2306,7 @@ mod test {
             Inst::ULoad16 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::maybe_from_i64(5).unwrap()),
+                srcloc: None,
             },
             "41504078",
             "ldurh w1, [x2, #5]",
@@ -2207,6 +2315,7 @@ mod test {
             Inst::ULoad16 {
                 rd: writable_xreg(1),
                 mem: MemArg::UnsignedOffset(xreg(2), UImm12Scaled::maybe_from_i64(8, I16).unwrap()),
+                srcloc: None,
             },
             "41104079",
             "ldrh w1, [x2, #8]",
@@ -2215,6 +2324,7 @@ mod test {
             Inst::ULoad16 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegScaled(xreg(2), xreg(3), I16),
+                srcloc: None,
             },
             "41786378",
             "ldrh w1, [x2, x3, LSL #1]",
@@ -2223,6 +2333,7 @@ mod test {
             Inst::SLoad16 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "41008078",
             "ldursh x1, [x2]",
@@ -2234,6 +2345,7 @@ mod test {
                     xreg(20),
                     UImm12Scaled::maybe_from_i64(24, I16).unwrap(),
                 ),
+                srcloc: None,
             },
             "9C328079",
             "ldrsh x28, [x20, #24]",
@@ -2242,6 +2354,7 @@ mod test {
             Inst::SLoad16 {
                 rd: writable_xreg(28),
                 mem: MemArg::RegScaled(xreg(20), xreg(20), I16),
+                srcloc: None,
             },
             "9C7AB478",
             "ldrsh x28, [x20, x20, LSL #1]",
@@ -2250,6 +2363,7 @@ mod test {
             Inst::ULoad32 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "410040B8",
             "ldur w1, [x2]",
@@ -2261,6 +2375,7 @@ mod test {
                     xreg(0),
                     UImm12Scaled::maybe_from_i64(204, I32).unwrap(),
                 ),
+                srcloc: None,
             },
             "0CCC40B9",
             "ldr w12, [x0, #204]",
@@ -2269,6 +2384,7 @@ mod test {
             Inst::ULoad32 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegScaled(xreg(2), xreg(12), I32),
+                srcloc: None,
             },
             "41786CB8",
             "ldr w1, [x2, x12, LSL #2]",
@@ -2277,6 +2393,7 @@ mod test {
             Inst::SLoad32 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "410080B8",
             "ldursw x1, [x2]",
@@ -2288,6 +2405,7 @@ mod test {
                     xreg(1),
                     UImm12Scaled::maybe_from_i64(16380, I32).unwrap(),
                 ),
+                srcloc: None,
             },
             "2CFCBFB9",
             "ldrsw x12, [x1, #16380]",
@@ -2296,6 +2414,7 @@ mod test {
             Inst::SLoad32 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegScaled(xreg(5), xreg(1), I32),
+                srcloc: None,
             },
             "A178A1B8",
             "ldrsw x1, [x5, x1, LSL #2]",
@@ -2304,6 +2423,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "410040F8",
             "ldur x1, [x2]",
@@ -2312,6 +2432,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::maybe_from_i64(-256).unwrap()),
+                srcloc: None,
             },
             "410050F8",
             "ldur x1, [x2, #-256]",
@@ -2320,6 +2441,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::maybe_from_i64(255).unwrap()),
+                srcloc: None,
             },
             "41F04FF8",
             "ldur x1, [x2, #255]",
@@ -2331,6 +2453,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(32760, I64).unwrap(),
                 ),
+                is_reload: None,
             },
             "41FC7FF9",
             "ldr x1, [x2, #32760]",
@@ -2339,6 +2462,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegReg(xreg(2), xreg(3)),
+                srcloc: None,
             },
             "416863F8",
             "ldr x1, [x2, x3]",
@@ -2347,6 +2471,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegScaled(xreg(2), xreg(3), I64),
+                srcloc: None,
             },
             "417863F8",
             "ldr x1, [x2, x3, LSL #3]",
@@ -2355,6 +2480,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::RegScaledExtended(xreg(2), xreg(3), I64, ExtendOp::SXTW),
+                srcloc: None,
             },
             "41D863F8",
             "ldr x1, [x2, w3, SXTW #3]",
@@ -2363,6 +2489,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::Label(MemLabel::PCRel(64)),
+                srcloc: None,
             },
             "01020058",
             "ldr x1, pc+64",
@@ -2371,6 +2498,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::PreIndexed(writable_xreg(2), SImm9::maybe_from_i64(16).unwrap()),
+                srcloc: None,
             },
             "410C41F8",
             "ldr x1, [x2, #16]!",
@@ -2379,6 +2507,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::PostIndexed(writable_xreg(2), SImm9::maybe_from_i64(16).unwrap()),
+                srcloc: None,
             },
             "410441F8",
             "ldr x1, [x2], #16",
@@ -2387,6 +2516,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::FPOffset(32768),
+                srcloc: None,
             },
             "0F0090D2EF011D8BE10140F9",
             "movz x15, #32768 ; add x15, x15, fp ; ldr x1, [x15]",
@@ -2395,6 +2525,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::FPOffset(-32768),
+                srcloc: None,
             },
             "EFFF8F92EF011D8BE10140F9",
             "movn x15, #32767 ; add x15, x15, fp ; ldr x1, [x15]",
@@ -2403,6 +2534,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::FPOffset(1048576), // 2^20
+                srcloc: None,
             },
             "0F02A0D2EF011D8BE10140F9",
             "movz x15, #16, LSL #16 ; add x15, x15, fp ; ldr x1, [x15]",
@@ -2411,6 +2543,7 @@ mod test {
             Inst::ULoad64 {
                 rd: writable_xreg(1),
                 mem: MemArg::FPOffset(1048576 + 1), // 2^20 + 1
+                srcloc: None,
             },
             "2F0080D20F02A0F2EF011D8BE10140F9",
             "movz x15, #1 ; movk x15, #16, LSL #16 ; add x15, x15, fp ; ldr x1, [x15]",
@@ -2420,6 +2553,7 @@ mod test {
             Inst::Store8 {
                 rd: xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "41000038",
             "sturb w1, [x2]",
@@ -2431,6 +2565,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(4095, I8).unwrap(),
                 ),
+                srcloc: None,
             },
             "41FC3F39",
             "strb w1, [x2, #4095]",
@@ -2439,6 +2574,7 @@ mod test {
             Inst::Store16 {
                 rd: xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "41000078",
             "sturh w1, [x2]",
@@ -2450,6 +2586,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(8190, I16).unwrap(),
                 ),
+                srcloc: None,
             },
             "41FC3F79",
             "strh w1, [x2, #8190]",
@@ -2458,6 +2595,7 @@ mod test {
             Inst::Store32 {
                 rd: xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "410000B8",
             "stur w1, [x2]",
@@ -2469,6 +2607,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(16380, I32).unwrap(),
                 ),
+                srcloc: None,
             },
             "41FC3FB9",
             "str w1, [x2, #16380]",
@@ -2477,6 +2616,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::Unscaled(xreg(2), SImm9::zero()),
+                srcloc: None,
             },
             "410000F8",
             "stur x1, [x2]",
@@ -2488,6 +2628,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(32760, I64).unwrap(),
                 ),
+                srcloc: None,
             },
             "41FC3FF9",
             "str x1, [x2, #32760]",
@@ -2496,6 +2637,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::RegReg(xreg(2), xreg(3)),
+                srcloc: None,
             },
             "416823F8",
             "str x1, [x2, x3]",
@@ -2504,6 +2646,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::RegScaled(xreg(2), xreg(3), I64),
+                srcloc: None,
             },
             "417823F8",
             "str x1, [x2, x3, LSL #3]",
@@ -2512,6 +2655,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::RegScaledExtended(xreg(2), xreg(3), I64, ExtendOp::UXTW),
+                srcloc: None,
             },
             "415823F8",
             "str x1, [x2, w3, UXTW #3]",
@@ -2520,6 +2664,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::PreIndexed(writable_xreg(2), SImm9::maybe_from_i64(16).unwrap()),
+                srcloc: None,
             },
             "410C01F8",
             "str x1, [x2, #16]!",
@@ -2528,6 +2673,7 @@ mod test {
             Inst::Store64 {
                 rd: xreg(1),
                 mem: MemArg::PostIndexed(writable_xreg(2), SImm9::maybe_from_i64(16).unwrap()),
+                srcloc: None,
             },
             "410401F8",
             "str x1, [x2], #16",
@@ -3180,6 +3326,7 @@ mod test {
                 uses: Set::empty(),
                 defs: Set::empty(),
                 loc: SourceLoc::default(),
+                opcode: Opcode::Call,
             },
             "00000094",
             "bl 0",
@@ -3191,6 +3338,7 @@ mod test {
                 uses: Set::empty(),
                 defs: Set::empty(),
                 loc: SourceLoc::default(),
+                opcode: Opcode::CallIndirect,
             },
             "40013FD6",
             "blr x10",

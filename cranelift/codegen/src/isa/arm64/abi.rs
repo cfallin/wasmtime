@@ -36,7 +36,27 @@ struct ABISig {
     stack_arg_space: i64,
 }
 
+static BALDRDASH_SIG_REG: u8 = 10;
 static BALDRDASH_TLS_REG: u8 = 23;
+
+/// Try to fill a Baldrdash register, returning it if it was found.
+fn try_fill_baldrdash_reg(call_conv: isa::CallConv, param: &ir::AbiParam) -> Option<ABIArg> {
+    if call_conv.extends_baldrdash() {
+        match &param.purpose {
+            &ir::ArgumentPurpose::VMContext => {
+                // This is SpiderMonkey's `WasmTlsReg`.
+                Some(ABIArg::Reg(xreg(BALDRDASH_TLS_REG).to_real_reg(), ir::types::I64))
+            }
+            &ir::ArgumentPurpose::SignatureId => {
+                // This is SpiderMonkey's `WasmTableCallSigReg`.
+                Some(ABIArg::Reg(xreg(BALDRDASH_SIG_REG).to_real_reg(), ir::types::I64))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
 
 /// Process a list of parameters or return values and allocate them to X-regs,
 /// V-regs, and stack slots.
@@ -52,7 +72,9 @@ fn compute_arg_locs(call_conv: isa::CallConv, params: &[ir::AbiParam]) -> (Vec<A
     for param in params {
         // Validate "purpose".
         match &param.purpose {
-            &ir::ArgumentPurpose::VMContext | &ir::ArgumentPurpose::Normal => {}
+            &ir::ArgumentPurpose::VMContext
+            | &ir::ArgumentPurpose::Normal
+            | &ir::ArgumentPurpose::SignatureId => {}
             _ => panic!(
                 "Unsupported argument purpose {:?} in signature: {:?}",
                 param.purpose, params
@@ -60,11 +82,8 @@ fn compute_arg_locs(call_conv: isa::CallConv, params: &[ir::AbiParam]) -> (Vec<A
         }
 
         if in_int_reg(param.value_type) {
-            if param.purpose == ir::ArgumentPurpose::VMContext && call_conv.extends_baldrdash() {
-                ret.push(ABIArg::Reg(
-                    xreg(BALDRDASH_TLS_REG).to_real_reg(),
-                    param.value_type,
-                ));
+            if let Some(param) = try_fill_baldrdash_reg(call_conv, param) {
+                ret.push(param);
             } else if next_xreg < 8 {
                 ret.push(ABIArg::Reg(xreg(next_xreg).to_real_reg(), param.value_type));
                 next_xreg += 1;
@@ -190,9 +209,9 @@ fn load_stack(fp_offset: i64, into_reg: Writable<Reg>, ty: Type) -> Inst {
         | types::B32
         | types::I32
         | types::B64
-        | types::I64 => Inst::ULoad64 { rd: into_reg, mem },
-        types::F32 => Inst::FpuLoad32 { rd: into_reg, mem },
-        types::F64 => Inst::FpuLoad64 { rd: into_reg, mem },
+        | types::I64 => Inst::ULoad64 { rd: into_reg, mem, srcloc: None },
+        types::F32 => Inst::FpuLoad32 { rd: into_reg, mem, srcloc: None },
+        types::F64 => Inst::FpuLoad64 { rd: into_reg, mem, srcloc: None },
         _ => unimplemented!(),
     }
 }
@@ -209,18 +228,21 @@ fn store_stack(fp_offset: i64, from_reg: Reg, ty: Type) -> Inst {
         | types::B32
         | types::I32
         | types::B64
-        | types::I64 => Inst::Store64 { rd: from_reg, mem },
-        types::F32 => Inst::FpuStore32 { rd: from_reg, mem },
-        types::F64 => Inst::FpuStore64 { rd: from_reg, mem },
+        | types::I64 => Inst::Store64 { rd: from_reg, mem, srcloc: None },
+        types::F32 => Inst::FpuStore32 { rd: from_reg, mem, srcloc: None },
+        types::F64 => Inst::FpuStore64 { rd: from_reg, mem, srcloc: None },
         _ => unimplemented!(),
     }
 }
 
-fn is_callee_save(r: RealReg) -> bool {
+fn is_callee_save(call_conv: isa::CallConv, r: RealReg) -> bool {
     match r.get_class() {
         RegClass::I64 => {
             // x19 - x28 inclusive are callee-saves.
-            r.get_hw_encoding() >= 19 && r.get_hw_encoding() <= 28
+            r.get_hw_encoding() >= 19 && r.get_hw_encoding() <= 28 &&
+                // In the Baldrdash ABI, TLS is implicitly saved, so filter it out.
+                !(call_conv.extends_baldrdash()
+                    && r.get_hw_encoding() == BALDRDASH_TLS_REG as usize)
         }
         RegClass::V128 => {
             // v8 - v15 inclusive are callee-saves.
@@ -245,12 +267,13 @@ fn is_caller_save(r: RealReg) -> bool {
 }
 
 fn get_callee_saves(
+    call_conv: isa::CallConv,
     regs: Vec<Writable<RealReg>>,
 ) -> (Vec<Writable<RealReg>>, Vec<Writable<RealReg>>) {
     let mut int_saves = vec![];
     let mut vec_saves = vec![];
     for reg in regs.into_iter() {
-        if is_callee_save(reg.to_reg()) {
+        if is_callee_save(call_conv, reg.to_reg()) {
             match reg.to_reg().get_class() {
                 RegClass::I64 => int_saves.push(reg),
                 RegClass::V128 => vec_saves.push(reg),
@@ -447,7 +470,7 @@ impl ABIBody<Inst> for ARM64ABIBody {
         }
 
         // Save clobbered registers.
-        let (clobbered_int, clobbered_vec) = get_callee_saves(self.clobbered.to_vec());
+        let (clobbered_int, clobbered_vec) = get_callee_saves(self.call_conv, self.clobbered.to_vec());
         for reg_pair in clobbered_int.chunks(2) {
             let (r1, r2) = if reg_pair.len() == 2 {
                 // .to_reg().to_reg(): Writable<RealReg> --> RealReg --> Reg
@@ -481,6 +504,7 @@ impl ABIBody<Inst> for ARM64ABIBody {
             insts.push(Inst::FpuStore128 {
                 rd: reg.to_reg().to_reg(),
                 mem: MemArg::Unscaled(stack_reg(), SImm9::maybe_from_i64((i * 16) as i64).unwrap()),
+                srcloc: None,
             });
         }
 
@@ -492,12 +516,13 @@ impl ABIBody<Inst> for ARM64ABIBody {
         let mut insts = vec![];
 
         // Restore clobbered registers.
-        let (clobbered_int, clobbered_vec) = get_callee_saves(self.clobbered.to_vec());
+        let (clobbered_int, clobbered_vec) = get_callee_saves(self.call_conv, self.clobbered.to_vec());
 
         for (i, reg) in clobbered_vec.iter().enumerate() {
             insts.push(Inst::FpuLoad128 {
                 rd: Writable::from_reg(reg.to_reg().to_reg()),
                 mem: MemArg::Unscaled(stack_reg(), SImm9::maybe_from_i64((i * 16) as i64).unwrap()),
+                srcloc: None,
             });
         }
         let vec_save_bytes = clobbered_vec.len() * 16;
@@ -597,6 +622,7 @@ pub struct ARM64ABICall {
     defs: Set<Writable<Reg>>,
     dest: CallDest,
     loc: ir::SourceLoc,
+    opcode: ir::Opcode,
 }
 
 fn abisig_to_uses_and_defs(sig: &ABISig) -> (Set<Reg>, Set<Writable<Reg>>) {
@@ -636,12 +662,18 @@ impl ARM64ABICall {
             defs,
             dest: CallDest::ExtName(extname.clone()),
             loc,
+            opcode: ir::Opcode::Call,
         }
     }
 
     /// Create a callsite ABI object for a call to a function pointer with the
     /// given signature.
-    pub fn from_ptr(sig: &ir::Signature, ptr: Reg, loc: ir::SourceLoc) -> ARM64ABICall {
+    pub fn from_ptr(
+        sig: &ir::Signature,
+        ptr: Reg,
+        loc: ir::SourceLoc,
+        opcode: ir::Opcode,
+    ) -> ARM64ABICall {
         let sig = ABISig::from_func_sig(sig);
         let (uses, defs) = abisig_to_uses_and_defs(&sig);
         ARM64ABICall {
@@ -650,6 +682,7 @@ impl ARM64ABICall {
             defs,
             dest: CallDest::Reg(ptr),
             loc,
+            opcode,
         }
     }
 }
@@ -702,6 +735,7 @@ impl ABICall<Inst> for ARM64ABICall {
             &ABIArg::Stack(off, _) => Inst::Store64 {
                 rd: from_reg,
                 mem: MemArg::SPOffset(off),
+                srcloc: None,
             },
             _ => unimplemented!(),
         }
@@ -723,12 +757,14 @@ impl ABICall<Inst> for ARM64ABICall {
                 uses,
                 defs,
                 loc: self.loc,
+                opcode: self.opcode,
             }],
             &CallDest::Reg(reg) => vec![Inst::CallInd {
                 rn: reg,
                 uses,
                 defs,
                 loc: self.loc,
+                opcode: self.opcode,
             }],
         }
     }

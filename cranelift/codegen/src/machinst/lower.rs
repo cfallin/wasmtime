@@ -6,8 +6,8 @@ use crate::binemit::CodeSink;
 use crate::dce::has_side_effect;
 use crate::entity::SecondaryMap;
 use crate::ir::{
-    Block, ExternalName, Function, GlobalValueData, Inst, InstructionData, Opcode, Signature,
-    SourceLoc, Type, Value, ValueDef,
+    Block, ExternalName, Function, GlobalValueData, Inst, InstructionData, MemFlags, Opcode,
+    Signature, SourceLoc, Type, Value, ValueDef,
 };
 use crate::isa::registers::RegUnit;
 use crate::machinst::{
@@ -73,6 +73,8 @@ pub trait LowerCtx<I> {
     fn call_sig<'b>(&'b self, ir_inst: Inst) -> Option<&'b Signature>;
     /// Get the symbol name and offset for a symbol_value instruction.
     fn symbol_value<'b>(&'b self, ir_inst: Inst) -> Option<(&'b ExternalName, i64)>;
+    /// Returns the memory flags of a given memory access.
+    fn memflags(&self, ir_inst: Inst) -> Option<MemFlags>;
     /// Get the source location for a given instruction.
     fn srcloc(&self, ir_inst: Inst) -> SourceLoc;
 }
@@ -672,6 +674,17 @@ impl<'a, I: VCodeInst> LowerCtx<I> for Lower<'a, I> {
                     _ => None,
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// Returns the memory flags of a given memory access.
+    fn memflags(&self, ir_inst: Inst) -> Option<MemFlags> {
+        match &self.f.dfg[ir_inst] {
+            &InstructionData::Load { flags, .. }
+            | &InstructionData::LoadComplex { flags, .. }
+            | &InstructionData::Store { flags, .. }
+            | &InstructionData::StoreComplex { flags, .. } => Some(flags),
             _ => None,
         }
     }

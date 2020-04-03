@@ -289,57 +289,68 @@ pub enum Inst {
     ULoad8 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 8-bit load.
     SLoad8 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// An unsigned (zero-extending) 16-bit load.
     ULoad16 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 16-bit load.
     SLoad16 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// An unsigned (zero-extending) 32-bit load.
     ULoad32 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A signed (sign-extending) 32-bit load.
     SLoad32 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A 64-bit load.
     ULoad64 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
 
     /// An 8-bit store.
     Store8 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A 16-bit store.
     Store16 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A 32-bit store.
     Store32 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     /// A 64-bit store.
     Store64 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
 
     /// A store of a pair of registers.
@@ -458,26 +469,32 @@ pub enum Inst {
     FpuLoad32 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     FpuStore32 {
         rd: Reg,
+        srcloc: Option<SourceLoc>,
         mem: MemArg,
     },
     FpuLoad64 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     FpuStore64 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     FpuLoad128 {
         rd: Writable<Reg>,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
     FpuStore128 {
         rd: Reg,
         mem: MemArg,
+        srcloc: Option<SourceLoc>,
     },
 
     LoadFpuConst32 {
@@ -566,6 +583,7 @@ pub enum Inst {
         uses: Set<Reg>,
         defs: Set<Writable<Reg>>,
         loc: SourceLoc,
+        opcode: Opcode,
     },
     /// A machine indirect-call instruction.
     CallInd {
@@ -573,6 +591,7 @@ pub enum Inst {
         uses: Set<Reg>,
         defs: Set<Writable<Reg>>,
         loc: SourceLoc,
+        opcode: Opcode,
     },
 
     // ---- branches (exactly one must appear at end of BB) ----
@@ -1210,49 +1229,96 @@ fn arm64_map_regs(
             rd: map_wr(d, rd),
             rn: map(u, rn),
         },
-        &mut Inst::ULoad8 { rd, ref mem } => Inst::ULoad8 {
+        &mut Inst::ULoad8 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::ULoad8 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::SLoad8 { rd, ref mem } => Inst::SLoad8 {
+        &mut Inst::SLoad8 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::SLoad8 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::ULoad16 { rd, ref mem } => Inst::ULoad16 {
+        &mut Inst::ULoad16 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::ULoad16 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::SLoad16 { rd, ref mem } => Inst::SLoad16 {
+        &mut Inst::SLoad16 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::SLoad16 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::ULoad32 { rd, ref mem } => Inst::ULoad32 {
+        &mut Inst::ULoad32 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::ULoad32 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::SLoad32 { rd, ref mem } => Inst::SLoad32 {
+        &mut Inst::SLoad32 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::SLoad32 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::ULoad64 { rd, ref mem } => Inst::ULoad64 {
+        &mut Inst::ULoad64 { rd, ref mem, srcloc } => Inst::ULoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::Store8 { rd, ref mem } => Inst::Store8 {
+        &mut Inst::Store8 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::Store8 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::Store16 { rd, ref mem } => Inst::Store16 {
+        &mut Inst::Store16 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::Store16 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::Store32 { rd, ref mem } => Inst::Store32 {
+        &mut Inst::Store32 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::Store32 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc,
         },
-        &mut Inst::Store64 { rd, ref mem } => Inst::Store64 {
+        &mut Inst::Store64 { rd, ref mem, srcloc } => Inst::Store64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
         &mut Inst::StoreP64 { rt, rt2, ref mem } => Inst::StoreP64 {
             rt: map(u, rt),
@@ -1330,29 +1396,35 @@ fn arm64_map_regs(
             rn: map(u, rn),
             rm: map(u, rm),
         },
-        &mut Inst::FpuLoad32 { rd, ref mem } => Inst::FpuLoad32 {
+        &mut Inst::FpuLoad32 { rd, ref mem, srcloc } => Inst::FpuLoad32 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::FpuLoad64 { rd, ref mem } => Inst::FpuLoad64 {
+        &mut Inst::FpuLoad64 { rd, ref mem, srcloc } => Inst::FpuLoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::FpuLoad128 { rd, ref mem } => Inst::FpuLoad64 {
+        &mut Inst::FpuLoad128 { rd, ref mem, srcloc } => Inst::FpuLoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::FpuStore32 { rd, ref mem } => Inst::FpuStore32 {
+        &mut Inst::FpuStore32 { rd, ref mem, srcloc } => Inst::FpuStore32 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::FpuStore64 { rd, ref mem } => Inst::FpuStore64 {
+        &mut Inst::FpuStore64 { rd, ref mem, srcloc } => Inst::FpuStore64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
-        &mut Inst::FpuStore128 { rd, ref mem } => Inst::FpuStore64 {
+        &mut Inst::FpuStore128 { rd, ref mem, srcloc } => Inst::FpuStore64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
+            srcloc
         },
         &mut Inst::LoadFpuConst32 { rd, const_data } => Inst::LoadFpuConst32 {
             rd: map_wr(d, rd),
@@ -1428,6 +1500,7 @@ fn arm64_map_regs(
             ref defs,
             ref dest,
             loc,
+            opcode,
         } => {
             let uses = uses.map(|r| map(u, *r));
             let defs = defs.map(|r| map_wr(d, *r));
@@ -1437,6 +1510,7 @@ fn arm64_map_regs(
                 uses,
                 defs,
                 loc,
+                opcode,
             }
         }
         &mut Inst::Ret {} => Inst::Ret {},
@@ -1446,6 +1520,7 @@ fn arm64_map_regs(
             ref defs,
             rn,
             loc,
+            opcode,
         } => {
             let uses = uses.map(|r| map(u, *r));
             let defs = defs.map(|r| map_wr(d, *r));
@@ -1454,6 +1529,7 @@ fn arm64_map_regs(
                 defs,
                 rn: map(u, rn),
                 loc,
+                opcode,
             }
         }
         &mut Inst::CondBr {
@@ -1877,13 +1953,42 @@ impl ShowWithRRU for Inst {
                 let rn = show_ireg_sized(rn, mb_rru, is32);
                 format!("{} {}, {}", op, rd, rn)
             }
-            &Inst::ULoad8 { rd, ref mem }
-            | &Inst::SLoad8 { rd, ref mem }
-            | &Inst::ULoad16 { rd, ref mem }
-            | &Inst::SLoad16 { rd, ref mem }
-            | &Inst::ULoad32 { rd, ref mem }
-            | &Inst::SLoad32 { rd, ref mem }
-            | &Inst::ULoad64 { rd, ref mem, .. } => {
+            &Inst::ULoad8 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::SLoad8 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::ULoad16 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::SLoad16 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::ULoad32 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::SLoad32 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::ULoad64 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+                ..
+            } => {
                 let (mem_str, mem) = mem_finalize_for_show(mem, mb_rru);
 
                 let is_unscaled = match &mem {
@@ -1911,10 +2016,27 @@ impl ShowWithRRU for Inst {
                 let mem = mem.show_rru(mb_rru);
                 format!("{}{} {}, {}", mem_str, op, rd, mem)
             }
-            &Inst::Store8 { rd, ref mem }
-            | &Inst::Store16 { rd, ref mem }
-            | &Inst::Store32 { rd, ref mem }
-            | &Inst::Store64 { rd, ref mem, .. } => {
+            &Inst::Store8 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::Store16 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::Store32 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+            }
+            | &Inst::Store64 {
+                rd,
+                ref mem,
+                srcloc: _srcloc,
+                ..
+            } => {
                 let (mem_str, mem) = mem_finalize_for_show(mem, mb_rru);
 
                 let is_unscaled = match &mem {

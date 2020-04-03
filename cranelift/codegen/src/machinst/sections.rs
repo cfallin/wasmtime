@@ -4,7 +4,7 @@
 //! caller at the end of compilation.
 
 use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc, RelocSink, StackmapSink, TrapSink};
-use crate::ir::{ExternalName, SourceLoc, TrapCode};
+use crate::ir::{ExternalName, Opcode, SourceLoc, TrapCode};
 
 use alloc::vec::Vec;
 
@@ -137,6 +137,9 @@ pub trait MachSectionOutput {
     /// Add a trap record at the current offset.
     fn add_trap(&mut self, loc: SourceLoc, code: TrapCode);
 
+    /// Add a call return address record at the current offset.
+    fn add_call_site(&mut self, loc: SourceLoc, opcode: Opcode);
+
     /// Align up to the given alignment.
     fn align_to(&mut self, align_to: CodeOffset) {
         assert!(align_to.is_power_of_two());
@@ -162,6 +165,8 @@ pub struct MachSection {
     pub relocs: Vec<MachReloc>,
     /// Any trap records referring to this section.
     pub traps: Vec<MachTrap>,
+    /// Any call site record referring to this section.
+    pub call_sites: Vec<MachCallSite>,
 }
 
 impl MachSection {
@@ -173,6 +178,7 @@ impl MachSection {
             data: vec![],
             relocs: vec![],
             traps: vec![],
+            call_sites: vec![],
         }
     }
 
@@ -184,6 +190,7 @@ impl MachSection {
 
         let mut next_reloc = 0;
         let mut next_trap = 0;
+        let mut next_call_site = 0;
         for (idx, byte) in self.data.iter().enumerate() {
             if next_reloc < self.relocs.len() {
                 let reloc = &self.relocs[next_reloc];
@@ -197,6 +204,13 @@ impl MachSection {
                 if trap.offset == idx as CodeOffset {
                     sink.trap(trap.code, trap.srcloc);
                     next_trap += 1;
+                }
+            }
+            if next_call_site < self.call_sites.len() {
+                let call_site = &self.call_sites[next_call_site];
+                if call_site.ret_addr == idx as CodeOffset {
+                    sink.add_call_site(call_site.opcode, call_site.srcloc);
+                    next_call_site += 1;
                 }
             }
             sink.put1(*byte);
@@ -239,6 +253,14 @@ impl MachSectionOutput for MachSection {
             offset: self.data.len() as CodeOffset,
             srcloc,
             code,
+        });
+    }
+
+    fn add_call_site(&mut self, srcloc: SourceLoc, opcode: Opcode) {
+        self.call_sites.push(MachCallSite {
+            ret_addr: self.data.len() as CodeOffset,
+            srcloc,
+            opcode,
         });
     }
 }
@@ -288,6 +310,8 @@ impl MachSectionOutput for MachSectionSize {
     fn add_reloc(&mut self, _: SourceLoc, _: Reloc, _: &ExternalName, _: Addend) {}
 
     fn add_trap(&mut self, _: SourceLoc, _: TrapCode) {}
+
+    fn add_call_site(&mut self, _: SourceLoc, _: Opcode) {}
 }
 
 /// A relocation resulting from a compilation.
@@ -314,4 +338,14 @@ pub struct MachTrap {
     pub srcloc: SourceLoc,
     /// The trap code.
     pub code: TrapCode,
+}
+
+/// A call site record resulting from a compilation.
+pub struct MachCallSite {
+    /// The offset of the call's return address, *relative to the containing section*.
+    pub ret_addr: CodeOffset,
+    /// The original source location.
+    pub srcloc: SourceLoc,
+    /// The call's opcode.
+    pub opcode: Opcode,
 }
