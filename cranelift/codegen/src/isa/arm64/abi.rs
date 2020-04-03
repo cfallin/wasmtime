@@ -34,10 +34,35 @@ struct ABISig {
     args: Vec<ABIArg>,
     rets: Vec<ABIArg>,
     stack_arg_space: i64,
+    call_conv: isa::CallConv,
 }
 
+// Spidermonkey specific ABI convention.
+
+/// This is SpiderMonkey's `WasmTableCallSigReg`.
 static BALDRDASH_SIG_REG: u8 = 10;
+
+/// This is SpiderMonkey's `WasmTlsReg`.
 static BALDRDASH_TLS_REG: u8 = 23;
+
+// These two lists represent the registers the JIT may *not* use at any point in generated code.
+//
+// So these are callee-preserved from the JIT's point of view, and every register not in this list
+// has to be caller-preserved by definition.
+//
+// Keep these lists in sync with the NonAllocatableMask set in Spidermonkey's
+// Architecture-arm64.cpp.
+
+static BALDRDASH_JIT_CALLEE_SAVED_GPR: &[usize] = &[
+    16, /* ip1 = scratch */
+    17, /* ip2 = scratch */
+    18, /* platform-specific TLS */
+    // There should be 28, the pseudo stack pointer in this list, however the wasm stubs trash it
+    // gladly right now.
+    30, /* FP */
+    31, /* SP */
+];
+static BALDRDASH_JIT_CALLEE_SAVED_FPU: &[usize] = &[31]; // v31 == d31 in Spidermonkey.
 
 /// Try to fill a Baldrdash register, returning it if it was found.
 fn try_fill_baldrdash_reg(call_conv: isa::CallConv, param: &ir::AbiParam) -> Option<ABIArg> {
@@ -137,6 +162,7 @@ impl ABISig {
             args,
             rets,
             stack_arg_space,
+            call_conv: sig.call_conv,
         }
     }
 }
@@ -236,31 +262,34 @@ fn store_stack(fp_offset: i64, from_reg: Reg, ty: Type) -> Inst {
 }
 
 fn is_callee_save(call_conv: isa::CallConv, r: RealReg) -> bool {
+    if call_conv.extends_baldrdash() {
+        match r.get_class() {
+            RegClass::I64 => {
+                let enc = r.get_hw_encoding();
+                if BALDRDASH_JIT_CALLEE_SAVED_GPR.iter().any(|&cs| cs == enc) {
+                    return true;
+                }
+                // Otherwise, fall through to preserve native ABI registers.
+            }
+            RegClass::V128 => {
+                let enc = r.get_hw_encoding();
+                if BALDRDASH_JIT_CALLEE_SAVED_FPU.iter().any(|&cs| cs == enc) {
+                    return true;
+                }
+                // Otherwise, fall through to preserve native ABI registers.
+            }
+            _ => unimplemented!("baldrdash callee saved on non-i64 reg classes"),
+        };
+    }
+
     match r.get_class() {
         RegClass::I64 => {
             // x19 - x28 inclusive are callee-saves.
-            r.get_hw_encoding() >= 19 && r.get_hw_encoding() <= 28 &&
-                // In the Baldrdash ABI, TLS is implicitly saved, so filter it out.
-                !(call_conv.extends_baldrdash()
-                    && r.get_hw_encoding() == BALDRDASH_TLS_REG as usize)
+            r.get_hw_encoding() >= 19 && r.get_hw_encoding() <= 28
         }
         RegClass::V128 => {
             // v8 - v15 inclusive are callee-saves.
             r.get_hw_encoding() >= 8 && r.get_hw_encoding() <= 15
-        }
-        _ => panic!("Unexpected RegClass"),
-    }
-}
-
-fn is_caller_save(r: RealReg) -> bool {
-    match r.get_class() {
-        RegClass::I64 => {
-            // x0 - x17 inclusive are caller-saves.
-            r.get_hw_encoding() <= 17
-        }
-        RegClass::V128 => {
-            // v0 - v7 inclusive and v16 - v31 inclusive are caller-saves.
-            r.get_hw_encoding() <= 7 || (r.get_hw_encoding() >= 16 && r.get_hw_encoding() <= 31)
         }
         _ => panic!("Unexpected RegClass"),
     }
@@ -284,17 +313,51 @@ fn get_callee_saves(
     (int_saves, vec_saves)
 }
 
-fn get_caller_saves_set() -> Set<Writable<Reg>> {
+fn is_caller_save(call_conv: isa::CallConv, r: RealReg) -> bool {
+    if call_conv.extends_baldrdash() {
+        match r.get_class() {
+            RegClass::I64 => {
+                let enc = r.get_hw_encoding();
+                if !BALDRDASH_JIT_CALLEE_SAVED_GPR.iter().any(|&cs| cs == enc) {
+                    return true;
+                }
+                // Otherwise, fall through to preserve native's ABI caller-saved.
+            }
+            RegClass::V128 => {
+                let enc = r.get_hw_encoding();
+                if !BALDRDASH_JIT_CALLEE_SAVED_FPU.iter().any(|&cs| cs == enc) {
+                    return true;
+                }
+                // Otherwise, fall through to preserve native's ABI caller-saved.
+            }
+            _ => unimplemented!("baldrdash callee saved on non-i64 reg classes"),
+        };
+    }
+
+    match r.get_class() {
+        RegClass::I64 => {
+            // x0 - x17 inclusive are caller-saves.
+            r.get_hw_encoding() <= 17
+        }
+        RegClass::V128 => {
+            // v0 - v7 inclusive and v16 - v31 inclusive are caller-saves.
+            r.get_hw_encoding() <= 7 || (r.get_hw_encoding() >= 16 && r.get_hw_encoding() <= 31)
+        }
+        _ => panic!("Unexpected RegClass"),
+    }
+}
+
+fn get_caller_saves_set(call_conv: isa::CallConv) -> Set<Writable<Reg>> {
     let mut set = Set::empty();
     for i in 0..29 {
         let x = writable_xreg(i);
-        if is_caller_save(x.to_reg().to_real_reg()) {
+        if is_caller_save(call_conv, x.to_reg().to_real_reg()) {
             set.insert(x);
         }
     }
     for i in 0..32 {
         let v = writable_vreg(i);
-        if is_caller_save(v.to_reg().to_real_reg()) {
+        if is_caller_save(call_conv, v.to_reg().to_real_reg()) {
             set.insert(v);
         }
     }
@@ -478,6 +541,7 @@ impl ABIBody<Inst> for ARM64ABIBody {
             } else {
                 (reg_pair[0].to_reg().to_reg(), zero_reg())
             };
+
             debug_assert!(r1.get_class() == RegClass::I64);
             debug_assert!(r2.get_class() == RegClass::I64);
 
@@ -545,8 +609,8 @@ impl ABIBody<Inst> for ARM64ABIBody {
                 (reg_pair[0].map(|r| r.to_reg()), writable_zero_reg())
             };
 
-            assert!(r1.to_reg().get_class() == RegClass::I64);
-            assert!(r2.to_reg().get_class() == RegClass::I64);
+            debug_assert!(r1.to_reg().get_class() == RegClass::I64);
+            debug_assert!(r2.to_reg().get_class() == RegClass::I64);
 
             // ldp r1, r2, [sp], #16
             insts.push(Inst::LoadP64 {
@@ -636,7 +700,7 @@ fn abisig_to_uses_and_defs(sig: &ABISig) -> (Set<Reg>, Set<Writable<Reg>>) {
     }
 
     // Compute defs: all retval regs, and all caller-save (clobbered) regs.
-    let mut defs = get_caller_saves_set();
+    let mut defs = get_caller_saves_set(sig.call_conv);
     for ret in &sig.rets {
         match ret {
             &ABIArg::Reg(reg, _) => defs.insert(Writable::from_reg(reg.to_reg())),
