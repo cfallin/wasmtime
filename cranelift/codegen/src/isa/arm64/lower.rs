@@ -1711,18 +1711,18 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
                     let extname = ctx.call_target(insn).unwrap();
                     let extname = extname.clone();
                     // HACK: get the function address with an Abs8 reloc in the constant pool.
-                    let tmp = ctx.tmp(RegClass::I64, I64);
-                    ctx.emit(Inst::LoadExtName {
-                        rd: tmp,
-                        name: extname,
-                        srcloc: loc,
-                        offset: 0,
-                    });
+                    //let tmp = ctx.tmp(RegClass::I64, I64);
+                    //ctx.emit(Inst::LoadExtName {
+                    //rd: tmp,
+                    //name: extname,
+                    //srcloc: loc,
+                    //offset: 0,
+                    //});
                     let sig = ctx.call_sig(insn).unwrap();
                     assert!(inputs.len() == sig.params.len());
                     assert!(outputs.len() == sig.returns.len());
-                    // (ARM64ABICall::from_func(sig, extname), &inputs[..])
-                    (ARM64ABICall::from_ptr(sig, tmp.to_reg(), loc), &inputs[..])
+                    (ARM64ABICall::from_func(sig, &extname, loc), &inputs[..])
+                    //(ARM64ABICall::from_ptr(sig, tmp.to_reg(), loc), &inputs[..])
                 }
                 Opcode::CallIndirect => {
                     let ptr = input_to_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
