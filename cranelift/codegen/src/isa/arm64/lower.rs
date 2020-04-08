@@ -1371,7 +1371,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             };
 
             ctx.emit(match ty_bits(elem_ty) {
-                1 | 8 => Inst::Store8 { rd, mem, srcloc},
+                1 | 8 => Inst::Store8 { rd, mem, srcloc },
                 16 => Inst::Store16 { rd, mem, srcloc },
                 32 => Inst::Store32 { rd, mem, srcloc },
                 64 => Inst::Store64 { rd, mem, srcloc },

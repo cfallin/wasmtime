@@ -70,11 +70,17 @@ fn try_fill_baldrdash_reg(call_conv: isa::CallConv, param: &ir::AbiParam) -> Opt
         match &param.purpose {
             &ir::ArgumentPurpose::VMContext => {
                 // This is SpiderMonkey's `WasmTlsReg`.
-                Some(ABIArg::Reg(xreg(BALDRDASH_TLS_REG).to_real_reg(), ir::types::I64))
+                Some(ABIArg::Reg(
+                    xreg(BALDRDASH_TLS_REG).to_real_reg(),
+                    ir::types::I64,
+                ))
             }
             &ir::ArgumentPurpose::SignatureId => {
                 // This is SpiderMonkey's `WasmTableCallSigReg`.
-                Some(ABIArg::Reg(xreg(BALDRDASH_SIG_REG).to_real_reg(), ir::types::I64))
+                Some(ABIArg::Reg(
+                    xreg(BALDRDASH_SIG_REG).to_real_reg(),
+                    ir::types::I64,
+                ))
             }
             _ => None,
         }
@@ -235,9 +241,21 @@ fn load_stack(fp_offset: i64, into_reg: Writable<Reg>, ty: Type) -> Inst {
         | types::B32
         | types::I32
         | types::B64
-        | types::I64 => Inst::ULoad64 { rd: into_reg, mem, srcloc: None },
-        types::F32 => Inst::FpuLoad32 { rd: into_reg, mem, srcloc: None },
-        types::F64 => Inst::FpuLoad64 { rd: into_reg, mem, srcloc: None },
+        | types::I64 => Inst::ULoad64 {
+            rd: into_reg,
+            mem,
+            srcloc: None,
+        },
+        types::F32 => Inst::FpuLoad32 {
+            rd: into_reg,
+            mem,
+            srcloc: None,
+        },
+        types::F64 => Inst::FpuLoad64 {
+            rd: into_reg,
+            mem,
+            srcloc: None,
+        },
         _ => unimplemented!(),
     }
 }
@@ -254,9 +272,21 @@ fn store_stack(fp_offset: i64, from_reg: Reg, ty: Type) -> Inst {
         | types::B32
         | types::I32
         | types::B64
-        | types::I64 => Inst::Store64 { rd: from_reg, mem, srcloc: None },
-        types::F32 => Inst::FpuStore32 { rd: from_reg, mem, srcloc: None },
-        types::F64 => Inst::FpuStore64 { rd: from_reg, mem, srcloc: None },
+        | types::I64 => Inst::Store64 {
+            rd: from_reg,
+            mem,
+            srcloc: None,
+        },
+        types::F32 => Inst::FpuStore32 {
+            rd: from_reg,
+            mem,
+            srcloc: None,
+        },
+        types::F64 => Inst::FpuStore64 {
+            rd: from_reg,
+            mem,
+            srcloc: None,
+        },
         _ => unimplemented!(),
     }
 }
@@ -533,7 +563,8 @@ impl ABIBody<Inst> for ARM64ABIBody {
         }
 
         // Save clobbered registers.
-        let (clobbered_int, clobbered_vec) = get_callee_saves(self.call_conv, self.clobbered.to_vec());
+        let (clobbered_int, clobbered_vec) =
+            get_callee_saves(self.call_conv, self.clobbered.to_vec());
         for reg_pair in clobbered_int.chunks(2) {
             let (r1, r2) = if reg_pair.len() == 2 {
                 // .to_reg().to_reg(): Writable<RealReg> --> RealReg --> Reg
@@ -580,7 +611,8 @@ impl ABIBody<Inst> for ARM64ABIBody {
         let mut insts = vec![];
 
         // Restore clobbered registers.
-        let (clobbered_int, clobbered_vec) = get_callee_saves(self.call_conv, self.clobbered.to_vec());
+        let (clobbered_int, clobbered_vec) =
+            get_callee_saves(self.call_conv, self.clobbered.to_vec());
 
         for (i, reg) in clobbered_vec.iter().enumerate() {
             insts.push(Inst::FpuLoad128 {

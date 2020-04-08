@@ -2453,7 +2453,7 @@ mod test {
                     xreg(2),
                     UImm12Scaled::maybe_from_i64(32760, I64).unwrap(),
                 ),
-                is_reload: None,
+                srcloc: None,
             },
             "41FC7FF9",
             "ldr x1, [x2, #32760]",
@@ -3791,6 +3791,7 @@ mod test {
             Inst::FpuLoad32 {
                 rd: writable_vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), F32),
+                srcloc: None,
             },
             "107969BC",
             "ldr s16, [x8, x9, LSL #2]",
@@ -3800,6 +3801,7 @@ mod test {
             Inst::FpuLoad64 {
                 rd: writable_vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), F64),
+                srcloc: None,
             },
             "107969FC",
             "ldr d16, [x8, x9, LSL #3]",
@@ -3809,6 +3811,7 @@ mod test {
             Inst::FpuLoad128 {
                 rd: writable_vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), I128),
+                srcloc: None,
             },
             "1079E93C",
             "ldr q16, [x8, x9, LSL #4]",
@@ -3818,6 +3821,7 @@ mod test {
             Inst::FpuLoad32 {
                 rd: writable_vreg(16),
                 mem: MemArg::Label(MemLabel::PCRel(8)),
+                srcloc: None,
             },
             "5000001C",
             "ldr s16, pc+8",
@@ -3827,6 +3831,7 @@ mod test {
             Inst::FpuLoad64 {
                 rd: writable_vreg(16),
                 mem: MemArg::Label(MemLabel::PCRel(8)),
+                srcloc: None,
             },
             "5000005C",
             "ldr d16, pc+8",
@@ -3836,6 +3841,7 @@ mod test {
             Inst::FpuLoad128 {
                 rd: writable_vreg(16),
                 mem: MemArg::Label(MemLabel::PCRel(8)),
+                srcloc: None,
             },
             "5000009C",
             "ldr q16, pc+8",
@@ -3845,6 +3851,7 @@ mod test {
             Inst::FpuStore32 {
                 rd: vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), F32),
+                srcloc: None,
             },
             "107929BC",
             "str s16, [x8, x9, LSL #2]",
@@ -3854,6 +3861,7 @@ mod test {
             Inst::FpuStore64 {
                 rd: vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), F64),
+                srcloc: None,
             },
             "107929FC",
             "str d16, [x8, x9, LSL #3]",
@@ -3863,6 +3871,7 @@ mod test {
             Inst::FpuStore128 {
                 rd: vreg(16),
                 mem: MemArg::RegScaled(xreg(8), xreg(9), I128),
+                srcloc: None,
             },
             "1079A93C",
             "str q16, [x8, x9, LSL #4]",

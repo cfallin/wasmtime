@@ -643,7 +643,9 @@ pub enum Inst {
 
     /// An instruction guaranteed to always be undefined and to trigger an illegal instruction at
     /// runtime.
-    Udf { trap_info: (SourceLoc, TrapCode) },
+    Udf {
+        trap_info: (SourceLoc, TrapCode),
+    },
 
     /// Load the address (using a PC-relative offset) of a MemLabel, using the
     /// `ADR` instruction.
@@ -1283,10 +1285,14 @@ fn arm64_map_regs(
             mem: map_mem(u, mem),
             srcloc,
         },
-        &mut Inst::ULoad64 { rd, ref mem, srcloc } => Inst::ULoad64 {
+        &mut Inst::ULoad64 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::ULoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
         &mut Inst::Store8 {
             rd,
@@ -1315,10 +1321,14 @@ fn arm64_map_regs(
             mem: map_mem(u, mem),
             srcloc,
         },
-        &mut Inst::Store64 { rd, ref mem, srcloc } => Inst::Store64 {
+        &mut Inst::Store64 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::Store64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
         &mut Inst::StoreP64 { rt, rt2, ref mem } => Inst::StoreP64 {
             rt: map(u, rt),
@@ -1396,35 +1406,59 @@ fn arm64_map_regs(
             rn: map(u, rn),
             rm: map(u, rm),
         },
-        &mut Inst::FpuLoad32 { rd, ref mem, srcloc } => Inst::FpuLoad32 {
+        &mut Inst::FpuLoad32 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuLoad32 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
-        &mut Inst::FpuLoad64 { rd, ref mem, srcloc } => Inst::FpuLoad64 {
+        &mut Inst::FpuLoad64 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuLoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
-        &mut Inst::FpuLoad128 { rd, ref mem, srcloc } => Inst::FpuLoad64 {
+        &mut Inst::FpuLoad128 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuLoad64 {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
-        &mut Inst::FpuStore32 { rd, ref mem, srcloc } => Inst::FpuStore32 {
+        &mut Inst::FpuStore32 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuStore32 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
-        &mut Inst::FpuStore64 { rd, ref mem, srcloc } => Inst::FpuStore64 {
+        &mut Inst::FpuStore64 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuStore64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
-        &mut Inst::FpuStore128 { rd, ref mem, srcloc } => Inst::FpuStore64 {
+        &mut Inst::FpuStore128 {
+            rd,
+            ref mem,
+            srcloc,
+        } => Inst::FpuStore64 {
             rd: map(u, rd),
             mem: map_mem(u, mem),
-            srcloc
+            srcloc,
         },
         &mut Inst::LoadFpuConst32 { rd, const_data } => Inst::LoadFpuConst32 {
             rd: map_wr(d, rd),
