@@ -110,6 +110,7 @@ fn compute_arg_locs(call_conv: isa::CallConv, params: &[ir::AbiParam]) -> (Vec<A
     let mut next_vreg = 0;
     let mut next_stack: u64 = 0;
     let mut ret = vec![];
+
     for param in params {
         // Validate "purpose".
         match &param.purpose {
@@ -438,9 +439,15 @@ impl ABIBody<Inst> for ARM64ABIBody {
     }
 
     fn gen_copy_arg_to_reg(&self, idx: usize, into_reg: Writable<Reg>) -> Inst {
+        let frame_size = if self.call_conv.extends_baldrdash() {
+            // TODO retrieve this from the Flags (baldrdash_prologue_words * 8).
+            32 // frame pointer + WasmTlsReg + return address + padding.
+        } else {
+            16 // frame pointer + return address.
+        };
         match &self.sig.args[idx] {
             &ABIArg::Reg(r, ty) => Inst::gen_move(into_reg, r.to_reg(), ty),
-            &ABIArg::Stack(off, ty) => load_stack(off + 16, into_reg, ty),
+            &ABIArg::Stack(off, ty) => load_stack(off + frame_size, into_reg, ty),
             _ => unimplemented!(),
         }
     }
