@@ -63,7 +63,7 @@ static BALDRDASH_JIT_CALLEE_SAVED_GPR: &[bool] = &[
     /* 24 = */ false, false, false, false,
     // There should be 28, the pseudo stack pointer in this list, however the wasm stubs trash it
     // gladly right now.
-    /* 28 = */ false, false, true /* x30 = FP */, true /* x31 = SP */
+    /* 28 = */ false, false, true /* x30 = FP */, false /* x31 = SP */
 ];
 
 #[rustfmt::skip]
