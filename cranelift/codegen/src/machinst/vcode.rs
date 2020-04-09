@@ -24,7 +24,7 @@ use crate::settings;
 
 use regalloc::Function as RegallocFunction;
 use regalloc::Set as RegallocSet;
-use regalloc::{BlockIx, InstIx, Range, RegAllocResult, RegClass, RegUsageCollector};
+use regalloc::{BlockIx, InstIx, Range, RegAllocResult, RegClass, RegUsageCollector, TypedIxVec};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -665,74 +665,90 @@ impl<I: VCodeInst> fmt::Debug for VCode<I> {
     }
 }
 
-// Pretty-printing with `RealRegUniverse` context.
-impl<I: VCodeInst + ShowWithRRU> ShowWithRRU for VCode<I> {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
-        use crate::alloc::string::ToString;
-        use std::fmt::Write;
+/// Pretty-printing with `RealRegUniverse` context and with optional
+/// RA-supplied block level annotations.
+pub fn show_vcode<I>(
+    vcode: &VCode<I>,
+    mb_rru: Option<&RealRegUniverse>,
+    mb_anns: &Option<TypedIxVec<BlockIx, Vec<String>>>,
+) -> String
+where
+    I: VCodeInst + ShowWithRRU,
+{
+    use crate::alloc::string::ToString;
+    use std::fmt::Write;
 
-        // Calculate an order in which to display the blocks.  This is the same
-        // as final_block_order, but also includes blocks which are in the
-        // representation but not in final_block_order.
-        let mut display_order = Vec::<usize>::new();
-        // First display blocks in |final_block_order|
-        for bix in &self.final_block_order {
-            assert!((*bix as usize) < self.num_blocks());
-            display_order.push(*bix as usize);
-        }
-        // Now also take care of those not listed in |final_block_order|.
-        // This is quadratic, but it's also debug-only code.
-        for bix in 0..self.num_blocks() {
-            if display_order.contains(&bix) {
-                continue;
-            }
-            display_order.push(bix);
-        }
-
-        let mut s = String::new();
-        s = s + &format!("VCode_ShowWithRRU {{{{");
-        s = s + &"\n".to_string();
-        s = s + &format!("  Entry block: {}", self.entry);
-        s = s + &"\n".to_string();
-        s = s + &format!("  Final block order: {:?}", self.final_block_order);
-        s = s + &"\n".to_string();
-
-        for i in 0..self.num_blocks() {
-            let block = display_order[i];
-
-            let omitted =
-                (if !self.final_block_order.is_empty() && i >= self.final_block_order.len() {
-                    "** OMITTED **"
-                } else {
-                    ""
-                })
-                .to_string();
-
-            s = s + &format!("Block {}: {}", block, omitted);
-            s = s + &"\n".to_string();
-            if let Some(bb) = self.bindex_to_bb(block as BlockIndex) {
-                s = s + &format!("  (original IR block: {})\n", bb);
-            }
-            for succ in self.succs(block as BlockIndex) {
-                s = s + &format!("  (successor: Block {})", succ);
-                s = s + &"\n".to_string();
-            }
-            let (start, end) = self.block_ranges[block];
-            s = s + &format!("  (instruction range: {} .. {})", start, end);
-            s = s + &"\n".to_string();
-            for inst in start..end {
-                s = s + &format!(
-                    "  Inst {}:   {}",
-                    inst,
-                    self.insts[inst as usize].show_rru(mb_rru)
-                );
-                s = s + &"\n".to_string();
-            }
-        }
-
-        s = s + &format!("}}}}");
-        s = s + &"\n".to_string();
-
-        s
+    // Calculate an order in which to display the blocks.  This is the same
+    // as final_block_order, but also includes blocks which are in the
+    // representation but not in final_block_order.
+    let mut display_order = Vec::<usize>::new();
+    // First display blocks in |final_block_order|
+    for bix in &vcode.final_block_order {
+        assert!((*bix as usize) < vcode.num_blocks());
+        display_order.push(*bix as usize);
     }
+    // Now also take care of those not listed in |final_block_order|.
+    // This is quadratic, but it's also debug-only code.
+    for bix in 0..vcode.num_blocks() {
+        if display_order.contains(&bix) {
+            continue;
+        }
+        display_order.push(bix);
+    }
+
+    let mut s = String::new();
+    s = s + &format!("VCode_ShowWithRRU {{{{");
+    s = s + &"\n".to_string();
+    s = s + &format!("  Entry block: {}", vcode.entry);
+    s = s + &"\n".to_string();
+    s = s + &format!("  Final block order: {:?}", vcode.final_block_order);
+    s = s + &"\n".to_string();
+
+    for i in 0..vcode.num_blocks() {
+        let block = display_order[i];
+
+        let empty: Vec<String> = vec![];
+        let ann_strs = if let Some(anns_vec) = mb_anns {
+            &anns_vec[BlockIx::new(block as u32)]
+        } else {
+            &empty
+        };
+
+        let omitted = (if !vcode.final_block_order.is_empty() && i >= vcode.final_block_order.len()
+        {
+            "** OMITTED **"
+        } else {
+            ""
+        })
+        .to_string();
+
+        s = s + &format!("Block {}: {}", block, omitted);
+        s = s + &"\n".to_string();
+        if let Some(bb) = vcode.bindex_to_bb(block as BlockIndex) {
+            s = s + &format!("  (original IR block: {})\n", bb);
+        }
+        for succ in vcode.succs(block as BlockIndex) {
+            s = s + &format!("  (successor: Block {})", succ);
+            s = s + &"\n".to_string();
+        }
+        let (start, end) = vcode.block_ranges[block];
+        s = s + &format!("  (instruction range: {} .. {})", start, end);
+        s = s + &"\n".to_string();
+        for ann_str in ann_strs {
+            s = s + &format!("  ({})", ann_str) + &"\n".to_string();
+        }
+        for inst in start..end {
+            s = s + &format!(
+                "  Inst {}:   {}",
+                inst,
+                vcode.insts[inst as usize].show_rru(mb_rru)
+            );
+            s = s + &"\n".to_string();
+        }
+    }
+
+    s = s + &format!("}}}}");
+    s = s + &"\n".to_string();
+
+    s
 }

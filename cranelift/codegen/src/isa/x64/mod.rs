@@ -5,9 +5,8 @@
 use crate::ir::Function;
 use crate::isa::Builder as IsaBuilder;
 use crate::isa::TargetIsa;
-use crate::machinst::{
-    compile, MachBackend, MachCompileResult, ShowWithRRU, TargetIsaAdapter, VCode,
-};
+use crate::machinst::vcode::show_vcode;
+use crate::machinst::{compile, MachBackend, MachCompileResult, TargetIsaAdapter, VCode};
 use crate::result::CodegenResult;
 
 use super::super::settings as shared_settings;
@@ -64,7 +63,7 @@ impl MachBackend for X64Backend {
         let frame_size = vcode.frame_size();
 
         let disasm = if want_disasm {
-            Some(vcode.show_rru(Some(&create_reg_universe())))
+            Some(show_vcode(&vcode, Some(&create_reg_universe()), &None))
         } else {
             None
         };

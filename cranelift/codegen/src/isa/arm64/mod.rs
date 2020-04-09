@@ -7,6 +7,7 @@ use crate::binemit::{CodeSink, MemoryCodeSink, RelocSink, StackmapSink, TrapSink
 use crate::ir::Function;
 use crate::isa::Builder as IsaBuilder;
 use crate::isa::TargetIsa;
+use crate::machinst::vcode::show_vcode;
 use crate::machinst::{
     compile, MachBackend, MachCompileResult, ShowWithRRU, TargetIsaAdapter, VCode,
 };
@@ -67,7 +68,7 @@ impl MachBackend for Arm64Backend {
         let frame_size = vcode.frame_size();
 
         let disasm = if want_disasm {
-            Some(vcode.show_rru(Some(&create_reg_universe())))
+            Some(show_vcode(&vcode, Some(&create_reg_universe()), &None))
         } else {
             None
         };

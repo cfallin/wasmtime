@@ -5,7 +5,7 @@ use crate::machinst::*;
 use crate::settings;
 use crate::timing;
 
-use log::debug;
+use log::{debug, log_enabled, Level};
 use regalloc::{allocate_registers, RegAllocAlgorithm};
 use std::env;
 
@@ -25,7 +25,10 @@ where
 
     let universe = &B::MInst::reg_universe();
 
-    debug!("vcode from lowering: \n{}", vcode.show_rru(Some(universe)));
+    debug!(
+        "vcode from lowering: \n{}",
+        show_vcode(&vcode, Some(universe), &None)
+    );
 
     // Perform register allocation.
     let algorithm = match env::var("REGALLOC") {
@@ -40,20 +43,34 @@ where
         Err(_) => RegAllocAlgorithm::Backtracking,
     };
 
+    let want_annotations = log_enabled!(Level::Debug);
+
     let result = {
         let _tt = timing::regalloc();
         allocate_registers(
-            &mut vcode, algorithm, universe, /*request_block_annotations=*/ false,
+            &mut vcode,
+            algorithm,
+            universe,
+            /*request_block_annotations=*/ want_annotations,
         )
         .map_err(|err| {
             debug!(
                 "Register allocation error for vcode\n{}\nError: {:?}",
-                vcode.show_rru(Some(universe)),
+                show_vcode(&vcode, Some(universe), &None),
                 err
             );
             err
         })
         .expect("register allocation")
+    };
+
+    // Clone the anns, if we asked for any, since
+    // |replace_insns_from_regalloc| will take ownership of the entire
+    // allocation result.  This is zero-cost in non-debug-logging configs.
+    let mb_annotations = if want_annotations {
+        result.block_annotations.clone()
+    } else {
+        None
     };
 
     // Reorder vcode into final order and copy out final instruction sequence
@@ -67,7 +84,7 @@ where
 
     debug!(
         "vcode after regalloc: final version:\n{}",
-        vcode.show_rru(Some(universe))
+        show_vcode(&vcode, Some(universe), &mb_annotations)
     );
 
     //println!("{}\n", vcode.show_rru(Some(&B::MInst::reg_universe())));
