@@ -121,8 +121,7 @@ mod tests {
                 .unwrap_err()
                 .downcast::<Trap>()?;
             assert!(
-                trap.message()
-                    .starts_with("wasm trap: out of bounds"),
+                trap.message().starts_with("wasm trap: out of bounds"),
                 "bad trap message: {:?}",
                 trap.message()
             );
@@ -147,9 +146,7 @@ mod tests {
                 .call(&[])
                 .unwrap_err()
                 .downcast::<Trap>()?;
-            assert!(trap
-                .message()
-                .starts_with("wasm trap: out of bounds"));
+            assert!(trap.message().starts_with("wasm trap: out of bounds"));
         }
         Ok(())
     }

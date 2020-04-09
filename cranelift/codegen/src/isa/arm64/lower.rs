@@ -2214,10 +2214,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
                 rm: rtmp1.to_reg(),
             });
             if in_bits == 32 {
-                ctx.emit(Inst::FpuCmp32 {
-                    rn: rn,
-                    rm: rn,
-                });
+                ctx.emit(Inst::FpuCmp32 { rn: rn, rm: rn });
                 ctx.emit(Inst::FpuCSel32 {
                     rd: rtmp2,
                     rn: rtmp1.to_reg(),
@@ -2225,10 +2222,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
                     cond: Cond::Ne,
                 });
             } else {
-                ctx.emit(Inst::FpuCmp64 {
-                    rn: rn,
-                    rm: rn,
-                });
+                ctx.emit(Inst::FpuCmp64 { rn: rn, rm: rn });
                 ctx.emit(Inst::FpuCSel64 {
                     rd: rtmp2,
                     rn: rtmp1.to_reg(),
