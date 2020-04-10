@@ -7,7 +7,7 @@ use crate::binemit::{CodeOffset, CodeSink, Reloc};
 use crate::ir::constant::ConstantData;
 use crate::ir::types::*;
 use crate::ir::{Opcode, TrapCode, Type};
-use crate::isa::arm64::inst::*;
+use crate::isa::arm64::{abi, inst::regs::PINNED_REG, inst::*};
 use crate::machinst::*;
 use cranelift_entity::EntityRef;
 
@@ -1281,6 +1281,17 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 inst.emit(sink);
                 sink.add_reloc(srcloc, Reloc::Abs8, name, offset);
                 sink.put8(0);
+            }
+            &Inst::GetPinnedReg { rd } => {
+                // Encoded as ORR rd, rm, zero.
+                let rm = xreg(PINNED_REG);
+                sink.put4(enc_arith_rrr(0b10101010_000, 0b000_000, rd, zero_reg(), rm));
+            }
+            &Inst::SetPinnedReg { rd } => {
+                // Encoded as ORR rd, rm, zero.
+                let rm = rd;
+                let rd = Writable::from_reg(xreg(PINNED_REG));
+                sink.put4(enc_arith_rrr(0b10101010_000, 0b000_000, rd, zero_reg(), rm));
             }
         }
     }
@@ -4049,7 +4060,7 @@ mod test {
             "frintn d23, d24",
         ));
 
-        let rru = create_reg_universe();
+        let rru = create_reg_universe(CallConv::Fast);
         for (insn, expected_encoding, expected_printing) in insns {
             println!(
                 "ARM64: {:?}, {}, {}",

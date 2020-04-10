@@ -6,7 +6,7 @@
 use crate::binemit::{CodeSink, MemoryCodeSink, RelocSink, StackmapSink, TrapSink};
 use crate::ir::Function;
 use crate::isa::Builder as IsaBuilder;
-use crate::isa::TargetIsa;
+use crate::isa::{CallConv, TargetIsa};
 use crate::machinst::vcode::show_vcode;
 use crate::machinst::{
     compile, MachBackend, MachCompileResult, ShowWithRRU, TargetIsaAdapter, VCode,
@@ -62,13 +62,19 @@ impl MachBackend for Arm64Backend {
         func: Function,
         want_disasm: bool,
     ) -> CodegenResult<MachCompileResult> {
+        let call_conv = func.signature.call_conv;
+
         let flags = self.flags();
         let vcode = self.compile_vcode(func, flags);
         let sections = vcode.emit();
         let frame_size = vcode.frame_size();
 
         let disasm = if want_disasm {
-            Some(show_vcode(&vcode, Some(&create_reg_universe()), &None))
+            Some(show_vcode(
+                &vcode,
+                Some(&create_reg_universe(call_conv)),
+                &None,
+            ))
         } else {
             None
         };
@@ -92,8 +98,8 @@ impl MachBackend for Arm64Backend {
         &self.flags
     }
 
-    fn reg_universe(&self) -> RealRegUniverse {
-        create_reg_universe()
+    fn reg_universe(&self, call_conv: CallConv) -> RealRegUniverse {
+        create_reg_universe(call_conv)
     }
 }
 
