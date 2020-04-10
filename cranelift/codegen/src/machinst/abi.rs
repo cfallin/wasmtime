@@ -1,7 +1,7 @@
 //! ABI definitions.
 
 use crate::ir;
-use crate::ir::StackSlot;
+use crate::ir::{ArgumentExtension, StackSlot};
 use crate::machinst::*;
 use crate::settings;
 
@@ -31,7 +31,7 @@ pub trait ABIBody<I: VCodeInst> {
 
     /// Generate an instruction which copies a source register to a return
     /// value slot.
-    fn gen_copy_reg_to_retval(&self, idx: usize, from_reg: Reg) -> I;
+    fn gen_copy_reg_to_retval(&self, idx: usize, from_reg: Reg, ext: ArgumentExtension) -> Vec<I>;
 
     /// Generate a return instruction.
     fn gen_ret(&self) -> I;

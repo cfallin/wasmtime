@@ -5,10 +5,9 @@
 use crate::ir;
 use crate::ir::types;
 use crate::ir::types::*;
-use crate::ir::StackSlot;
+use crate::ir::{ArgumentExtension, StackSlot};
 use crate::isa;
-use crate::isa::arm64::inst::*;
-use crate::isa::arm64::*;
+use crate::isa::arm64::{self, inst::*, *};
 use crate::machinst::*;
 use crate::settings;
 
@@ -452,12 +451,69 @@ impl ABIBody<Inst> for ARM64ABIBody {
         }
     }
 
-    fn gen_copy_reg_to_retval(&self, idx: usize, from_reg: Reg) -> Inst {
+    fn gen_copy_reg_to_retval(
+        &self,
+        idx: usize,
+        from_reg: Reg,
+        ext: ArgumentExtension,
+    ) -> Vec<Inst> {
+        let mut ret = Vec::new();
         match &self.sig.rets[idx] {
-            &ABIArg::Reg(r, ty) => Inst::gen_move(Writable::from_reg(r.to_reg()), from_reg, ty),
-            &ABIArg::Stack(off, ty) => store_stack(off + 16, from_reg, ty),
+            &ABIArg::Reg(r, ty) => {
+                let from_bits = arm64::lower::ty_bits(ty) as u8;
+                let dest_reg = Writable::from_reg(r.to_reg());
+                match (ext, from_bits) {
+                    (ArgumentExtension::Uext, n) if n < 64 => {
+                        ret.push(Inst::Extend {
+                            rd: dest_reg,
+                            rn: from_reg,
+                            signed: false,
+                            from_bits,
+                            to_bits: 64,
+                        });
+                    }
+                    (ArgumentExtension::Sext, n) if n < 64 => {
+                        ret.push(Inst::Extend {
+                            rd: dest_reg,
+                            rn: from_reg,
+                            signed: true,
+                            from_bits,
+                            to_bits: 64,
+                        });
+                    }
+                    _ => ret.push(Inst::gen_move(dest_reg, from_reg, ty)),
+                };
+            }
+            &ABIArg::Stack(off, ty) => {
+                let from_bits = arm64::lower::ty_bits(ty) as u8;
+                // Trash the from_reg; it should be its last use.
+                let dest_reg = Writable::from_reg(from_reg);
+                match (ext, from_bits) {
+                    (ArgumentExtension::Uext, n) if n < 64 => {
+                        ret.push(Inst::Extend {
+                            rd: dest_reg,
+                            rn: from_reg,
+                            signed: false,
+                            from_bits,
+                            to_bits: 64,
+                        });
+                    }
+                    (ArgumentExtension::Sext, n) if n < 64 => {
+                        ret.push(Inst::Extend {
+                            rd: dest_reg,
+                            rn: from_reg,
+                            signed: true,
+                            from_bits,
+                            to_bits: 64,
+                        });
+                    }
+                    _ => ret.push(Inst::gen_move(dest_reg, from_reg, ty)),
+                };
+                ret.push(store_stack(off + 16, from_reg, ty))
+            }
             _ => unimplemented!(),
         }
+        ret
     }
 
     fn gen_ret(&self) -> Inst {

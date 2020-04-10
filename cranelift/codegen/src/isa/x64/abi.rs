@@ -5,8 +5,7 @@
 use crate::ir;
 use crate::ir::types;
 use crate::ir::types::*;
-use crate::ir::StackSlot;
-use crate::ir::Type;
+use crate::ir::{ArgumentExtension, StackSlot, Type};
 use crate::isa;
 use crate::isa::x64::inst::*;
 use crate::machinst::*;
@@ -225,17 +224,32 @@ impl ABIBody<Inst> for X64ABIBody {
         }
     }
 
-    fn gen_copy_reg_to_retval(&self, idx: usize, from_reg: Reg) -> Inst {
+    fn gen_copy_reg_to_retval(
+        &self,
+        idx: usize,
+        from_reg: Reg,
+        ext: ArgumentExtension,
+    ) -> Vec<Inst> {
+        match ext {
+            ArgumentExtension::None => {}
+            _ => unimplemented!(
+                "unimplemented argument extension {:?} is required for baldrdash",
+                ext
+            ),
+        };
+
+        let mut ret = Vec::new();
         match &self.rets[idx] {
             ABIRet::Reg(to_reg) => {
                 if to_reg.get_class() == RegClass::I32 || to_reg.get_class() == RegClass::I64 {
-                    return i_Mov_R_R(
+                    ret.push(i_Mov_R_R(
                         /*is64=*/ true,
                         from_reg,
                         Writable::<Reg>::from_reg(to_reg.to_reg()),
-                    );
+                    ))
+                } else {
+                    unimplemented!("moving from vreg to non-int return value");
                 }
-                unimplemented!("moving from vreg to non-int return value");
             }
 
             ABIRet::Mem => {
@@ -243,6 +257,8 @@ impl ABIBody<Inst> for X64ABIBody {
                 panic!("moving from vreg to memory return value");
             }
         }
+
+        ret
     }
 
     fn gen_ret(&self) -> Inst {

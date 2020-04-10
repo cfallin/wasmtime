@@ -6,8 +6,8 @@ use crate::binemit::CodeSink;
 use crate::dce::has_side_effect;
 use crate::entity::SecondaryMap;
 use crate::ir::{
-    Block, ExternalName, Function, GlobalValueData, Inst, InstructionData, MemFlags, Opcode,
-    Signature, SourceLoc, Type, Value, ValueDef,
+    ArgumentExtension, Block, ExternalName, Function, GlobalValueData, Inst, InstructionData,
+    MemFlags, Opcode, Signature, SourceLoc, Type, Value, ValueDef,
 };
 use crate::isa::registers::RegUnit;
 use crate::machinst::{
@@ -103,22 +103,22 @@ pub trait LowerBackend {
 /// Machine-independent lowering driver / machine-instruction container. Maintains a correspondence
 /// from original Inst to MachInsts.
 pub struct Lower<'a, I: VCodeInst> {
-    // The function to lower.
+    /// The function to lower.
     f: &'a Function,
 
-    // Lowered machine instructions.
+    /// Lowered machine instructions.
     vcode: VCodeBuilder<I>,
 
-    // Number of active uses (minus `dec_use()` calls by backend) of each instruction.
+    /// Number of active uses (minus `dec_use()` calls by backend) of each instruction.
     num_uses: SecondaryMap<Inst, u32>,
 
-    // Mapping from `Value` (SSA value in IR) to virtual register.
+    /// Mapping from `Value` (SSA value in IR) to virtual register.
     value_regs: SecondaryMap<Value, Reg>,
 
-    // Return-value vregs.
-    retval_regs: Vec<Reg>,
+    /// Return-value vregs.
+    retval_regs: Vec<(Reg, ArgumentExtension)>,
 
-    // Next virtual register number to allocate.
+    /// Next virtual register number to allocate.
     next_vreg: u32,
 }
 
@@ -190,7 +190,7 @@ impl<'a, I: VCodeInst> Lower<'a, I> {
             next_vreg += 1;
             let regclass = I::rc_for_type(ret.value_type);
             let vreg = Reg::new_virtual(regclass, v);
-            retval_regs.push(vreg);
+            retval_regs.push((vreg, ret.extension));
             vcode.set_vreg_type(vreg.as_virtual_reg().unwrap(), ret.value_type);
         }
 
@@ -220,9 +220,11 @@ impl<'a, I: VCodeInst> Lower<'a, I> {
     }
 
     fn gen_retval_setup(&mut self, gen_ret_inst: GenerateReturn) {
-        for (i, reg) in self.retval_regs.iter().enumerate() {
-            let insn = self.vcode.abi().gen_copy_reg_to_retval(i, *reg);
-            self.vcode.push(insn);
+        for (i, (reg, ext)) in self.retval_regs.iter().enumerate() {
+            let insns = self.vcode.abi().gen_copy_reg_to_retval(i, *reg, *ext);
+            for insn in insns {
+                self.vcode.push(insn);
+            }
         }
         let inst = match gen_ret_inst {
             GenerateReturn::Yes => self.vcode.abi().gen_ret(),
@@ -631,7 +633,7 @@ impl<'a, I: VCodeInst> LowerCtx<I> for Lower<'a, I> {
 
     /// Get the register for a return value.
     fn retval(&self, idx: usize) -> Writable<Reg> {
-        Writable::from_reg(self.retval_regs[idx])
+        Writable::from_reg(self.retval_regs[idx].0)
     }
 
     /// Get the target for a call instruction, as an `ExternalName`.

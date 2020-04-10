@@ -204,9 +204,7 @@ fn output_to_const<C: LowerCtx<Inst>>(ctx: &mut C, out: InsnOutput) -> Option<u6
                     let imm: i64 = imm.into();
                     Some(imm as u64)
                 }
-                &InstructionData::UnaryBool { opcode: _, imm } => {
-                    Some(u64::from(imm))
-                }
+                &InstructionData::UnaryBool { opcode: _, imm } => Some(u64::from(imm)),
                 &InstructionData::UnaryIeee32 { opcode: _, imm } => Some(imm.bits() as u64),
                 &InstructionData::UnaryIeee64 { opcode: _, imm } => Some(imm.bits()),
                 _ => None,
@@ -2323,7 +2321,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
 
 //=============================================================================
 // Helpers for instruction lowering.
-fn ty_bits(ty: Type) -> usize {
+pub fn ty_bits(ty: Type) -> usize {
     match ty {
         B1 => 1,
         B8 | I8 => 8,
