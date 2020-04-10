@@ -1259,15 +1259,38 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
         }
 
         Opcode::Bitrev | Opcode::Clz | Opcode::Cls => {
+            let is_rev = op == Opcode::Bitrev;
             let rd = output_to_reg(ctx, outputs[0]);
-            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
+            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
             let op = BitOp::from((op, ty.unwrap()));
             ctx.emit(Inst::BitRR { rd, rn, op });
+
+            if is_rev {
+                // Reversing an n-bit value (n < 64) with a 64-bit bitrev instruction will place
+                // the reversed result in the highest n bits, so we need to shift them down into
+                // place.
+                let ty = ctx.input_ty(insn, 0);
+                let right_shift = match ty {
+                    I8 => Some(56),
+                    I16 => Some(48),
+                    I32 => Some(32),
+                    I64 => None,
+                    _ => panic!("Unsupported type for Bitrev"),
+                };
+                if let Some(s) = right_shift {
+                    ctx.emit(Inst::AluRRImmShift {
+                        alu_op: ALUOp::Lsr64,
+                        rd,
+                        rn: rd.to_reg(),
+                        immshift: ImmShift::maybe_from_u64(s).unwrap(),
+                    });
+                }
+            }
         }
 
         Opcode::Ctz => {
             let rd = output_to_reg(ctx, outputs[0]);
-            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
+            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
             let op = BitOp::from((Opcode::Bitrev, ty.unwrap()));
             ctx.emit(Inst::BitRR { rd, rn, op });
             let op = BitOp::from((Opcode::Clz, ty.unwrap()));
@@ -1290,7 +1313,7 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             //   x >> 56
             let ty = ty.unwrap();
             let rd = output_to_reg(ctx, outputs[0]);
-            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
+            let rn = input_to_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
             let tmp = ctx.tmp(RegClass::I64, I64);
 
             // If this is a 32-bit Popcnt, use Lsr32 to clear the top 32 bits of the register, then
