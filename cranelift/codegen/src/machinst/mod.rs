@@ -103,20 +103,22 @@ use crate::entity::SecondaryMap;
 use crate::ir::condcodes::IntCC;
 use crate::ir::ValueLocations;
 use crate::ir::{DataFlowGraph, Function, Inst, Opcode, Type, Value};
-use crate::isa::RegUnit;
+use crate::isa::{CallConv, RegUnit};
 use crate::result::CodegenResult;
 use crate::settings::Flags;
 use crate::HashMap;
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::iter::Sum;
+use std::hash::Hash;
+use std::string::String;
+
 use regalloc::Map as RegallocMap;
 use regalloc::RegUsageCollector;
 use regalloc::{RealReg, RealRegUniverse, Reg, RegClass, SpillSlot, VirtualReg, Writable};
 use smallvec::SmallVec;
-use std::hash::Hash;
-use std::string::String;
 use target_lexicon::Triple;
 
 pub mod lower;
@@ -197,7 +199,7 @@ pub trait MachInst: Clone + Debug {
     fn with_block_offsets(&mut self, my_offset: CodeOffset, targets: &[CodeOffset]);
 
     /// Get the register universe for this backend.
-    fn reg_universe() -> RealRegUniverse;
+    fn reg_universe(call_conv: CallConv) -> RealRegUniverse;
 
     /// Align a basic block offset (from start of function).  By default, no
     /// alignment occurs.
@@ -272,7 +274,7 @@ pub trait MachBackend {
     fn name(&self) -> &'static str;
 
     /// Return the register universe for this backend.
-    fn reg_universe(&self) -> RealRegUniverse;
+    fn reg_universe(&self, call_conv: CallConv) -> RealRegUniverse;
 
     /// Machine-specific condcode info needed by TargetIsa.
     fn unsigned_add_overflow_condition(&self) -> IntCC {

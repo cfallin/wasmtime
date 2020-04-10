@@ -10,7 +10,7 @@ use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc};
 use crate::ir::types::{B1, B128, B16, B32, B64, B8, F32, F64, I128, I16, I32, I64, I8};
 use crate::ir::{ConstantOffset, ExternalName, Function, JumpTable, SourceLoc, TrapCode};
 use crate::ir::{FuncRef, GlobalValue, Type, Value};
-use crate::isa::TargetIsa;
+use crate::isa::{CallConv, TargetIsa};
 use crate::machinst::*;
 
 use regalloc::Map as RegallocMap;
@@ -287,7 +287,7 @@ pub fn reg_RBP() -> Reg {
 }
 
 /// Create the register universe for X64.
-pub fn create_reg_universe() -> RealRegUniverse {
+pub fn create_reg_universe(_call_conv: CallConv) -> RealRegUniverse {
     let mut regs = Vec::<(RealReg, String)>::new();
     let mut allocable_by_class = [None; NUM_REG_CLASSES];
 
@@ -2563,8 +2563,8 @@ impl MachInst for Inst {
         }
     }
 
-    fn reg_universe() -> RealRegUniverse {
-        create_reg_universe()
+    fn reg_universe(call_conv: CallConv) -> RealRegUniverse {
+        create_reg_universe(call_conv)
     }
 }
 
@@ -4687,7 +4687,7 @@ fn test_x64_insn_encoding_and_printing() {
 
     // ========================================================
     // Actually run the tests!
-    let rru = create_reg_universe();
+    let rru = create_reg_universe(CallConv::Fast);
     for (insn, expected_encoding, expected_printing) in insns {
         println!("     {}", insn.show_rru(Some(&rru)));
         // Check the printed text is as expected.

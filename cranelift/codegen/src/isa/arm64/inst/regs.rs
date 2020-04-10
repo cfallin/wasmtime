@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::isa::{arm64::abi, CallConv};
 use crate::machinst::*;
 
 use regalloc::{
@@ -13,6 +14,11 @@ use std::string::{String, ToString};
 
 //=============================================================================
 // Registers, the Universe thereof, and printing
+
+/// The pinned register on this architecture.
+/// It must be the same as Spidermonkey's HeapReg, as found in this file.
+/// https://searchfox.org/mozilla-central/source/js/src/jit/arm64/Assembler-arm64.h#103
+pub const PINNED_REG: u8 = 21;
 
 #[rustfmt::skip]
 const XREG_INDICES: [u8; 31] = [
@@ -26,8 +32,12 @@ const XREG_INDICES: [u8; 31] = [
     47, 48,
     // X18
     60,
-    // X19 - X28
-    49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+    // X19, X20
+    49, 50,
+    // X21, put aside because it's the pinned register.
+    58,
+    // X22, X28
+    51, 52, 53, 54, 55, 56, 57,
     // X29
     61,
     // X30
@@ -135,14 +145,13 @@ pub fn writable_spilltmp_reg() -> Writable<Reg> {
 }
 
 /// Create the register universe for ARM64.
-pub fn create_reg_universe() -> RealRegUniverse {
+pub fn create_reg_universe(call_conv: CallConv) -> RealRegUniverse {
     let mut regs = vec![];
     let mut allocable_by_class = [None; NUM_REG_CLASSES];
 
-    // Numbering Scheme: we put V-regs first, then X-regs. The X-regs
-    // exclude several registers: x18 (globally reserved for platform-specific
-    // purposes), x29 (frame pointer), x30 (link register), x31 (stack pointer
-    // or zero register, depending on context).
+    // Numbering Scheme: we put V-regs first, then X-regs. The X-regs exclude several registers:
+    // x18 (globally reserved for platform-specific purposes), x29 (frame pointer), x30 (link
+    // register), x31 (stack pointer or zero register, depending on context).
 
     let v_reg_base = 0u8; // in contiguous real-register index space
     let v_reg_count = 32;
@@ -163,9 +172,14 @@ pub fn create_reg_universe() -> RealRegUniverse {
 
     let x_reg_base = 32u8; // in contiguous real-register index space
     let mut x_reg_count = 0;
+
+    // TODO this should be "do we use the pinned register", but we don't have access to
+    // settings/flags down here.
+    let uses_pinned_reg = call_conv.extends_baldrdash();
+
     for i in 0u8..32u8 {
         // See above for excluded registers.
-        if i == 15 || i == 18 || i == 29 || i == 30 || i == 31 {
+        if i == 15 || i == 18 || i == 29 || i == 30 || i == 31 || i == PINNED_REG {
             continue;
         }
         let reg = Reg::new_real(
@@ -192,13 +206,24 @@ pub fn create_reg_universe() -> RealRegUniverse {
     });
 
     // Other regs, not available to the allocator.
-    let allocable = regs.len();
+    let allocable = if uses_pinned_reg {
+        // The pinned register is not allocatable in this case, so record the length before adding
+        // it.
+        let len = regs.len();
+        regs.push((xreg(PINNED_REG).to_real_reg(), "x21/pinned_reg".to_string()));
+        len
+    } else {
+        regs.push((xreg(PINNED_REG).to_real_reg(), "x21".to_string()));
+        regs.len()
+    };
+
     regs.push((xreg(15).to_real_reg(), "x15".to_string()));
     regs.push((xreg(18).to_real_reg(), "x18".to_string()));
     regs.push((fp_reg().to_real_reg(), "fp".to_string()));
     regs.push((link_reg().to_real_reg(), "lr".to_string()));
     regs.push((zero_reg().to_real_reg(), "xzr".to_string()));
     regs.push((stack_reg().to_real_reg(), "sp".to_string()));
+
     // FIXME JRS 2020Feb06: unfortunately this pushes the number of real regs
     // to 65, which is potentially inconvenient from a compiler performance
     // standpoint.  We could possibly drop back to 64 by "losing" a vector

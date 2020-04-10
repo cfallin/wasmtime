@@ -20,10 +20,12 @@ pub fn compile<B: LowerBackend>(
 where
     B::MInst: ShowWithRRU,
 {
+    let call_conv = f.signature.call_conv;
+
     // This lowers the CL IR.
     let mut vcode = Lower::new(f, abi).lower(b);
 
-    let universe = &B::MInst::reg_universe();
+    let universe = &B::MInst::reg_universe(call_conv);
 
     debug!(
         "vcode from lowering: \n{}",
