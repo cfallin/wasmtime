@@ -1948,8 +1948,8 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             ctx.emit(Inst::GetPinnedReg { rd });
         }
         Opcode::SetPinnedReg => {
-            let rd = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
-            ctx.emit(Inst::SetPinnedReg { rd });
+            let rm = input_to_reg(ctx, inputs[0], NarrowValueMode::None);
+            ctx.emit(Inst::SetPinnedReg { rm });
         }
 
         Opcode::Spill

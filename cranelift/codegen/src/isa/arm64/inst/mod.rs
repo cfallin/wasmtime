@@ -696,7 +696,7 @@ pub enum Inst {
 
     /// Writes the value of the given source register to the pinned register.
     SetPinnedReg {
-        rd: Reg,
+        rm: Reg,
     },
 }
 
@@ -1083,8 +1083,8 @@ fn arm64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         &Inst::GetPinnedReg { rd } => {
             collector.add_def(rd);
         }
-        &Inst::SetPinnedReg { rd } => {
-            collector.add_use(rd);
+        &Inst::SetPinnedReg { rm } => {
+            collector.add_use(rm);
         }
     }
 }
@@ -1633,7 +1633,7 @@ fn arm64_map_regs(
             srcloc,
         },
         &mut Inst::GetPinnedReg { rd } => Inst::GetPinnedReg { rd: map_wr(d, rd) },
-        &mut Inst::SetPinnedReg { rd } => Inst::SetPinnedReg { rd: map(u, rd) },
+        &mut Inst::SetPinnedReg { rm } => Inst::SetPinnedReg { rm: map(u, rm) },
     };
     *inst = newval;
 }
@@ -2533,9 +2533,9 @@ impl ShowWithRRU for Inst {
                 let rd = rd.show_rru(mb_rru);
                 format!("get_pinned_reg {}", rd)
             }
-            &Inst::SetPinnedReg { rd } => {
-                let rd = rd.show_rru(mb_rru);
-                format!("set_pinned_reg {}", rd)
+            &Inst::SetPinnedReg { rm } => {
+                let rm = rm.show_rru(mb_rru);
+                format!("set_pinned_reg {}", rm)
             }
         }
     }

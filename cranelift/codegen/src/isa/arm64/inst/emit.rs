@@ -1287,9 +1287,8 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 let rm = xreg(PINNED_REG);
                 sink.put4(enc_arith_rrr(0b10101010_000, 0b000_000, rd, zero_reg(), rm));
             }
-            &Inst::SetPinnedReg { rd } => {
+            &Inst::SetPinnedReg { rm } => {
                 // Encoded as ORR rd, rm, zero.
-                let rm = rd;
                 let rd = Writable::from_reg(xreg(PINNED_REG));
                 sink.put4(enc_arith_rrr(0b10101010_000, 0b000_000, rd, zero_reg(), rm));
             }
