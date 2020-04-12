@@ -577,8 +577,9 @@ impl RelocSink for ObjectRelocSink {
                     32,
                 )
             }
+            Reloc::Arm64Call => (RelocationKind::Elf(object::elf::R_AARCH64_CALL26), RelocationEncoding::Generic, 32),
             // FIXME
-            _ => unimplemented!(),
+            _ => unimplemented!("{:?}", reloc),
         };
         self.relocs.push(RelocRecord {
             offset,
