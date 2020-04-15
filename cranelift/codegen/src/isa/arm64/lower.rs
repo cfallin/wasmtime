@@ -1330,11 +1330,14 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             //   x >> 56
             let ty = ty.unwrap();
             let rd = output_to_reg(ctx, outputs[0]);
+            /* re-enable this when we do the right thing below:
             let narrow_mode = match ty {
                 I8 | I16 | I32 => NarrowValueMode::ZeroExtend32,
                 I64 => NarrowValueMode::ZeroExtend64,
                 _ => panic!("Unsupported input type for Popcnt"),
             };
+            */
+            let narrow_mode = NarrowValueMode::ZeroExtend64;
             let rn = input_to_reg(ctx, inputs[0], narrow_mode);
             let tmp = ctx.tmp(RegClass::I64, I64);
 
