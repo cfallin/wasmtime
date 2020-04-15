@@ -19,6 +19,7 @@ use regalloc::{
 };
 
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 
 /// Memory label/reference finalization: convert a MemLabel to a PC-relative
 /// offset, possibly emitting relocation(s) as necessary.
@@ -1291,6 +1292,37 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                 // Encoded as ORR rd, rm, zero.
                 let rd = Writable::from_reg(xreg(PINNED_REG));
                 sink.put4(enc_arith_rrr(0b10101010_000, 0b000_000, rd, zero_reg(), rm));
+            }
+
+            &Inst::LoadAddr { rd, ref mem } => {
+                match *mem {
+                    MemArg::FPOffset(fp_off) => {
+                        let alu_op = if fp_off < 0 { ALUOp::Sub64 } else { ALUOp::Add64 };
+                        if let Some(imm12) = Imm12::maybe_from_u64(u64::try_from(fp_off.abs()).unwrap()) {
+                            let inst = Inst::AluRRImm12 {
+                                alu_op,
+                                rd,
+                                imm12,
+                                rn: fp_reg(),
+                            };
+                            inst.emit(sink);
+                        } else {
+                            let tmp = writable_spilltmp_reg();
+                            let const_insts = Inst::load_constant(tmp, u64::try_from(fp_off.abs()).unwrap());
+                            for inst in const_insts {
+                                inst.emit(sink);
+                            }
+                            let inst = Inst::AluRRR {
+                                alu_op,
+                                rd,
+                                rn: tmp.to_reg(),
+                                rm: fp_reg(),
+                            };
+                            inst.emit(sink);
+                        }
+                    }
+                    _ => unimplemented!("{:?}", mem),
+                }
             }
         }
     }

@@ -279,6 +279,10 @@ impl ABIBody<Inst> for X64ABIBody {
         self.clobbered = clobbered;
     }
 
+    fn stackslot_addr(&self, _slot: StackSlot, _offset: u32, _into_reg: Writable<Reg>) -> Inst {
+        unimplemented!()
+    }
+
     fn load_stackslot(
         &self,
         _slot: StackSlot,
