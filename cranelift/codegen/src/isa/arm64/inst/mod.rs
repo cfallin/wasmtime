@@ -698,6 +698,12 @@ pub enum Inst {
     SetPinnedReg {
         rm: Reg,
     },
+
+    /// Load address referenced by `mem` into `rd`.
+    LoadAddr {
+        rd: Writable<Reg>,
+        mem: MemArg,
+    },
 }
 
 fn count_clear_half_words(mut value: u64) -> usize {
@@ -1085,6 +1091,9 @@ fn arm64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         }
         &Inst::SetPinnedReg { rm } => {
             collector.add_use(rm);
+        }
+        &Inst::LoadAddr { rd, mem: _ } => {
+            collector.add_def(rd);
         }
     }
 }
@@ -1634,6 +1643,10 @@ fn arm64_map_regs(
         },
         &mut Inst::GetPinnedReg { rd } => Inst::GetPinnedReg { rd: map_wr(d, rd) },
         &mut Inst::SetPinnedReg { rm } => Inst::SetPinnedReg { rm: map(u, rm) },
+        &mut Inst::LoadAddr { rd, ref mem} => Inst::LoadAddr {
+            rd: map_wr(d, rd),
+            mem: map_mem(u, mem),
+        },
     };
     *inst = newval;
 }
@@ -2536,6 +2549,12 @@ impl ShowWithRRU for Inst {
             &Inst::SetPinnedReg { rm } => {
                 let rm = rm.show_rru(mb_rru);
                 format!("set_pinned_reg {}", rm)
+            }
+            &Inst::LoadAddr { rd, ref mem } => {
+                let rd = rd.show_rru(mb_rru);
+                let (mem_str, mem) = mem_finalize_for_show(mem, mb_rru);
+                let mem = mem.show_rru(mb_rru);
+                format!("{}load_addr {}, {}", mem_str, rd, mem)
             }
         }
     }

@@ -26,6 +26,7 @@ use crate::isa::arm64::Arm64Backend;
 use regalloc::{RealReg, Reg, RegClass, VirtualReg, Writable};
 
 use alloc::vec::Vec;
+use core::convert::TryFrom;
 use smallvec::SmallVec;
 
 //============================================================================
@@ -1565,7 +1566,22 @@ fn lower_insn_to_regs<C: LowerCtx<Inst>>(ctx: &mut C, insn: IRInst) {
             });
         }
 
-        Opcode::StackLoad | Opcode::StackStore | Opcode::StackAddr => {
+        Opcode::StackAddr => {
+            let (stack_slot, offset) = match *ctx.data(insn) {
+                InstructionData::StackLoad {
+                    opcode: Opcode::StackAddr,
+                    stack_slot,
+                    offset,
+                } => (stack_slot, offset),
+                _ => unreachable!(),
+            };
+            let rd = output_to_reg(ctx, outputs[0]);
+            let offset: i32 = offset.into();
+            let inst = ctx.abi().stackslot_addr(stack_slot, u32::try_from(offset).unwrap(), rd);
+            ctx.emit(inst);
+        }
+
+        Opcode::StackLoad | Opcode::StackStore => {
             panic!("Direct stack memory access not supported; should not be used by Wasm");
         }
 
