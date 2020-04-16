@@ -1315,8 +1315,8 @@ impl<O: MachSectionOutput> MachInstEmit<O> for Inst {
                             let inst = Inst::AluRRR {
                                 alu_op,
                                 rd,
-                                rn: tmp.to_reg(),
-                                rm: fp_reg(),
+                                rn: fp_reg(),
+                                rm: tmp.to_reg(),
                             };
                             inst.emit(sink);
                         }
