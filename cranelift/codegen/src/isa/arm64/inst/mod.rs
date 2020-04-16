@@ -1643,7 +1643,7 @@ fn arm64_map_regs(
         },
         &mut Inst::GetPinnedReg { rd } => Inst::GetPinnedReg { rd: map_wr(d, rd) },
         &mut Inst::SetPinnedReg { rm } => Inst::SetPinnedReg { rm: map(u, rm) },
-        &mut Inst::LoadAddr { rd, ref mem} => Inst::LoadAddr {
+        &mut Inst::LoadAddr { rd, ref mem } => Inst::LoadAddr {
             rd: map_wr(d, rd),
             mem: map_mem(u, mem),
         },
