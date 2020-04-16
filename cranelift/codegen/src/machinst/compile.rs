@@ -12,7 +12,7 @@ use std::env;
 /// Compile the given function down to VCode with allocated registers, ready
 /// for binary emission.
 pub fn compile<B: LowerBackend>(
-    f: &mut Function,
+    f: &Function,
     b: &B,
     abi: Box<dyn ABIBody<B::MInst>>,
     flags: &settings::Flags,

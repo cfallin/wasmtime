@@ -260,7 +260,7 @@ pub trait MachBackend {
     /// Compile the given function. Consumes the function.
     fn compile_function(
         &self,
-        func: Function,
+        func: &Function,
         want_disasm: bool,
     ) -> CodegenResult<MachCompileResult>;
 

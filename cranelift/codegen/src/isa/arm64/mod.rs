@@ -48,18 +48,18 @@ impl Arm64Backend {
         Arm64Backend { flags }
     }
 
-    fn compile_vcode(&self, mut func: Function, flags: &settings::Flags) -> VCode<inst::Inst> {
+    fn compile_vcode(&self, func: &Function, flags: &settings::Flags) -> VCode<inst::Inst> {
         // This performs lowering to VCode, register-allocates the code, computes
         // block layout and finalizes branches. The result is ready for binary emission.
         let abi = Box::new(abi::ARM64ABIBody::new(&func));
-        compile::compile::<Arm64Backend>(&mut func, self, abi, flags)
+        compile::compile::<Arm64Backend>(func, self, abi, flags)
     }
 }
 
 impl MachBackend for Arm64Backend {
     fn compile_function(
         &self,
-        func: Function,
+        func: &Function,
         want_disasm: bool,
     ) -> CodegenResult<MachCompileResult> {
         let call_conv = func.signature.call_conv;
