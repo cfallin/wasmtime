@@ -61,3 +61,9 @@ pub fn is_constant_64bit(func: &Function, inst: Inst) -> Option<u64> {
         _ => None,
     }
 }
+
+/// Is the given instruction a safepoint?
+pub fn is_safepoint(func: &Function, inst: Inst) -> bool {
+    let op = func.dfg[inst].opcode();
+    op.can_trap() || op.is_call()
+}
