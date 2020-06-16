@@ -1313,7 +1313,7 @@ pub struct MachSrcLoc {
 
 /// Record of stackmap metadata: stack offsets containing references.
 #[derive(Clone, Debug)]
-struct MachStackMap {
+pub struct MachStackMap {
     /// The code offset at which this stackmap applies.
     pub offset: CodeOffset,
     /// The stack offsets (from current SP at this program point) containing

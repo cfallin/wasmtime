@@ -629,8 +629,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         let vreg = self.value_regs[value];
         debug_assert!(vreg.is_valid());
         debug_assert!(refslot.is_valid());
-        let insns = self.vcode.abi().gen_refslot_store(refslot, vreg);
-        self.ref_slot_stores.extend(insns.into_iter());
+        let insn = self.vcode.abi().gen_refslot_store(refslot, vreg);
+        self.ref_slot_stores.push(insn);
     }
 
     fn lower_clif_block<B: LowerBackend<MInst = I>>(
@@ -1080,11 +1080,11 @@ impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
             let ref_slot = self.ref_slots[input.value];
             if ref_slot.is_valid() {
                 debug!("-> reftyped input loading from ref slot");
-                let insns = self
+                let insn = self
                     .vcode
                     .abi()
                     .gen_refslot_load(ref_slot, Writable::from_reg(input.reg));
-                self.ref_slot_loads.extend(insns.into_iter());
+                self.ref_slot_loads.push(insn);
             }
         }
     }
