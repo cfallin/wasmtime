@@ -531,7 +531,7 @@ impl<I: VCodeInst> fmt::Debug for VCode<I> {
 }
 
 /// Pretty-printing with `RealRegUniverse` context.
-impl<I: VCodeInst + ShowWithRRU> ShowWithRRU for VCode<I> {
+impl<I: VCodeInst> ShowWithRRU for VCode<I> {
     fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
         use std::fmt::Write;
 
@@ -539,6 +539,7 @@ impl<I: VCodeInst + ShowWithRRU> ShowWithRRU for VCode<I> {
         write!(&mut s, "VCode_ShowWithRRU {{{{\n").unwrap();
         write!(&mut s, "  Entry block: {}\n", self.entry).unwrap();
 
+        let mut state = Default::default();
         for i in 0..self.num_blocks() {
             let block = i as BlockIndex;
 
@@ -556,7 +557,7 @@ impl<I: VCodeInst + ShowWithRRU> ShowWithRRU for VCode<I> {
                     &mut s,
                     "  Inst {}:   {}\n",
                     inst,
-                    self.insts[inst as usize].show_rru(mb_rru)
+                    self.insts[inst as usize].pretty_print(mb_rru, &mut state)
                 )
                 .unwrap();
             }

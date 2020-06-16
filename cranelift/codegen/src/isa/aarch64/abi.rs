@@ -822,7 +822,7 @@ fn get_caller_saves(call_conv: isa::CallConv) -> Vec<Writable<Reg>> {
     caller_saved
 }
 
-fn gen_sp_adjust_insts<I, F: FnMut(I)>(adj: u64, is_sub: bool, mut f: F) {
+fn gen_sp_adjust_insts<F: FnMut(Inst)>(adj: u64, is_sub: bool, mut f: F) {
     let alu_op = if is_sub { ALUOp::Sub64 } else { ALUOp::Add64 };
 
     if let Some(imm12) = Imm12::maybe_from_u64(adj) {
@@ -1174,7 +1174,7 @@ impl ABIBody for AArch64ABIBody {
 
         // Reference slots go just below nominal SP.
         if self.num_refslots > 0 {
-            gen_sp_adjust_isnts(
+            gen_sp_adjust_insts(
                 (self.num_refslots * 8) as u64,
                 /* is_sub = */ true,
                 |inst| insts.push(inst),
@@ -1225,7 +1225,7 @@ impl ABIBody for AArch64ABIBody {
             });
         }
 
-        if clobber_size > 0 {
+        if clobber_size > 0 || self.num_refslots > 0 {
             let offset = (clobber_size as i64) + (self.num_refslots as i64) * 8;
             insts.push(Inst::VirtualSPOffsetAdj { offset });
         }
@@ -1441,7 +1441,7 @@ fn adjust_stack_and_nominal_sp<C: LowerCtx<I = Inst>>(ctx: &mut C, amount: u64, 
     });
 
     gen_sp_adjust_insts(amount, is_sub, |inst| {
-        ctx.emit(insts);
+        ctx.emit(inst);
     });
 }
 

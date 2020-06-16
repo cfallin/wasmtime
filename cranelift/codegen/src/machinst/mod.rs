@@ -259,6 +259,8 @@ pub trait MachInstEmit: MachInst {
     type State: Default + Clone + Debug;
     /// Emit the instruction.
     fn emit(&self, code: &mut MachBuffer<Self>, flags: &Flags, state: &mut Self::State);
+    /// Pretty-print the instruction.
+    fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, state: &mut Self::State) -> String;
 }
 
 /// The result of a `MachBackend::compile_function()` call. Contains machine

@@ -350,15 +350,15 @@ impl ABIBody for X64ABIBody {
         0
     }
 
-    fn gen_refslot_init(&self, slot: RefSlot) -> Inst {
+    fn gen_refslot_init(&self, _slot: RefSlot) -> Inst {
         unimplemented!("reference types not supported by x64 backend")
     }
 
-    fn gen_refslot_store(&self, to_slot: RefSlot, from_reg: Reg) -> Inst {
+    fn gen_refslot_store(&self, _to_slot: RefSlot, _from_reg: Reg) -> Inst {
         unimplemented!("reference types not supported by x64 backend")
     }
 
-    fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Inst {
+    fn gen_refslot_load(&self, _from_slot: RefSlot, _to_reg: Writable<Reg>) -> Inst {
         unimplemented!("reference types not supported by x64 backend")
     }
 

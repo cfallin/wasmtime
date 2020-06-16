@@ -330,11 +330,13 @@ fn alloc_vreg(
         let v = *next_vreg;
         *next_vreg += 1;
         value_regs[value] = Reg::new_virtual(regclass, v);
+        debug!("value {} gets vreg {:?}", value, v);
 
         if is_reftype(ty) {
             let slot = *next_refslot;
             *next_refslot = next_refslot.next();
             ref_slots[value] = slot;
+            debug!(" -> ref slot {:?}", slot);
         }
     }
     value_regs[value].as_virtual_reg().unwrap()
@@ -410,6 +412,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         }
 
         let num_ref_slots = next_refslot.get();
+        debug!("used {} ref slots", num_ref_slots);
+        vcode.abi().set_num_refslots(num_ref_slots);
 
         // Compute instruction colors, find constant instructions, and find instructions with
         // side-effects, in one combined pass.
@@ -490,7 +494,6 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     }
 
     fn gen_refslot_init(&mut self) {
-        self.vcode.abi().set_num_refslots(self.num_ref_slots);
         for slot_number in 0..self.num_ref_slots {
             let slot = RefSlot::new(slot_number);
             let insn = self.vcode.abi().gen_refslot_init(slot);
@@ -714,13 +717,22 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     }
 
     fn finish_ir_inst(&mut self, loc: SourceLoc) {
-        for inst in self.ref_slot_loads.drain(..) {
+        // `bb_insts` is kept in reverse order, so emit the instructions in
+        // reverse order.
+
+        // Last (in eventual order), so first here, we emit stores of
+        // newly-defined reftyped values into their reference slots.
+        for inst in self.ref_slot_stores.drain(..) {
             self.bb_insts.push((loc, inst));
         }
+        // Next, the lowered instructions from the backend. Reverse them here so
+        // they end up in original order.
         for inst in self.ir_insts.drain(..).rev() {
             self.bb_insts.push((loc, inst));
         }
-        for inst in self.ref_slot_stores.drain(..) {
+        // First (in eventual order), so last here, we emit loads of reftyped
+        // values to be used from their reference slots.
+        for inst in self.ref_slot_loads.drain(..) {
             self.bb_insts.push((loc, inst));
         }
     }
@@ -1079,7 +1091,7 @@ impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
         if self.num_ref_slots > 0 {
             let ref_slot = self.ref_slots[input.value];
             if ref_slot.is_valid() {
-                debug!("-> reftyped input loading from ref slot");
+                debug!("-> reftyped input loading from ref slot {:?}", ref_slot);
                 let insn = self
                     .vcode
                     .abi()

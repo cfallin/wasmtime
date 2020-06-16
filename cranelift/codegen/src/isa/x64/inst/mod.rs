@@ -915,6 +915,10 @@ impl MachInstEmit for Inst {
     fn emit(&self, sink: &mut MachBuffer<Inst>, _flags: &settings::Flags, _: &mut Self::State) {
         emit::emit(self, sink);
     }
+
+    fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, _: &mut Self::State) -> String {
+        self.show_rru(mb_rru)
+    }
 }
 
 /// A label-use (internal relocation) in generated code.
