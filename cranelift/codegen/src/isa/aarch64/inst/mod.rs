@@ -905,6 +905,16 @@ pub enum Inst {
         /// The needed space before the next deadline.
         needed_space: CodeOffset,
     },
+
+    /// Meta-insn, no-op in generated code: emit safepoint metadata that
+    /// describes what stack slots contain live reference-typed values (e.g.,
+    /// `R32` or `R64`) at this program point. Specified in terms of *nominal*
+    /// SP offsets (see aarch64/abi.rs for details) that describe a contiguous
+    /// range of reference-holding slots.
+    Safepoint {
+        nominal_sp_start: i64,
+        nominal_sp_end: i64,
+    },
 }
 
 fn count_zero_half_words(mut value: u64) -> usize {
@@ -1349,6 +1359,7 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         }
         &Inst::VirtualSPOffsetAdj { .. } => {}
         &Inst::EmitIsland { .. } => {}
+        &Inst::Safepoint { .. } => {}
     }
 }
 
@@ -1949,6 +1960,7 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
         }
         &mut Inst::VirtualSPOffsetAdj { .. } => {}
         &mut Inst::EmitIsland { .. } => {}
+        &mut Inst::Safepoint { .. } => {}
     }
 }
 
@@ -2951,6 +2963,13 @@ impl ShowWithRRU for Inst {
             }
             &Inst::VirtualSPOffsetAdj { offset } => format!("virtual_sp_offset_adjust {}", offset),
             &Inst::EmitIsland { needed_space } => format!("emit_island {}", needed_space),
+            &Inst::Safepoint {
+                nominal_sp_start,
+                nominal_sp_end,
+            } => format!(
+                "safepoint nominal_sp+{} .. nominal_sp+{}",
+                nominal_sp_start, nominal_sp_end
+            ),
         }
     }
 }

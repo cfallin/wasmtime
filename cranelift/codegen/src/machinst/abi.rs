@@ -66,6 +66,27 @@ pub trait ABIBody {
     /// the epilogue should be inserted.
     fn gen_epilogue_placeholder(&self) -> Self::I;
 
+    /// Set the number of refslots to expect. This must be called before generating
+    /// refslot-referencing instructions.
+    fn set_num_refslots(&mut self, slots: u32);
+
+    /// Get the number of refslots.
+    fn get_num_refslots(&self) -> u32;
+
+    /// Generate a refslot initialization. The returned instruction initializes the given refslot
+    /// to a null reference.
+    fn gen_refslot_init(&self, slot: RefSlot) -> Self::I;
+
+    /// Generate a refslot store.
+    fn gen_refslot_store(&self, to_slot: RefSlot, from_reg: Reg) -> Self::I;
+
+    /// Generate a refslot load.
+    fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Self::I;
+
+    /// Generate a safepoint pseudo-instruction, causing the machine backend to
+    /// emit safepoint information describing stack offsets of references.
+    fn gen_safepoint(&self) -> Self::I;
+
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.
     // Every function below this line may only be called post-regalloc.

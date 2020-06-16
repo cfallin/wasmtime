@@ -1370,6 +1370,15 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
 
         Opcode::Trap | Opcode::ResumableTrap => {
             let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
+            // N.B.: we generate safepoint metadata for this explicit trap CLIF instruction, but
+            // not traps that we generate for error conditions of various sorts (e.g.,
+            // divide-by-zero), because the latter are not resumable and so semantically actually
+            // have no live references (the whole Wasm module terminates). Only CLIF-level traps
+            // possibly come from resumable traps, such as interrupt checks.
+            if ctx.is_safepoint(insn) {
+                let safepoint = ctx.abi().gen_safepoint();
+                ctx.emit(safepoint);
+            }
             ctx.emit(Inst::Udf { trap_info })
         }
 
@@ -1412,6 +1421,10 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 kind: CondBrKind::Cond(cond),
             });
 
+            if ctx.is_safepoint(insn) {
+                let safepoint = ctx.abi().gen_safepoint();
+                ctx.emit(safepoint);
+            }
             ctx.emit(Inst::Udf { trap_info })
         }
 
@@ -1482,6 +1495,10 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             for (i, input) in inputs.iter().enumerate() {
                 let arg_reg = input_to_reg(ctx, *input, NarrowValueMode::None);
                 abi.emit_copy_reg_to_arg(ctx, i, arg_reg);
+            }
+            if ctx.is_safepoint(insn) {
+                let safepoint = ctx.abi().gen_safepoint();
+                ctx.emit(safepoint);
             }
             abi.emit_call(ctx);
             for (i, output) in outputs.iter().enumerate() {

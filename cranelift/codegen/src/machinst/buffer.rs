@@ -147,6 +147,7 @@ use crate::machinst::{BlockIndex, MachInstLabelUse, VCodeInst};
 use log::trace;
 use smallvec::SmallVec;
 use std::mem;
+use std::vec::Vec;
 
 /// A buffer of output to be produced, fixed up, and then emitted to a CodeSink
 /// in bulk.
@@ -168,6 +169,8 @@ pub struct MachBuffer<I: VCodeInst> {
     call_sites: SmallVec<[MachCallSite; 16]>,
     /// Any source location mappings referring to this code.
     srclocs: SmallVec<[MachSrcLoc; 64]>,
+    /// Any stackmaps referring to this code.
+    stackmaps: SmallVec<[MachStackMap; 8]>,
     /// The current source location in progress (after `start_srcloc()` and
     /// before `end_srcloc()`).  This is a (start_offset, src_loc) tuple.
     cur_srcloc: Option<(CodeOffset, SourceLoc)>,
@@ -228,6 +231,8 @@ pub struct MachBufferFinalized {
     call_sites: SmallVec<[MachCallSite; 16]>,
     /// Any source location mappings referring to this code.
     srclocs: SmallVec<[MachSrcLoc; 64]>,
+    /// Any stackmaps referring to this code.
+    stackmaps: SmallVec<[MachStackMap; 8]>,
 }
 
 static UNKNOWN_LABEL_OFFSET: CodeOffset = 0xffff_ffff;
@@ -262,6 +267,7 @@ impl<I: VCodeInst> MachBuffer<I> {
             traps: SmallVec::new(),
             call_sites: SmallVec::new(),
             srclocs: SmallVec::new(),
+            stackmaps: SmallVec::new(),
             cur_srcloc: None,
             label_offsets: SmallVec::new(),
             label_aliases: SmallVec::new(),
@@ -1090,6 +1096,7 @@ impl<I: VCodeInst> MachBuffer<I> {
             traps: self.traps,
             call_sites: self.call_sites,
             srclocs: self.srclocs,
+            stackmaps: self.stackmaps,
         }
     }
 
@@ -1149,6 +1156,19 @@ impl<I: VCodeInst> MachBuffer<I> {
             self.srclocs.push(MachSrcLoc { start, end, loc });
         }
     }
+
+    /// Add stackmap metadata for this program point: a set of stack offsets
+    /// (from SP upward) that contain live references.
+    pub fn add_stackmap(&mut self, stack_offsets: &[u32]) {
+        if stack_offsets.len() > 0 {
+            let offset = self.cur_offset();
+            let stack_offsets = stack_offsets.to_vec();
+            self.stackmaps.push(MachStackMap {
+                offset,
+                stack_offsets,
+            });
+        }
+    }
 }
 
 impl MachBufferFinalized {
@@ -1206,6 +1226,11 @@ impl MachBufferFinalized {
         sink.begin_jumptables();
         sink.begin_rodata();
         sink.end_codegen();
+    }
+
+    /// Get the stackmap metadata for this code.
+    pub fn stackmaps(&self) -> &[MachStackMap] {
+        &self.stackmaps[..]
     }
 }
 
@@ -1284,6 +1309,16 @@ pub struct MachSrcLoc {
     pub end: CodeOffset,
     /// The source location.
     pub loc: SourceLoc,
+}
+
+/// Record of stackmap metadata: stack offsets containing references.
+#[derive(Clone, Debug)]
+struct MachStackMap {
+    /// The code offset at which this stackmap applies.
+    pub offset: CodeOffset,
+    /// The stack offsets (from current SP at this program point) containing
+    /// references.
+    pub stack_offsets: Vec<u32>,
 }
 
 /// Record of branch instruction in the buffer, to facilitate editing.

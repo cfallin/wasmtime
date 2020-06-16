@@ -4,9 +4,10 @@
 
 use crate::entity::SecondaryMap;
 use crate::fx::{FxHashMap, FxHashSet};
+use crate::inst_predicates::is_safepoint;
 use crate::inst_predicates::{has_side_effect_or_load, is_constant_64bit};
 use crate::ir::instructions::BranchInfo;
-use crate::ir::types::I64;
+use crate::ir::types::{I64, R32, R64};
 use crate::ir::{
     ArgumentExtension, Block, Constant, ConstantData, ExternalName, Function, GlobalValueData,
     Inst, InstructionData, MemFlags, Opcode, Signature, SourceLoc, Type, Value, ValueDef,
@@ -93,6 +94,8 @@ pub trait LowerCtx {
     /// every side-effecting op; the backend should not try to merge across
     /// side-effect colors unless the op being merged is known to be pure.
     fn inst_color(&self, ir_inst: Inst) -> InstColor;
+    /// Determine whether an instruction is a safepoint.
+    fn is_safepoint(&self, ir_inst: Inst) -> bool;
 
     // Instruction input/output queries:
 
@@ -131,8 +134,8 @@ pub trait LowerCtx {
     /// ensuring it is marked as used.
     fn get_input(&self, ir_inst: Inst, idx: usize) -> LowerInput;
     /// Get the `idx`th output register of the given IR instruction. When
-    /// `backend.lower_inst_to_regs(ctx, inst)` is called, it is expected that
-    /// the backend will write results to these output register(s).
+    /// `backend.lower(ctx, inst)` is called, it is expected that the backend
+    /// will write results to these output register(s).
     fn get_output(&self, ir_inst: Inst, idx: usize) -> Writable<Reg>;
 
     // Codegen primitives: allocate temps, emit instructions, set result registers,
@@ -168,6 +171,9 @@ pub struct LowerInput {
     pub inst: Option<(Inst, usize)>,
     /// The value is a known constant.
     pub constant: Option<u64>,
+    /// The original Value. Not accessible to client; only used in case of
+    /// reftypes to handle reference-loading at use-sites properly.
+    value: Value,
 }
 
 /// A machine backend.
@@ -232,6 +238,12 @@ pub struct Lower<'func, I: VCodeInst> {
     /// Next virtual register number to allocate.
     next_vreg: u32,
 
+    /// Reference slot, if any, for a reftyped value at a safepoint.
+    ref_slots: SecondaryMap<Value, RefSlot>,
+
+    /// How many reference slots are used?
+    num_ref_slots: u32,
+
     /// Insts in reverse block order, before final copy to vcode.
     block_insts: Vec<(SourceLoc, I)>,
 
@@ -244,6 +256,12 @@ pub struct Lower<'func, I: VCodeInst> {
 
     /// Instructions collected for the CLIF inst in progress, in forward order.
     ir_insts: Vec<I>,
+
+    /// Reference-slot loads, to occur prior to the IR instruction's lowering.
+    ref_slot_loads: Vec<I>,
+
+    /// Reference-slot stores, to occur after the IR instruction's lowering.
+    ref_slot_stores: Vec<I>,
 
     /// The register to use for GetPinnedReg, if any, on this architecture.
     pinned_reg: Option<Reg>,
@@ -261,17 +279,63 @@ pub enum RelocDistance {
     Far,
 }
 
+/// A reference slot, used to store reftyped values on the stack at safepoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefSlot(u32);
+const INVALID_REFSLOT: u32 = 0xffff_ffff;
+impl RefSlot {
+    /// Get the zero'th refslot.
+    pub fn zero() -> Self {
+        RefSlot(0)
+    }
+    /// Get the nth refslot.
+    pub fn new(slot: u32) -> Self {
+        RefSlot(slot)
+    }
+    /// Get the next refslot.
+    pub fn next(self) -> Self {
+        debug_assert!(self.0 + 1 < INVALID_REFSLOT);
+        RefSlot(self.0 + 1)
+    }
+    /// Create an invalid refslot reference.
+    pub fn invalid() -> Self {
+        RefSlot(INVALID_REFSLOT)
+    }
+    /// Get the slot number.
+    pub fn get(self) -> u32 {
+        debug_assert!(self.is_valid());
+        self.0
+    }
+    /// Is this a valid refslot?
+    pub fn is_valid(self) -> bool {
+        self.0 != INVALID_REFSLOT
+    }
+}
+
+fn is_reftype(ty: Type) -> bool {
+    ty == R32 || ty == R64
+}
+
 fn alloc_vreg(
     value_regs: &mut SecondaryMap<Value, Reg>,
+    ty: Type,
     regclass: RegClass,
     value: Value,
     next_vreg: &mut u32,
+    ref_slots: &mut SecondaryMap<Value, RefSlot>,
+    next_refslot: &mut RefSlot,
 ) -> VirtualReg {
     if value_regs[value].is_invalid() {
         // default value in map.
         let v = *next_vreg;
         *next_vreg += 1;
         value_regs[value] = Reg::new_virtual(regclass, v);
+
+        if is_reftype(ty) {
+            let slot = *next_refslot;
+            *next_refslot = next_refslot.next();
+            ref_slots[value] = slot;
+        }
     }
     value_regs[value].as_virtual_reg().unwrap()
 }
@@ -291,22 +355,38 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         let mut vcode = VCodeBuilder::new(abi, block_order);
 
         let mut next_vreg: u32 = 0;
-
         let mut value_regs = SecondaryMap::with_default(Reg::invalid());
+        let mut next_refslot = RefSlot::zero();
+        let mut ref_slots = SecondaryMap::with_default(RefSlot::invalid());
 
         // Assign a vreg to each block param and each inst result.
         for bb in f.layout.blocks() {
             for &param in f.dfg.block_params(bb) {
                 let ty = f.dfg.value_type(param);
-                let vreg = alloc_vreg(&mut value_regs, I::rc_for_type(ty)?, param, &mut next_vreg);
+                let vreg = alloc_vreg(
+                    &mut value_regs,
+                    ty,
+                    I::rc_for_type(ty)?,
+                    param,
+                    &mut next_vreg,
+                    &mut ref_slots,
+                    &mut next_refslot,
+                );
                 vcode.set_vreg_type(vreg, ty);
                 debug!("bb {} param {}: vreg {:?}", bb, param, vreg);
             }
             for inst in f.layout.block_insts(bb) {
                 for &result in f.dfg.inst_results(inst) {
                     let ty = f.dfg.value_type(result);
-                    let vreg =
-                        alloc_vreg(&mut value_regs, I::rc_for_type(ty)?, result, &mut next_vreg);
+                    let vreg = alloc_vreg(
+                        &mut value_regs,
+                        ty,
+                        I::rc_for_type(ty)?,
+                        result,
+                        &mut next_vreg,
+                        &mut ref_slots,
+                        &mut next_refslot,
+                    );
                     vcode.set_vreg_type(vreg, ty);
                     debug!(
                         "bb {} inst {} ({:?}): result vreg {:?}",
@@ -325,7 +405,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             let vreg = Reg::new_virtual(regclass, v);
             retval_regs.push((vreg, ret.extension));
             vcode.set_vreg_type(vreg.as_virtual_reg().unwrap(), ret.value_type);
+            // Note: no refslots for retval regs because there will be no safepoints between a
+            // return-value move and the return itself.
         }
+
+        let num_ref_slots = next_refslot.get();
 
         // Compute instruction colors, find constant instructions, and find instructions with
         // side-effects, in one combined pass.
@@ -367,10 +451,14 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             inst_needed,
             vreg_needed,
             next_vreg,
+            ref_slots,
+            num_ref_slots,
             block_insts: vec![],
             block_ranges: vec![],
             bb_insts: vec![],
             ir_insts: vec![],
+            ref_slot_loads: vec![],
+            ref_slot_stores: vec![],
             pinned_reg: None,
         })
     }
@@ -390,6 +478,23 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             if let Some(insn) = self.vcode.abi().gen_retval_area_setup() {
                 self.emit(insn);
             }
+            if self.num_ref_slots > 0 {
+                for &param in self.f.dfg.block_params(entry_bb).iter() {
+                    let ref_slot = self.ref_slots[param];
+                    if ref_slot.is_valid() {
+                        self.handle_refslot_def(ref_slot, param);
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_refslot_init(&mut self) {
+        self.vcode.abi().set_num_refslots(self.num_ref_slots);
+        for slot_number in 0..self.num_ref_slots {
+            let slot = RefSlot::new(slot_number);
+            let insn = self.vcode.abi().gen_refslot_init(slot);
+            self.emit(insn);
         }
     }
 
@@ -428,7 +533,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         // * one for dsts whose sources are non-constants.
 
         let mut const_bundles = SmallVec::<[(Type, Writable<Reg>, u64); 16]>::new();
-        let mut var_bundles = SmallVec::<[(Type, Writable<Reg>, Reg); 16]>::new();
+        let mut var_bundles = SmallVec::<[(Type, Writable<Reg>, Reg, Value); 16]>::new();
 
         let mut i = 0;
         for (dst_val, src_val) in self
@@ -457,7 +562,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                 // overlap-check below and hence can cause a lot of unnecessary copying through
                 // temporaries.
                 if dst_reg != src_reg {
-                    var_bundles.push((ty, Writable::from_reg(dst_reg), src_reg));
+                    var_bundles.push((ty, Writable::from_reg(dst_reg), src_reg, *dst_val));
                 }
             }
         }
@@ -468,11 +573,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         // for cases of up to circa 16 args.  Currently not possible because regalloc.rs
         // does not export it.
         let mut src_reg_set = FxHashSet::<Reg>::default();
-        for (_, _, src_reg) in &var_bundles {
+        for (_, _, src_reg, _) in &var_bundles {
             src_reg_set.insert(*src_reg);
         }
         let mut overlaps = false;
-        for (_, dst_reg, _) in &var_bundles {
+        for (_, dst_reg, _, _) in &var_bundles {
             if src_reg_set.contains(&dst_reg.to_reg()) {
                 overlaps = true;
                 break;
@@ -482,20 +587,31 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         // If, as is mostly the case, the source and destination register sets are non
         // overlapping, then we can copy directly, so as to save the register allocator work.
         if !overlaps {
-            for (ty, dst_reg, src_reg) in &var_bundles {
+            for (ty, dst_reg, src_reg, _) in &var_bundles {
                 self.emit(I::gen_move(*dst_reg, *src_reg, *ty));
             }
         } else {
             // There's some overlap, so play safe and copy via temps.
             let mut tmp_regs = SmallVec::<[Writable<Reg>; 16]>::new();
-            for (ty, _, _) in &var_bundles {
+            for (ty, _, _, _) in &var_bundles {
                 tmp_regs.push(self.alloc_tmp(I::rc_for_type(*ty)?, *ty));
             }
-            for ((ty, _, src_reg), tmp_reg) in var_bundles.iter().zip(tmp_regs.iter()) {
+            for ((ty, _, src_reg, _), tmp_reg) in var_bundles.iter().zip(tmp_regs.iter()) {
                 self.emit(I::gen_move(*tmp_reg, *src_reg, *ty));
             }
-            for ((ty, dst_reg, _), tmp_reg) in var_bundles.iter().zip(tmp_regs.iter()) {
+            for ((ty, dst_reg, _, _), tmp_reg) in var_bundles.iter().zip(tmp_regs.iter()) {
                 self.emit(I::gen_move(*dst_reg, (*tmp_reg).to_reg(), *ty));
+            }
+        }
+
+        // If any of the moved values were reftyped values, handle the stores to
+        // the reference slots.
+        if self.num_ref_slots > 0 {
+            for (_, dst_reg, _, value) in &var_bundles {
+                let ref_slot = self.ref_slots[*value];
+                if ref_slot.is_valid() {
+                    self.handle_refslot_def(ref_slot, *value);
+                }
             }
         }
 
@@ -507,6 +623,14 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         }
 
         Ok(())
+    }
+
+    fn handle_refslot_def(&mut self, refslot: RefSlot, value: Value) {
+        let vreg = self.value_regs[value];
+        debug_assert!(vreg.is_valid());
+        debug_assert!(refslot.is_valid());
+        let insns = self.vcode.abi().gen_refslot_store(refslot, vreg);
+        self.ref_slot_stores.extend(insns.into_iter());
     }
 
     fn lower_clif_block<B: LowerBackend<MInst = I>>(
@@ -556,6 +680,21 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             if self.inst_needed[inst] || value_needed {
                 debug!("lowering: inst {}: {:?}", inst, self.f.dfg[inst]);
                 backend.lower(self, inst)?;
+
+                if self.num_ref_slots > 0 {
+                    let results: SmallVec<[Value; 2]> =
+                        SmallVec::from(self.f.dfg.inst_results(inst));
+                    for value in results {
+                        let ref_slot = self.ref_slots[value];
+                        if ref_slot.is_valid() {
+                            debug!(
+                                "after inst {}: reftyped result {} storing to ref slot",
+                                inst, value
+                            );
+                            self.handle_refslot_def(ref_slot, value);
+                        }
+                    }
+                }
             }
             if data.opcode().is_return() {
                 // Return: handle specially, using ABI-appropriate sequence.
@@ -575,7 +714,13 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
     }
 
     fn finish_ir_inst(&mut self, loc: SourceLoc) {
+        for inst in self.ref_slot_loads.drain(..) {
+            self.bb_insts.push((loc, inst));
+        }
         for inst in self.ir_insts.drain(..).rev() {
+            self.bb_insts.push((loc, inst));
+        }
+        for inst in self.ref_slot_stores.drain(..) {
             self.bb_insts.push((loc, inst));
         }
     }
@@ -718,6 +863,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                 // Set up the function with arg vreg inits.
                 self.gen_arg_setup();
                 self.finish_ir_inst(SourceLoc::default());
+                // Initialize refslots.
+                if self.num_ref_slots > 0 {
+                    self.gen_refslot_init();
+                    self.finish_ir_inst(SourceLoc::default());
+                }
             }
 
             self.finish_bb();
@@ -785,6 +935,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             reg,
             inst,
             constant,
+            value: val,
         }
     }
 }
@@ -870,6 +1021,13 @@ impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
         self.inst_colors[ir_inst]
     }
 
+    fn is_safepoint(&self, ir_inst: Inst) -> bool {
+        // There is no safepoint metadata at all if we have no reftyped values
+        // in this function; lack of metadata implies "nothing to trace", and
+        // avoids overhead.
+        self.num_ref_slots > 0 && is_safepoint(self.f, ir_inst)
+    }
+
     fn num_inputs(&self, ir_inst: Inst) -> usize {
         self.f.dfg.inst_args(ir_inst).len()
     }
@@ -918,6 +1076,17 @@ impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
     fn use_input_reg(&mut self, input: LowerInput) {
         debug!("use_input_reg: vreg {:?} is needed", input.reg);
         self.vreg_needed[input.reg.get_index()] = true;
+        if self.num_ref_slots > 0 {
+            let ref_slot = self.ref_slots[input.value];
+            if ref_slot.is_valid() {
+                debug!("-> reftyped input loading from ref slot");
+                let insns = self
+                    .vcode
+                    .abi()
+                    .gen_refslot_load(ref_slot, Writable::from_reg(input.reg));
+                self.ref_slot_loads.extend(insns.into_iter());
+            }
+        }
     }
 
     fn is_reg_needed(&self, ir_inst: Inst, reg: Reg) -> bool {

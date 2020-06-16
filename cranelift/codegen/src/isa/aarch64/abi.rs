@@ -48,6 +48,9 @@
 //! nominal SP --------------->  | (alloc'd by prologue)     |
 //!                              +---------------------------+
 //!                              |          ...              |
+//!                              | reference-type slots      |
+//!                              +---------------------------+
+//!                              |          ...              |
 //!                              | clobbered callee-saves    |
 //! SP at end of prologue ---->  | (pushed by prologue)      |
 //!                              +---------------------------+
@@ -374,6 +377,10 @@ pub struct AArch64ABIBody {
     spillslots: Option<usize>,
     /// Total frame size.
     total_frame_size: Option<u32>,
+    /// Reference slots. These are just below nominal SP, and are *not* counted
+    /// in the `total_frame_size`; we handle them more like clobber-saves,
+    /// adjusting SP separately.
+    num_refslots: u32,
     /// The register holding the return-area pointer, if needed.
     ret_area_ptr: Option<Writable<Reg>>,
     /// Calling convention this function expects.
@@ -536,6 +543,7 @@ impl AArch64ABIBody {
             clobbered: Set::empty(),
             spillslots: None,
             total_frame_size: None,
+            num_refslots: 0,
             ret_area_ptr: None,
             call_conv,
             flags,
@@ -814,6 +822,35 @@ fn get_caller_saves(call_conv: isa::CallConv) -> Vec<Writable<Reg>> {
     caller_saved
 }
 
+fn gen_sp_adjust_insts<I, F: FnMut(I)>(adj: u64, is_sub: bool, mut f: F) {
+    let alu_op = if is_sub { ALUOp::Sub64 } else { ALUOp::Add64 };
+
+    if let Some(imm12) = Imm12::maybe_from_u64(adj) {
+        let adj_inst = Inst::AluRRImm12 {
+            alu_op,
+            rd: writable_stack_reg(),
+            rn: stack_reg(),
+            imm12,
+        };
+        f(adj_inst);
+    } else {
+        let tmp = writable_spilltmp_reg();
+        let const_inst = Inst::LoadConst64 {
+            rd: tmp,
+            const_data: adj,
+        };
+        let adj_inst = Inst::AluRRRExtend {
+            alu_op,
+            rd: writable_stack_reg(),
+            rn: stack_reg(),
+            rm: tmp.to_reg(),
+            extendop: ExtendOp::UXTX,
+        };
+        f(const_inst);
+        f(adj_inst);
+    }
+}
+
 impl ABIBody for AArch64ABIBody {
     type I = Inst;
 
@@ -962,6 +999,51 @@ impl ABIBody for AArch64ABIBody {
         Inst::EpiloguePlaceholder {}
     }
 
+    fn set_num_refslots(&mut self, slots: u32) {
+        self.num_refslots = slots;
+    }
+
+    fn get_num_refslots(&self) -> u32 {
+        self.num_refslots
+    }
+
+    fn gen_refslot_init(&self, slot: RefSlot) -> Inst {
+        assert!(slot.get() < self.num_refslots);
+        let nominal_sp_offset = -(slot.get() as i64 * 8) - 8;
+        Inst::Store64 {
+            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
+            rd: zero_reg(),
+            srcloc: None,
+        }
+    }
+
+    fn gen_refslot_store(&self, to_slot: RefSlot, from_reg: Reg) -> Inst {
+        assert!(to_slot.get() < self.num_refslots);
+        let nominal_sp_offset = -(to_slot.get() as i64 * 8) - 8;
+        Inst::Store64 {
+            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
+            rd: from_reg,
+            srcloc: None,
+        }
+    }
+
+    fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Inst {
+        assert!(from_slot.get() < self.num_refslots);
+        let nominal_sp_offset = -(from_slot.get() as i64 * 8) - 8;
+        Inst::ULoad64 {
+            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
+            rd: to_reg,
+            srcloc: None,
+        }
+    }
+
+    fn gen_safepoint(&self) -> Inst {
+        Inst::Safepoint {
+            nominal_sp_start: -((self.num_refslots * 8) as i64),
+            nominal_sp_end: 0,
+        }
+    }
+
     fn set_num_spillslots(&mut self, slots: usize) {
         self.spillslots = Some(slots);
     }
@@ -1074,30 +1156,11 @@ impl ABIBody for AArch64ABIBody {
             }
             if total_stacksize > 0 {
                 // sub sp, sp, #total_stacksize
-                if let Some(imm12) = Imm12::maybe_from_u64(total_stacksize as u64) {
-                    let sub_inst = Inst::AluRRImm12 {
-                        alu_op: ALUOp::Sub64,
-                        rd: writable_stack_reg(),
-                        rn: stack_reg(),
-                        imm12,
-                    };
-                    insts.push(sub_inst);
-                } else {
-                    let tmp = writable_spilltmp_reg();
-                    let const_inst = Inst::LoadConst64 {
-                        rd: tmp,
-                        const_data: total_stacksize as u64,
-                    };
-                    let sub_inst = Inst::AluRRRExtend {
-                        alu_op: ALUOp::Sub64,
-                        rd: writable_stack_reg(),
-                        rn: stack_reg(),
-                        rm: tmp.to_reg(),
-                        extendop: ExtendOp::UXTX,
-                    };
-                    insts.push(const_inst);
-                    insts.push(sub_inst);
-                }
+                gen_sp_adjust_insts(
+                    total_stacksize as u64,
+                    /* is_sub = */ true,
+                    |inst| insts.push(inst),
+                );
             }
         }
 
@@ -1108,6 +1171,15 @@ impl ABIBody for AArch64ABIBody {
         // were still at this point. See documentation for
         // [crate::isa::aarch64::abi](this module) for more details on
         // stackframe layout and nominal-SP maintenance.
+
+        // Reference slots go just below nominal SP.
+        if self.num_refslots > 0 {
+            gen_sp_adjust_isnts(
+                (self.num_refslots * 8) as u64,
+                /* is_sub = */ true,
+                |inst| insts.push(inst),
+            );
+        }
 
         // Save clobbered registers.
         let (clobbered_int, clobbered_vec) =
@@ -1154,9 +1226,8 @@ impl ABIBody for AArch64ABIBody {
         }
 
         if clobber_size > 0 {
-            insts.push(Inst::VirtualSPOffsetAdj {
-                offset: clobber_size as i64,
-            });
+            let offset = (clobber_size as i64) + (self.num_refslots as i64) * 8;
+            insts.push(Inst::VirtualSPOffsetAdj { offset });
         }
 
         self.total_frame_size = Some(total_stacksize);
@@ -1209,6 +1280,15 @@ impl ABIBody for AArch64ABIBody {
                     SImm7Scaled::maybe_from_i64(16, types::I64).unwrap(),
                 ),
             });
+        }
+
+        // Adjust up over reference slots.
+        if self.num_refslots > 0 {
+            gen_sp_adjust_insts(
+                (self.num_refslots * 8) as u64,
+                /* is_sub = */ false,
+                |inst| insts.push(inst),
+            );
         }
 
         // N.B.: we do *not* emit a nominal-SP adjustment here, because (i) there will be no
@@ -1346,7 +1426,7 @@ impl AArch64ABICall {
     }
 }
 
-fn adjust_stack<C: LowerCtx<I = Inst>>(ctx: &mut C, amount: u64, is_sub: bool) {
+fn adjust_stack_and_nominal_sp<C: LowerCtx<I = Inst>>(ctx: &mut C, amount: u64, is_sub: bool) {
     if amount == 0 {
         return;
     }
@@ -1360,27 +1440,9 @@ fn adjust_stack<C: LowerCtx<I = Inst>>(ctx: &mut C, amount: u64, is_sub: bool) {
         offset: sp_adjustment,
     });
 
-    let alu_op = if is_sub { ALUOp::Sub64 } else { ALUOp::Add64 };
-    if let Some(imm12) = Imm12::maybe_from_u64(amount) {
-        ctx.emit(Inst::AluRRImm12 {
-            alu_op,
-            rd: writable_stack_reg(),
-            rn: stack_reg(),
-            imm12,
-        })
-    } else {
-        ctx.emit(Inst::LoadConst64 {
-            rd: writable_spilltmp_reg(),
-            const_data: amount,
-        });
-        ctx.emit(Inst::AluRRRExtend {
-            alu_op,
-            rd: writable_stack_reg(),
-            rn: stack_reg(),
-            rm: spilltmp_reg(),
-            extendop: ExtendOp::UXTX,
-        });
-    }
+    gen_sp_adjust_insts(amount, is_sub, |inst| {
+        ctx.emit(insts);
+    });
 }
 
 impl ABICall for AArch64ABICall {
@@ -1396,12 +1458,12 @@ impl ABICall for AArch64ABICall {
 
     fn emit_stack_pre_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C) {
         let off = self.sig.stack_arg_space + self.sig.stack_ret_space;
-        adjust_stack(ctx, off as u64, /* is_sub = */ true)
+        adjust_stack_and_nominal_sp(ctx, off as u64, /* is_sub = */ true)
     }
 
     fn emit_stack_post_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C) {
         let off = self.sig.stack_arg_space + self.sig.stack_ret_space;
-        adjust_stack(ctx, off as u64, /* is_sub = */ false)
+        adjust_stack_and_nominal_sp(ctx, off as u64, /* is_sub = */ false)
     }
 
     fn emit_copy_reg_to_arg<C: LowerCtx<I = Self::I>>(

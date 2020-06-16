@@ -1640,6 +1640,23 @@ impl MachInstEmit for Inst {
                     sink.bind_label(jump_around_label);
                 }
             }
+            &Inst::Safepoint {
+                nominal_sp_start,
+                nominal_sp_end,
+            } => {
+                // For now, references are stored in a contiguous range of stack
+                // slots.
+                let mut start = state.virtual_sp_offset + nominal_sp_start;
+                let end = state.virtual_sp_offset + nominal_sp_end;
+                assert!(start >= 0);
+                assert!(end >= start);
+                let mut offsets = vec![];
+                while start < end {
+                    offsets.push(start as u32);
+                    start += 8;
+                }
+                sink.add_stackmap(&offsets[..]);
+            }
         }
 
         let end_off = sink.cur_offset();
