@@ -607,7 +607,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         // If any of the moved values were reftyped values, handle the stores to
         // the reference slots.
         if self.num_ref_slots > 0 {
-            for (_, dst_reg, _, value) in &var_bundles {
+            for (_, _, _, value) in &var_bundles {
                 let ref_slot = self.ref_slots[*value];
                 if ref_slot.is_valid() {
                     self.handle_refslot_def(ref_slot, *value);
