@@ -256,11 +256,18 @@ pub enum MachTerminator<'a> {
 /// A trait describing the ability to encode a MachInst into binary machine code.
 pub trait MachInstEmit: MachInst {
     /// Persistent state carried across `emit` invocations.
-    type State: Default + Clone + Debug;
+    type State: MachInstEmitState<Self>;
     /// Emit the instruction.
     fn emit(&self, code: &mut MachBuffer<Self>, flags: &Flags, state: &mut Self::State);
     /// Pretty-print the instruction.
     fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, state: &mut Self::State) -> String;
+}
+
+/// A trait describing the emission state carried between MachInsts when
+/// emitting a function body.
+pub trait MachInstEmitState<I: MachInst>: Default + Clone + Debug {
+    /// Create a new emission state given the ABI object.
+    fn new(abi: &dyn ABIBody<I = I>) -> Self;
 }
 
 /// The result of a `MachBackend::compile_function()` call. Contains machine

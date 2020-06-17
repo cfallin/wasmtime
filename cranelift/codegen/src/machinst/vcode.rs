@@ -353,7 +353,7 @@ impl<I: VCodeInst> VCode<I> {
         I: MachInstEmit,
     {
         let mut buffer = MachBuffer::new();
-        let mut state = Default::default();
+        let mut state = I::State::new(&*self.abi);
 
         buffer.reserve_labels_for_blocks(self.num_blocks() as BlockIndex); // first N MachLabels are simply block indices.
 

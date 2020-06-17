@@ -375,7 +375,10 @@ pub struct AArch64ABIBody {
     clobbered: Set<Writable<RealReg>>,
     /// Total number of spillslots, from regalloc.
     spillslots: Option<usize>,
-    /// Total frame size.
+    /// "Total frame size", as defined by "distance between FP and nominal-SP".
+    /// Some items are pushed below nominal SP, so the function may actually use
+    /// more stack than this would otherwise imply. It is simply the initial
+    /// frame/allocation size needed for stackslots and spillslots.
     total_frame_size: Option<u32>,
     /// Reference slots. These are just below nominal SP, and are *not* counted
     /// in the `total_frame_size`; we handle them more like clobber-saves,
@@ -1038,9 +1041,12 @@ impl ABIBody for AArch64ABIBody {
     }
 
     fn gen_safepoint(&self) -> Inst {
+        let nominal_sp_start = -((self.num_refslots * 8) as i32);
+        let nominal_sp_end = 0;
+
         Inst::Safepoint {
-            nominal_sp_start: -((self.num_refslots * 8) as i64),
-            nominal_sp_end: 0,
+            nominal_sp_start,
+            nominal_sp_end,
         }
     }
 
@@ -1145,6 +1151,9 @@ impl ABIBody for AArch64ABIBody {
         }
         let total_stacksize = (total_stacksize + 15) & !15; // 16-align the stack.
 
+        let mut total_sp_adjust = 0;
+        let mut nominal_sp_to_real_sp = 0;
+
         if !self.call_conv.extends_baldrdash() {
             // Leaf functions with zero stack don't need a stack check if one's
             // specified, otherwise always insert the stack check.
@@ -1155,27 +1164,28 @@ impl ABIBody for AArch64ABIBody {
                 }
             }
             if total_stacksize > 0 {
-                // sub sp, sp, #total_stacksize
-                gen_sp_adjust_insts(
-                    total_stacksize as u64,
-                    /* is_sub = */ true,
-                    |inst| insts.push(inst),
-                );
+                total_sp_adjust += total_stacksize as u64;
             }
         }
 
-        // N.B.: "nominal SP", which we use to refer to stackslots
-        // and spillslots, is *here* (the value of SP at this program point).
-        // If we push any clobbers below, we emit a virtual-SP adjustment
-        // meta-instruction so that the nominal-SP references behave as if SP
-        // were still at this point. See documentation for
-        // [crate::isa::aarch64::abi](this module) for more details on
-        // stackframe layout and nominal-SP maintenance.
+        // N.B.: "nominal SP", which we use to refer to stackslots and
+        // spillslots, is right here, *between stack/spillslots and refslots*.
+        // We emit a virtual-SP adjustment for refslots, and if we push any
+        // clobbers below, we emit a virtual-SP adjustment meta-instruction so
+        // that the nominal-SP references behave as if SP were still at this
+        // point. See documentation for [crate::isa::aarch64::abi](this module)
+        // for more details on stackframe layout and nominal-SP maintenance.
 
         // Reference slots go just below nominal SP.
         if self.num_refslots > 0 {
+            total_sp_adjust += (self.num_refslots * 8) as u64;
+            nominal_sp_to_real_sp += (self.num_refslots * 8) as i64;
+        }
+
+        if total_sp_adjust > 0 {
+            // sub sp, sp, #total_stacksize
             gen_sp_adjust_insts(
-                (self.num_refslots * 8) as u64,
+                total_sp_adjust,
                 /* is_sub = */ true,
                 |inst| insts.push(inst),
             );
@@ -1224,10 +1234,12 @@ impl ABIBody for AArch64ABIBody {
                 srcloc: None,
             });
         }
+        nominal_sp_to_real_sp += clobber_size as i64;
 
         if clobber_size > 0 || self.num_refslots > 0 {
-            let offset = (clobber_size as i64) + (self.num_refslots as i64) * 8;
-            insts.push(Inst::VirtualSPOffsetAdj { offset });
+            insts.push(Inst::VirtualSPOffsetAdj {
+                offset: nominal_sp_to_real_sp,
+            });
         }
 
         self.total_frame_size = Some(total_stacksize);

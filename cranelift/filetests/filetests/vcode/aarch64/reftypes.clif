@@ -115,8 +115,7 @@ block3(v7: r64, v8: r64):
 
 ; check:  stp fp, lr, [sp, #-16]!
 ; nextln:  mov fp, sp
-; nextln:  sub sp, sp, #16
-; nextln:  sub sp, sp, #40
+; nextln:  sub sp, sp, #56
 ; nextln:  virtual_sp_offset_adjust 40
 ; nextln:  stur xzr, [sp, #32]
 ; nextln:  stur xzr, [sp, #24]

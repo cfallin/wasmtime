@@ -382,7 +382,20 @@ fn enc_vec_rr_misc(bits_12_16: u32, rd: Writable<Reg>, rn: Reg) -> u32 {
 /// State carried between emissions of a sequence of instructions.
 #[derive(Default, Clone, Debug)]
 pub struct EmitState {
+    /// Addend to convert nominal-SP offsets to real-SP offsets at the current
+    /// program point.
     virtual_sp_offset: i64,
+    /// Offset of FP from nominal-SP.
+    nominal_sp_to_fp: i64,
+}
+
+impl MachInstEmitState<Inst> for EmitState {
+    fn new(abi: &dyn ABIBody<I = Inst>) -> Self {
+        EmitState {
+            virtual_sp_offset: 0,
+            nominal_sp_to_fp: abi.frame_size() as i64,
+        }
+    }
 }
 
 impl MachInstEmit for Inst {
@@ -1643,7 +1656,7 @@ impl MachInstEmit for Inst {
                 debug!(
                     "virtual sp offset adjusted by {} -> {}",
                     offset,
-                    state.virtual_sp_offset + offset
+                    state.virtual_sp_offset + offset,
                 );
                 state.virtual_sp_offset += offset;
             }
@@ -1664,8 +1677,8 @@ impl MachInstEmit for Inst {
             } => {
                 // For now, references are stored in a contiguous range of stack
                 // slots.
-                let mut start = state.virtual_sp_offset + nominal_sp_start;
-                let end = state.virtual_sp_offset + nominal_sp_end;
+                let mut start = (state.virtual_sp_offset as i32) + nominal_sp_start;
+                let end = (state.virtual_sp_offset as i32) + nominal_sp_end;
                 assert!(start >= 0);
                 assert!(end >= start);
                 let mut offsets = vec![];
@@ -1673,7 +1686,8 @@ impl MachInstEmit for Inst {
                     offsets.push(start as u32);
                     start += 8;
                 }
-                sink.add_stackmap(&offsets[..]);
+                assert!(state.nominal_sp_to_fp >= 0);
+                sink.add_stackmap(state.nominal_sp_to_fp as u32, &offsets[..]);
             }
         }
 
@@ -2535,8 +2549,8 @@ impl MachInstEmit for Inst {
                 nominal_sp_end,
             } => format!(
                 "safepoint {} .. {}",
-                state.virtual_sp_offset + nominal_sp_start,
-                state.virtual_sp_offset + nominal_sp_end
+                (state.virtual_sp_offset as i32) + nominal_sp_start,
+                (state.virtual_sp_offset as i32) + nominal_sp_end,
             ),
         }
     }

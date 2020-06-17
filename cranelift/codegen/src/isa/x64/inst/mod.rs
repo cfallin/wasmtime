@@ -910,7 +910,7 @@ impl MachInst for Inst {
 }
 
 impl MachInstEmit for Inst {
-    type State = ();
+    type State = EmitState;
 
     fn emit(&self, sink: &mut MachBuffer<Inst>, _flags: &settings::Flags, _: &mut Self::State) {
         emit::emit(self, sink);
@@ -918,6 +918,16 @@ impl MachInstEmit for Inst {
 
     fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, _: &mut Self::State) -> String {
         self.show_rru(mb_rru)
+    }
+}
+
+/// Emission state.
+#[derive(Clone, Debug, Default)]
+pub struct EmitState;
+
+impl MachInstEmitState<Inst> for EmitState {
+    fn new(_: &dyn ABIBody<I = Inst>) -> Self {
+        EmitState
     }
 }
 

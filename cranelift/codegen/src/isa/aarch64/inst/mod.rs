@@ -876,7 +876,7 @@ pub enum Inst {
     },
 
     /// Marker, no-op in generated code: SP "virtual offset" is adjusted. This
-    /// controls MemArg::NominalSPOffset args are lowered.
+    /// controls how MemArg::NominalSPOffset args are lowered.
     VirtualSPOffsetAdj {
         offset: i64,
     },
@@ -909,11 +909,12 @@ pub enum Inst {
     /// Meta-insn, no-op in generated code: emit safepoint metadata that
     /// describes what stack slots contain live reference-typed values (e.g.,
     /// `R32` or `R64`) at this program point. Specified in terms of *nominal*
-    /// SP offsets (see aarch64/abi.rs for details) that describe a contiguous
-    /// range of reference-holding slots.
+    /// SP offsets (see aarch64/abi.rs for details) as well as FP offsets that describe a
+    /// contiguous range of reference-holding slots. (Different embeddings may
+    /// require either offsets-from-FP or offsets-from-SP.)
     Safepoint {
-        nominal_sp_start: i64,
-        nominal_sp_end: i64,
+        nominal_sp_start: i32,
+        nominal_sp_end: i32,
     },
 }
 
