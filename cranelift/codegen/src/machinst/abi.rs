@@ -134,12 +134,16 @@ pub trait ABIBody {
     /// likely closely related.
     fn gen_epilogue(&self) -> Vec<Self::I>;
 
-    /// Returns the full frame size for the given function, after prologue emission has run. This
-    /// comprises the spill slots and stack-storage slots (but not storage for clobbered callee-save
-    /// registers, arguments pushed at callsites within this function, or other ephemeral pushes).
-    /// This is used for ABI variants where the client generates prologue/epilogue code, as in
-    /// Baldrdash (SpiderMonkey integration).
+    /// Returns the full frame size for the given function, after prologue
+    /// emission has run. This comprises the spill slots and stack-storage slots
+    /// (but not storage for clobbered callee-save registers, arguments pushed
+    /// at callsites within this function, or other ephemeral pushes).  This is
+    /// used for ABI variants where the client generates prologue/epilogue code,
+    /// as in Baldrdash (SpiderMonkey integration).
     fn frame_size(&self) -> u32;
+
+    /// Returns the size of arguments expected on the stack.
+    fn stack_args_size(&self) -> u32;
 
     /// Get the spill-slot size.
     fn get_spillslot_size(&self, rc: RegClass, ty: Type) -> u32;

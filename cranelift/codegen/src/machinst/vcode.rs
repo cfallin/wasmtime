@@ -265,6 +265,11 @@ impl<I: VCodeInst> VCode<I> {
         self.abi.frame_size()
     }
 
+    /// Inbound stack-args size.
+    pub fn stack_args_size(&self) -> u32 {
+        self.abi.stack_args_size()
+    }
+
     /// Get the successors for a block.
     pub fn succs(&self, block: BlockIndex) -> &[BlockIx] {
         let (start, end) = self.block_succ_range[block as usize];

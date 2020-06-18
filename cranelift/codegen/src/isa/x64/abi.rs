@@ -526,6 +526,10 @@ impl ABIBody for X64ABIBody {
             .expect("frame size not computed before prologue generation") as u32
     }
 
+    fn stack_args_size(&self) -> u32 {
+        unimplemented!("I need to be computed!")
+    }
+
     fn get_spillslot_size(&self, rc: RegClass, ty: Type) -> u32 {
         // We allocate in terms of 8-byte slots.
         match (rc, ty) {

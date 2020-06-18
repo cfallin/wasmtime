@@ -1687,7 +1687,11 @@ impl MachInstEmit for Inst {
                     start += 8;
                 }
                 assert!(state.nominal_sp_to_fp >= 0);
-                sink.add_stackmap(state.nominal_sp_to_fp as u32, &offsets[..]);
+                sink.add_stackmap(
+                    /* insn_len = */ 4,
+                    state.nominal_sp_to_fp as u32,
+                    &offsets[..],
+                );
             }
         }
 

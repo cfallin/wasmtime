@@ -1341,6 +1341,10 @@ impl ABIBody for AArch64ABIBody {
             .expect("frame size not computed before prologue generation")
     }
 
+    fn stack_args_size(&self) -> u32 {
+        self.sig.stack_arg_space as u32
+    }
+
     fn get_spillslot_size(&self, rc: RegClass, ty: Type) -> u32 {
         // We allocate in terms of 8-byte slots.
         match (rc, ty) {
