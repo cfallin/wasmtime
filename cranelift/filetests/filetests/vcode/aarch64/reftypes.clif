@@ -125,7 +125,6 @@ block3(v7: r64, v8: r64):
 ; nextln:  stur x1, [sp, #24]
 ; nextln:  stur x0, [sp, #32]
 ; nextln:  ldur x0, [sp, #32]
-; nextln:  safepoint 0 .. 40
 ; nextln:  ldr x16, 8 ; b 12 ; data
 ; nextln:  blr x16
 ; nextln:  mov x1, sp

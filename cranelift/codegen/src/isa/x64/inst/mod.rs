@@ -912,6 +912,8 @@ impl MachInst for Inst {
 impl MachInstEmit for Inst {
     type State = EmitState;
 
+    type SafepointInfo = ();
+
     fn emit(&self, sink: &mut MachBuffer<Inst>, _flags: &settings::Flags, _: &mut Self::State) {
         emit::emit(self, sink);
     }

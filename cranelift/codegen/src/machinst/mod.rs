@@ -257,6 +257,8 @@ pub enum MachTerminator<'a> {
 pub trait MachInstEmit: MachInst {
     /// Persistent state carried across `emit` invocations.
     type State: MachInstEmitState<Self>;
+    /// Information about a safepoint, returned by the ABI and attached to an instruction.
+    type SafepointInfo: Clone + Debug;
     /// Emit the instruction.
     fn emit(&self, code: &mut MachBuffer<Self>, flags: &Flags, state: &mut Self::State);
     /// Pretty-print the instruction.

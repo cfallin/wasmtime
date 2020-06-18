@@ -322,6 +322,15 @@ pub struct JTSequenceInfo {
     pub targets_for_term: Vec<MachLabel>, // needed for MachTerminator.
 }
 
+/// Information at a safepoint: describes what stack slots contain live
+/// reference-typed values (e.g., `R32` or `R64`) at this program point.
+/// Specified in terms of *nominal* SP offsets (see aarch64/abi.rs for details).
+#[derive(Clone, Debug)]
+pub struct SafepointInfo {
+    pub nominal_sp_start: i32,
+    pub nominal_sp_end: i32,
+}
+
 /// Instruction formats.
 #[derive(Clone, Debug)]
 pub enum Inst {
@@ -765,10 +774,12 @@ pub enum Inst {
     /// target.
     Call {
         info: Box<CallInfo>,
+        safepoint_info: Option<Box<SafepointInfo>>,
     },
     /// A machine indirect-call instruction.
     CallInd {
         info: Box<CallIndInfo>,
+        safepoint_info: Option<Box<SafepointInfo>>,
     },
 
     // ---- branches (exactly one must appear at end of BB) ----
@@ -824,6 +835,7 @@ pub enum Inst {
     /// runtime.
     Udf {
         trap_info: (SourceLoc, TrapCode),
+        safepoint_info: Option<Box<SafepointInfo>>,
     },
 
     /// Compute the address (using a PC-relative offset) of a memory location, using the `ADR`
@@ -904,17 +916,6 @@ pub enum Inst {
     EmitIsland {
         /// The needed space before the next deadline.
         needed_space: CodeOffset,
-    },
-
-    /// Meta-insn, no-op in generated code: emit safepoint metadata that
-    /// describes what stack slots contain live reference-typed values (e.g.,
-    /// `R32` or `R64`) at this program point. Specified in terms of *nominal*
-    /// SP offsets (see aarch64/abi.rs for details) as well as FP offsets that describe a
-    /// contiguous range of reference-holding slots. (Different embeddings may
-    /// require either offsets-from-FP or offsets-from-SP.)
-    Safepoint {
-        nominal_sp_start: i32,
-        nominal_sp_end: i32,
     },
 }
 
@@ -1320,11 +1321,11 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
             collector.add_use(rn);
         }
         &Inst::Jump { .. } | &Inst::Ret | &Inst::EpiloguePlaceholder => {}
-        &Inst::Call { ref info } => {
+        &Inst::Call { ref info, .. } => {
             collector.add_uses(&*info.uses);
             collector.add_defs(&*info.defs);
         }
-        &Inst::CallInd { ref info } => {
+        &Inst::CallInd { ref info, .. } => {
             collector.add_uses(&*info.uses);
             collector.add_defs(&*info.defs);
             collector.add_use(info.rn);
@@ -1360,7 +1361,6 @@ fn aarch64_get_regs(inst: &Inst, collector: &mut RegUsageCollector) {
         }
         &Inst::VirtualSPOffsetAdj { .. } => {}
         &Inst::EmitIsland { .. } => {}
-        &Inst::Safepoint { .. } => {}
     }
 }
 
@@ -1907,7 +1907,7 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
             map_use(mapper, rn);
         }
         &mut Inst::Jump { .. } => {}
-        &mut Inst::Call { ref mut info } => {
+        &mut Inst::Call { ref mut info, .. } => {
             for r in info.uses.iter_mut() {
                 map_use(mapper, r);
             }
@@ -1961,7 +1961,6 @@ fn aarch64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
         }
         &mut Inst::VirtualSPOffsetAdj { .. } => {}
         &mut Inst::EmitIsland { .. } => {}
-        &mut Inst::Safepoint { .. } => {}
     }
 }
 

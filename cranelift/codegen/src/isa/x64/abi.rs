@@ -362,7 +362,7 @@ impl ABIBody for X64ABIBody {
         unimplemented!("reference types not supported by x64 backend")
     }
 
-    fn gen_safepoint(&self) -> Inst {
+    fn gen_safepoint_info(&self) -> () {
         unimplemented!("reference types not supported by x64 backend")
     }
 

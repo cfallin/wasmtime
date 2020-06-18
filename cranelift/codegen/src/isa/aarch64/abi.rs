@@ -651,6 +651,7 @@ impl AArch64ABIBody {
             });
             insts.push(Inst::Udf {
                 trap_info: (ir::SourceLoc::default(), ir::TrapCode::StackOverflow),
+                safepoint_info: None,
             });
         }
     }
@@ -1040,11 +1041,11 @@ impl ABIBody for AArch64ABIBody {
         }
     }
 
-    fn gen_safepoint(&self) -> Inst {
+    fn gen_safepoint_info(&self) -> SafepointInfo {
         let nominal_sp_start = -((self.num_refslots * 8) as i32);
         let nominal_sp_end = 0;
 
-        Inst::Safepoint {
+        SafepointInfo {
             nominal_sp_start,
             nominal_sp_end,
         }
@@ -1519,7 +1520,7 @@ impl ABICall for AArch64ABICall {
         }
     }
 
-    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) {
+    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C, safepoint_info: Option<Box<SafepointInfo>>) {
         let (uses, defs) = (
             mem::replace(&mut self.uses, Default::default()),
             mem::replace(&mut self.defs, Default::default()),
@@ -1542,6 +1543,7 @@ impl ABICall for AArch64ABICall {
                     loc: self.loc,
                     opcode: self.opcode,
                 }),
+                safepoint_info,
             }),
             &CallDest::ExtName(ref name, RelocDistance::Far) => {
                 ctx.emit(Inst::LoadExtName {
@@ -1558,6 +1560,7 @@ impl ABICall for AArch64ABICall {
                         loc: self.loc,
                         opcode: self.opcode,
                     }),
+                    safepoint_info,
                 });
             }
             &CallDest::Reg(reg) => ctx.emit(Inst::CallInd {
@@ -1568,6 +1571,7 @@ impl ABICall for AArch64ABICall {
                     loc: self.loc,
                     opcode: self.opcode,
                 }),
+                safepoint_info,
             }),
         }
     }

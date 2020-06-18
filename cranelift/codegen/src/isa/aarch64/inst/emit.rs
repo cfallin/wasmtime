@@ -112,6 +112,26 @@ pub fn u64_constant(bits: u64) -> ConstantData {
     ConstantData::from(&data[..])
 }
 
+/// Helper: emit safepoint info.
+fn emit_safepoint_info(sink: &mut MachBuffer<Inst>, info: &SafepointInfo, state: &EmitState) {
+    // For now, references are stored in a contiguous range of stack slots.
+    let mut start = (state.virtual_sp_offset as i32) + info.nominal_sp_start;
+    let end = (state.virtual_sp_offset as i32) + info.nominal_sp_end;
+    assert!(start >= 0);
+    assert!(end >= start);
+    let mut offsets = vec![];
+    while start < end {
+        offsets.push(start as u32);
+        start += 8;
+    }
+    assert!(state.nominal_sp_to_fp >= 0);
+    sink.add_stackmap(
+        /* insn_len = */ 4,
+        state.nominal_sp_to_fp as u32,
+        &offsets[..],
+    );
+}
+
 //=============================================================================
 // Instructions and subcomponents: emission
 
@@ -400,6 +420,8 @@ impl MachInstEmitState<Inst> for EmitState {
 
 impl MachInstEmit for Inst {
     type State = EmitState;
+
+    type SafepointInfo = SafepointInfo;
 
     fn emit(&self, sink: &mut MachBuffer<Inst>, flags: &settings::Flags, state: &mut EmitState) {
         // N.B.: we *must* not exceed the "worst-case size" used to compute
@@ -1432,14 +1454,20 @@ impl MachInstEmit for Inst {
             &Inst::EpiloguePlaceholder => {
                 // Noop; this is just a placeholder for epilogues.
             }
-            &Inst::Call { ref info } => {
+            &Inst::Call { ref info, ref safepoint_info } => {
                 sink.add_reloc(info.loc, Reloc::Arm64Call, &info.dest, 0);
+                if let &Some(ref safepoint) = safepoint_info {
+                    emit_safepoint_info(sink, &**safepoint, state);
+                }
                 sink.put4(enc_jump26(0b100101, 0));
                 if info.opcode.is_call() {
                     sink.add_call_site(info.loc, info.opcode);
                 }
             }
-            &Inst::CallInd { ref info } => {
+            &Inst::CallInd { ref info, ref safepoint_info } => {
+                if let &Some(ref safepoint) = safepoint_info {
+                    emit_safepoint_info(sink, &**safepoint, state);
+                }
                 sink.put4(0b1101011_0001_11111_000000_00000_00000 | (machreg_to_gpr(info.rn) << 5));
                 if info.opcode.is_call() {
                     sink.add_call_site(info.loc, info.opcode);
@@ -1484,9 +1512,12 @@ impl MachInstEmit for Inst {
             &Inst::Brk => {
                 sink.put4(0xd4200000);
             }
-            &Inst::Udf { trap_info } => {
+            &Inst::Udf { trap_info, ref safepoint_info } => {
                 let (srcloc, code) = trap_info;
                 sink.add_trap(srcloc, code);
+                if let &Some(ref safepoint) = safepoint_info {
+                    emit_safepoint_info(sink, &**safepoint, state);
+                }
                 sink.put4(0xd4a00000);
             }
             &Inst::Adr { rd, off } => {
@@ -1670,28 +1701,6 @@ impl MachInstEmit for Inst {
                     sink.emit_island();
                     sink.bind_label(jump_around_label);
                 }
-            }
-            &Inst::Safepoint {
-                nominal_sp_start,
-                nominal_sp_end,
-            } => {
-                // For now, references are stored in a contiguous range of stack
-                // slots.
-                let mut start = (state.virtual_sp_offset as i32) + nominal_sp_start;
-                let end = (state.virtual_sp_offset as i32) + nominal_sp_end;
-                assert!(start >= 0);
-                assert!(end >= start);
-                let mut offsets = vec![];
-                while start < end {
-                    offsets.push(start as u32);
-                    start += 8;
-                }
-                assert!(state.nominal_sp_to_fp >= 0);
-                sink.add_stackmap(
-                    /* insn_len = */ 4,
-                    state.nominal_sp_to_fp as u32,
-                    &offsets[..],
-                );
             }
         }
 
@@ -2548,14 +2557,6 @@ impl MachInstEmit for Inst {
                 format!("virtual_sp_offset_adjust {}", offset)
             }
             &Inst::EmitIsland { needed_space } => format!("emit_island {}", needed_space),
-            &Inst::Safepoint {
-                nominal_sp_start,
-                nominal_sp_end,
-            } => format!(
-                "safepoint {} .. {}",
-                (state.virtual_sp_offset as i32) + nominal_sp_start,
-                (state.virtual_sp_offset as i32) + nominal_sp_end,
-            ),
         }
     }
 }

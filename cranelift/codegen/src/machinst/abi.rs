@@ -83,9 +83,9 @@ pub trait ABIBody {
     /// Generate a refslot load.
     fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Self::I;
 
-    /// Generate a safepoint pseudo-instruction, causing the machine backend to
-    /// emit safepoint information describing stack offsets of references.
-    fn gen_safepoint(&self) -> Self::I;
+    /// Generate safepoint information, to be used by the backend by attaching to another
+    /// instruction.
+    fn gen_safepoint_info(&self) -> <Self::I as MachInstEmit>::SafepointInfo;
 
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.
@@ -211,5 +211,9 @@ pub trait ABICall {
     ///
     /// This function should only be called once, as it is allowed to re-use
     /// parts of the ABICall object in emitting instructions.
-    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C);
+    fn emit_call<C: LowerCtx<I = Self::I>>(
+        &mut self,
+        ctx: &mut C,
+        safepoint_info: Option<Box<<Self::I as MachInstEmit>::SafepointInfo>>,
+    );
 }
