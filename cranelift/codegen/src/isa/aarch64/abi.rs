@@ -1081,7 +1081,11 @@ impl ABIBody for AArch64ABIBody {
 
     fn spillslots_to_stackmap(&self, slots: &[SpillSlot], state: &EmitState) -> Stackmap {
         assert!(state.virtual_sp_offset >= 0);
-        trace!("spillslots_to_stackmap: slots = {:?}, state = {:?}", slots, state);
+        trace!(
+            "spillslots_to_stackmap: slots = {:?}, state = {:?}",
+            slots,
+            state
+        );
         let map_size = (state.virtual_sp_offset + state.nominal_sp_to_fp) as u32;
         let map_words = (map_size + 7) / 8;
         let mut bits = std::iter::repeat(false)
@@ -1096,7 +1100,6 @@ impl ABIBody for AArch64ABIBody {
         }
 
         Stackmap::from_slice(&bits[..])
-            .with_fp_offset((state.virtual_sp_offset + state.nominal_sp_to_fp) as u32)
     }
 
     fn gen_prologue(&mut self) -> Vec<Inst> {

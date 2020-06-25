@@ -73,7 +73,6 @@ const NUM_BITS: usize = core::mem::size_of::<Num>() * 8;
 pub struct Stackmap {
     bitmap: Vec<BitSet<Num>>,
     mapped_words: u32,
-    fp_offset: Option<u32>,
 }
 
 impl Stackmap {
@@ -145,25 +144,7 @@ impl Stackmap {
         Self {
             mapped_words: len as u32,
             bitmap,
-            fp_offset: None,
         }
-    }
-
-    /// Set the FP offset from the base of the stackmap. The offset must be in
-    /// *bytes*, not words/slots.
-    pub fn with_fp_offset(self, fp_offset: u32) -> Self {
-        assert!(self.fp_offset.is_none());
-        Self {
-            mapped_words: self.mapped_words,
-            bitmap: self.bitmap,
-            fp_offset: Some(fp_offset),
-        }
-    }
-
-    /// Get the offset of FP (the frame pointer) from the base of the stackmap,
-    /// in bytes, if known.
-    pub fn get_fp_offset(&self) -> Option<u32> {
-        self.fp_offset
     }
 
     /// Returns a specified bit.
