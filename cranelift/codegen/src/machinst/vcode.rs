@@ -456,10 +456,13 @@ impl<I: VCodeInst> VCode<I> {
                 if safepoint_idx < self.safepoint_insns.len()
                     && self.safepoint_insns[safepoint_idx] == iix
                 {
-                    let stackmap = self
-                        .abi
-                        .spillslots_to_stackmap(&self.safepoint_slots[safepoint_idx][..], &state);
-                    state.pre_safepoint(stackmap);
+                    if self.safepoint_slots[safepoint_idx].len() > 0 {
+                        let stackmap = self.abi.spillslots_to_stackmap(
+                            &self.safepoint_slots[safepoint_idx][..],
+                            &state,
+                        );
+                        state.pre_safepoint(stackmap);
+                    }
                     safepoint_idx += 1;
                 }
 

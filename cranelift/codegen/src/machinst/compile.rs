@@ -61,7 +61,7 @@ where
     // but there are no safepoints at which we need to know about them,
     // then we don't need stackmaps.
     let sri = if stackmap_request_info.reftyped_vregs.len() > 0
-        || stackmap_request_info.safepoint_insns.len() > 0
+        && stackmap_request_info.safepoint_insns.len() > 0
     {
         Some(&stackmap_request_info)
     } else {
