@@ -636,6 +636,7 @@ impl<I: VCodeInst> ShowWithRRU for VCode<I> {
         write!(&mut s, "  Entry block: {}\n", self.entry).unwrap();
 
         let mut state = Default::default();
+        let mut safepoint_idx = 0;
         for i in 0..self.num_blocks() {
             let block = i as BlockIndex;
 
@@ -649,6 +650,17 @@ impl<I: VCodeInst> ShowWithRRU for VCode<I> {
             let (start, end) = self.block_ranges[block as usize];
             write!(&mut s, "  (instruction range: {} .. {})\n", start, end).unwrap();
             for inst in start..end {
+                if safepoint_idx < self.safepoint_insns.len()
+                    && self.safepoint_insns[safepoint_idx] == inst
+                {
+                    write!(
+                        &mut s,
+                        "      (safepoint: slots {:?})\n",
+                        self.safepoint_slots[safepoint_idx]
+                    )
+                    .unwrap();
+                    safepoint_idx += 1;
+                }
                 write!(
                     &mut s,
                     "  Inst {}:   {}\n",

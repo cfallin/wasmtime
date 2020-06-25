@@ -112,26 +112,6 @@ pub fn u64_constant(bits: u64) -> ConstantData {
     ConstantData::from(&data[..])
 }
 
-/// Helper: emit safepoint info.
-fn emit_safepoint_info(sink: &mut MachBuffer<Inst>, info: &SafepointInfo, state: &EmitState) {
-    // For now, references are stored in a contiguous range of stack slots.
-    let mut start = (state.virtual_sp_offset as i32) + info.nominal_sp_start;
-    let end = (state.virtual_sp_offset as i32) + info.nominal_sp_end;
-    assert!(start >= 0);
-    assert!(end >= start);
-    let mut offsets = vec![];
-    while start < end {
-        offsets.push(start as u32);
-        start += 8;
-    }
-    assert!(state.nominal_sp_to_fp >= 0);
-    sink.add_stackmap(
-        /* insn_len = */ 4,
-        state.nominal_sp_to_fp as u32,
-        &offsets[..],
-    );
-}
-
 //=============================================================================
 // Instructions and subcomponents: emission
 
@@ -407,6 +387,8 @@ pub struct EmitState {
     virtual_sp_offset: i64,
     /// Offset of FP from nominal-SP.
     nominal_sp_to_fp: i64,
+    /// Safepoint stackmap for upcoming instruction, as provided to `pre_safepoint()`.
+    stackmap: Option<Stackmap>,
 }
 
 impl MachInstEmitState<Inst> for EmitState {
@@ -415,6 +397,20 @@ impl MachInstEmitState<Inst> for EmitState {
             virtual_sp_offset: 0,
             nominal_sp_to_fp: abi.frame_size() as i64,
         }
+    }
+
+    fn pre_safepoint(&mut self, stackmap: Stackmap) {
+        self.stackmap = Some(stackmap);
+    }
+}
+
+impl EmitState {
+    fn take_stackmap(&mut self) -> Option<Stackmap> {
+        self.stackmap.take()
+    }
+
+    fn clear_post_insn(&mut self) {
+        self.stackmap = None;
     }
 }
 
@@ -1458,10 +1454,10 @@ impl MachInstEmit for Inst {
                 ref info,
                 ref safepoint_info,
             } => {
-                sink.add_reloc(info.loc, Reloc::Arm64Call, &info.dest, 0);
-                if let &Some(ref safepoint) = safepoint_info {
-                    emit_safepoint_info(sink, &**safepoint, state);
+                if let Some(s) = state.take_stackmap() {
+                    sink.add_stackmap(4, s);
                 }
+                sink.add_reloc(info.loc, Reloc::Arm64Call, &info.dest, 0);
                 sink.put4(enc_jump26(0b100101, 0));
                 if info.opcode.is_call() {
                     sink.add_call_site(info.loc, info.opcode);
@@ -1471,8 +1467,8 @@ impl MachInstEmit for Inst {
                 ref info,
                 ref safepoint_info,
             } => {
-                if let &Some(ref safepoint) = safepoint_info {
-                    emit_safepoint_info(sink, &**safepoint, state);
+                if let Some(s) = state.take_stackmap() {
+                    sink.add_stackmap(4, s);
                 }
                 sink.put4(0b1101011_0001_11111_000000_00000_00000 | (machreg_to_gpr(info.rn) << 5));
                 if info.opcode.is_call() {
@@ -1524,8 +1520,8 @@ impl MachInstEmit for Inst {
             } => {
                 let (srcloc, code) = trap_info;
                 sink.add_trap(srcloc, code);
-                if let &Some(ref safepoint) = safepoint_info {
-                    emit_safepoint_info(sink, &**safepoint, state);
+                if let Some(s) = state.take_stackmap() {
+                    sink.add_stackmap(4, s);
                 }
                 sink.put4(0xd4a00000);
             }
@@ -1715,6 +1711,8 @@ impl MachInstEmit for Inst {
 
         let end_off = sink.cur_offset();
         debug_assert!((end_off - start_off) <= Inst::worst_case_size());
+
+        state.clear_post_insn();
     }
 
     fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, state: &mut EmitState) -> String {
