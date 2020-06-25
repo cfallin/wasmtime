@@ -96,7 +96,7 @@
 //!
 //! ```
 
-use crate::binemit::{CodeInfo, CodeOffset};
+use crate::binemit::{CodeInfo, CodeOffset, Stackmap};
 use crate::ir::condcodes::IntCC;
 use crate::ir::{Function, Type};
 use crate::result::CodegenResult;
@@ -272,6 +272,9 @@ pub trait MachInstEmit: MachInst {
 pub trait MachInstEmitState<I: MachInst>: Default + Clone + Debug {
     /// Create a new emission state given the ABI object.
     fn new(abi: &dyn ABIBody<I = I>) -> Self;
+    /// Update the emission state before emitting an instruction that is a
+    /// safepoint.
+    fn pre_safepoint(&mut self, _stackmap: Stackmap) {}
 }
 
 /// The result of a `MachBackend::compile_function()` call. Contains machine

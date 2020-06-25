@@ -1,5 +1,6 @@
 //! ABI definitions.
 
+use crate::binemit::Stackmap;
 use crate::ir::{ArgumentExtension, StackSlot};
 use crate::machinst::*;
 use crate::settings;
@@ -99,6 +100,15 @@ pub trait ABIBody {
 
     /// Store to a spillslot.
     fn store_spillslot(&self, slot: SpillSlot, ty: Type, from_reg: Reg) -> Self::I;
+
+    /// Generate a stackmap, given a list of spillslots and the emission state
+    /// at a given program point (prior to emission fo the safepointing
+    /// instruction).
+    fn spillslots_to_stackmap(
+        &self,
+        slots: &[SpillSlot],
+        state: &<Self::I as MachInstEmit>::State,
+    ) -> Stackmap;
 
     /// Generate a prologue, post-regalloc. This should include any stack
     /// frame or other setup necessary to use the other methods (`load_arg`,

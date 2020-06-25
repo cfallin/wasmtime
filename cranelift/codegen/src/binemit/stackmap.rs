@@ -68,12 +68,6 @@ const NUM_BITS: usize = core::mem::size_of::<Num>() * 8;
 /// stack slots overlap, so we must choose which function's stack maps record
 /// live GC references in these slots. We record the `IncomingArg`s in the
 /// callee's stack map.
-///
-/// The `Stackmap` also optionally includes the offset from the stack pointer
-/// (the base of the stack map) to the frame pointer value expected at this
-/// instruction pointer. This offset is measured in bytes, not words. It can be
-/// used to translate stackmaps into FP-relative form when an embedding requires
-/// that.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "enable-serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Stackmap {

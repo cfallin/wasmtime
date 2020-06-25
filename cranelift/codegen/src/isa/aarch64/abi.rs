@@ -93,12 +93,13 @@
 //!   - Return v1 in memory at [P+8].
 //!   - Return v0 in memory at [P+16].
 
+use crate::binemit::Stackmap;
 use crate::ir;
 use crate::ir::types;
 use crate::ir::types::*;
 use crate::ir::{ArgumentExtension, StackSlot};
 use crate::isa;
-use crate::isa::aarch64::{inst::*, lower::ty_bits};
+use crate::isa::aarch64::{inst::EmitState, inst::*, lower::ty_bits};
 use crate::machinst::*;
 use crate::settings;
 use crate::{CodegenError, CodegenResult};
@@ -1076,6 +1077,23 @@ impl ABIBody for AArch64ABIBody {
         let sp_off = self.stackslots_size as i64 + spill_off;
         trace!("store_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
         store_stack(MemArg::NominalSPOffset(sp_off, ty), from_reg, ty)
+    }
+
+    fn spillslots_to_stackmap(&self, slots: &[SpillSlot], state: &EmitState) -> Stackmap {
+        let map_size = (state.virtual_sp_offset + state.nominal_sp_to_fp) as u32;
+        let map_words = (map_size + 7) / 8;
+        let mut bits = std::iter::repeat(false)
+            .take(map_words as usize)
+            .collect::<Vec<bool>>();
+
+        let first_spillslot_word = ((self.stackslots_size + state.virtual_sp_offset) / 8) as usize;
+        for &slot in slots {
+            let slot = slot.get() as usize;
+            bits[first_spillslot_word + slot] = true;
+        }
+
+        Stackmap::from_slice(&bits[..])
+            .with_fp_offset((state.virtual_sp_offset + state.nominal_sp_to_fp) as usize)
     }
 
     fn gen_prologue(&mut self) -> Vec<Inst> {

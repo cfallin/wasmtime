@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use regalloc::{RealReg, Reg, RegClass, Set, SpillSlot, Writable};
 
+use crate::binemit::Stackmap;
 use crate::ir::{self, types, types::*, ArgumentExtension, StackSlot, Type};
 use crate::isa::{self, x64::inst::*};
 use crate::machinst::*;
@@ -398,6 +399,10 @@ impl ABIBody for X64ABIBody {
 
     fn store_spillslot(&self, _slot: SpillSlot, _ty: Type, _from_reg: Reg) -> Inst {
         unimplemented!("store_spillslot")
+    }
+
+    fn spillslots_to_stackmap(&self, _slots: &[SpillSlot], _state: &Inst::EmitState) -> Stackmap {
+        unimplemented!("spillslots_to_stackmap")
     }
 
     fn gen_prologue(&mut self) -> Vec<Inst> {

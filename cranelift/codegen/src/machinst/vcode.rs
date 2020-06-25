@@ -438,6 +438,7 @@ impl<I: VCodeInst> VCode<I> {
         buffer.reserve_labels_for_blocks(self.num_blocks() as BlockIndex); // first N MachLabels are simply block indices.
 
         let flags = self.abi.flags();
+        let mut safepoint_idx = 0;
         let mut cur_srcloc = None;
         for block in 0..self.num_blocks() {
             let block = block as BlockIndex;
@@ -459,6 +460,16 @@ impl<I: VCodeInst> VCode<I> {
                     }
                     buffer.start_srcloc(srcloc);
                     cur_srcloc = Some(srcloc);
+                }
+
+                if safepoint_idx < self.safepoint_insns.len()
+                    && self.safepoint_insns[safepoint_idx] == iix
+                {
+                    let stackmap = self
+                        .abi
+                        .spillslots_to_stackmap(&self.safepoint_slots[safepoint_idx][..], &state);
+                    state.pre_safepoint(stackmap);
+                    safepoint_idx += 1;
                 }
 
                 self.insts[iix as usize].emit(&mut buffer, flags, &mut state);
