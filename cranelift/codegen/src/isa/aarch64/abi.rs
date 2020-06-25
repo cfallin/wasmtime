@@ -1080,20 +1080,23 @@ impl ABIBody for AArch64ABIBody {
     }
 
     fn spillslots_to_stackmap(&self, slots: &[SpillSlot], state: &EmitState) -> Stackmap {
+        assert!(state.virtual_sp_offset >= 0);
+        trace!("spillslots_to_stackmap: slots = {:?}, state = {:?}", slots, state);
         let map_size = (state.virtual_sp_offset + state.nominal_sp_to_fp) as u32;
         let map_words = (map_size + 7) / 8;
         let mut bits = std::iter::repeat(false)
             .take(map_words as usize)
             .collect::<Vec<bool>>();
 
-        let first_spillslot_word = ((self.stackslots_size + state.virtual_sp_offset) / 8) as usize;
+        let first_spillslot_word =
+            ((self.stackslots_size + state.virtual_sp_offset as u32) / 8) as usize;
         for &slot in slots {
             let slot = slot.get() as usize;
             bits[first_spillslot_word + slot] = true;
         }
 
         Stackmap::from_slice(&bits[..])
-            .with_fp_offset((state.virtual_sp_offset + state.nominal_sp_to_fp) as usize)
+            .with_fp_offset((state.virtual_sp_offset + state.nominal_sp_to_fp) as u32)
     }
 
     fn gen_prologue(&mut self) -> Vec<Inst> {
@@ -1336,7 +1339,7 @@ impl ABIBody for AArch64ABIBody {
     }
 
     fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Option<Type>) -> Inst {
-        let ty = ty_from_ty_hint_or_reg_class(ty, from_reg.to_reg());
+        let ty = ty_from_ty_hint_or_reg_class(from_reg.to_reg(), ty);
         self.store_spillslot(to_slot, ty, from_reg.to_reg())
     }
 
@@ -1346,13 +1349,13 @@ impl ABIBody for AArch64ABIBody {
         from_slot: SpillSlot,
         ty: Option<Type>,
     ) -> Inst {
-        let ty = ty_from_ty_hint_or_reg_class(ty, from_reg.to_reg().to_reg());
+        let ty = ty_from_ty_hint_or_reg_class(to_reg.to_reg().to_reg(), ty);
         self.load_spillslot(from_slot, ty, to_reg.map(|r| r.to_reg()))
     }
 }
 
 fn ty_from_ty_hint_or_reg_class(r: Reg, ty: Option<Type>) -> Type {
-    match (ty, from_reg.to_reg().get_class()) {
+    match (ty, r.get_class()) {
         (Some(t), _) => t,
         (None, RegClass::I64) => I64,
         (None, RegClass::V128) => I128,
@@ -1530,7 +1533,7 @@ impl ABICall for AArch64ABICall {
             self.emit_copy_reg_to_arg(ctx, i, rd.to_reg());
         }
         match &self.dest {
-            &CallDest::ExtName(ref name, RelocDistance::Near) => ctx.emit(Inst::Call {
+            &CallDest::ExtName(ref name, RelocDistance::Near) => ctx.emit_safepoint(Inst::Call {
                 info: Box::new(CallInfo {
                     dest: name.clone(),
                     uses,
@@ -1546,7 +1549,7 @@ impl ABICall for AArch64ABICall {
                     offset: 0,
                     srcloc: self.loc,
                 });
-                ctx.emit(Inst::CallInd {
+                ctx.emit_safepoint(Inst::CallInd {
                     info: Box::new(CallIndInfo {
                         rn: spilltmp_reg(),
                         uses,
@@ -1556,7 +1559,7 @@ impl ABICall for AArch64ABICall {
                     }),
                 });
             }
-            &CallDest::Reg(reg) => ctx.emit(Inst::CallInd {
+            &CallDest::Reg(reg) => ctx.emit_safepoint(Inst::CallInd {
                 info: Box::new(CallIndInfo {
                     rn: reg,
                     uses,

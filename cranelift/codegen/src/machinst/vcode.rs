@@ -247,15 +247,6 @@ impl<I: VCodeInst> VCodeBuilder<I> {
     }
 }
 
-fn block_ranges(indices: &[InstIx], len: usize) -> Vec<(usize, usize)> {
-    let v = indices
-        .iter()
-        .map(|iix| iix.get() as usize)
-        .chain(iter::once(len))
-        .collect::<Vec<usize>>();
-    v.windows(2).map(|p| (p[0], p[1])).collect()
-}
-
 fn is_redundant_move<I: VCodeInst>(insn: &I) -> bool {
     if let Some((to, from)) = insn.is_move() {
         to.to_reg() == from

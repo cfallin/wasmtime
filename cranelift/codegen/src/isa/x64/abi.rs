@@ -343,30 +343,6 @@ impl ABIBody for X64ABIBody {
         Inst::epilogue_placeholder()
     }
 
-    fn set_num_refslots(&mut self, slots: u32) {
-        assert!(slots == 0, "reference types not supported by x64 backend");
-    }
-
-    fn get_num_refslots(&self) -> u32 {
-        0
-    }
-
-    fn gen_refslot_init(&self, _slot: RefSlot) -> Inst {
-        unimplemented!("reference types not supported by x64 backend")
-    }
-
-    fn gen_refslot_store(&self, _to_slot: RefSlot, _from_reg: Reg) -> Inst {
-        unimplemented!("reference types not supported by x64 backend")
-    }
-
-    fn gen_refslot_load(&self, _from_slot: RefSlot, _to_reg: Writable<Reg>) -> Inst {
-        unimplemented!("reference types not supported by x64 backend")
-    }
-
-    fn gen_safepoint_info(&self) -> () {
-        unimplemented!("reference types not supported by x64 backend")
-    }
-
     fn set_num_spillslots(&mut self, slots: usize) {
         self.num_spill_slots = Some(slots);
     }
@@ -401,7 +377,7 @@ impl ABIBody for X64ABIBody {
         unimplemented!("store_spillslot")
     }
 
-    fn spillslots_to_stackmap(&self, _slots: &[SpillSlot], _state: &Inst::EmitState) -> Stackmap {
+    fn spillslots_to_stackmap(&self, _slots: &[SpillSlot], _state: &EmitState) -> Stackmap {
         unimplemented!("spillslots_to_stackmap")
     }
 

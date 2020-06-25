@@ -1,6 +1,6 @@
 //! AArch64 ISA: binary code emission.
 
-use crate::binemit::{CodeOffset, Reloc};
+use crate::binemit::{CodeOffset, Reloc, Stackmap};
 use crate::ir::constant::ConstantData;
 use crate::ir::types::*;
 use crate::ir::TrapCode;
@@ -384,9 +384,9 @@ fn enc_vec_rr_misc(bits_12_16: u32, rd: Writable<Reg>, rn: Reg) -> u32 {
 pub struct EmitState {
     /// Addend to convert nominal-SP offsets to real-SP offsets at the current
     /// program point.
-    virtual_sp_offset: i64,
+    pub(crate) virtual_sp_offset: i64,
     /// Offset of FP from nominal-SP.
-    nominal_sp_to_fp: i64,
+    pub(crate) nominal_sp_to_fp: i64,
     /// Safepoint stackmap for upcoming instruction, as provided to `pre_safepoint()`.
     stackmap: Option<Stackmap>,
 }
@@ -396,6 +396,7 @@ impl MachInstEmitState<Inst> for EmitState {
         EmitState {
             virtual_sp_offset: 0,
             nominal_sp_to_fp: abi.frame_size() as i64,
+            stackmap: None,
         }
     }
 
@@ -416,8 +417,6 @@ impl EmitState {
 
 impl MachInstEmit for Inst {
     type State = EmitState;
-
-    type SafepointInfo = SafepointInfo;
 
     fn emit(&self, sink: &mut MachBuffer<Inst>, flags: &settings::Flags, state: &mut EmitState) {
         // N.B.: we *must* not exceed the "worst-case size" used to compute
@@ -1450,10 +1449,7 @@ impl MachInstEmit for Inst {
             &Inst::EpiloguePlaceholder => {
                 // Noop; this is just a placeholder for epilogues.
             }
-            &Inst::Call {
-                ref info,
-                ref safepoint_info,
-            } => {
+            &Inst::Call { ref info } => {
                 if let Some(s) = state.take_stackmap() {
                     sink.add_stackmap(4, s);
                 }
@@ -1463,10 +1459,7 @@ impl MachInstEmit for Inst {
                     sink.add_call_site(info.loc, info.opcode);
                 }
             }
-            &Inst::CallInd {
-                ref info,
-                ref safepoint_info,
-            } => {
+            &Inst::CallInd { ref info } => {
                 if let Some(s) = state.take_stackmap() {
                     sink.add_stackmap(4, s);
                 }
@@ -1514,10 +1507,7 @@ impl MachInstEmit for Inst {
             &Inst::Brk => {
                 sink.put4(0xd4200000);
             }
-            &Inst::Udf {
-                trap_info,
-                ref safepoint_info,
-            } => {
+            &Inst::Udf { trap_info } => {
                 let (srcloc, code) = trap_info;
                 sink.add_trap(srcloc, code);
                 if let Some(s) = state.take_stackmap() {
