@@ -289,7 +289,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 });
 
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerDivisionByZero);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
 
                 ctx.emit(Inst::AluRRRR {
                     alu_op: ALUOp::MSub64,
@@ -342,7 +342,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     });
 
                     let trap_info = (ctx.srcloc(insn), TrapCode::IntegerOverflow);
-                    ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                    ctx.emit(Inst::Udf { trap_info });
                 } else {
                     //   cbnz rm, #8
                     //   udf ; divide by zero
@@ -356,7 +356,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 }
 
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerDivisionByZero);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
             }
         }
 
@@ -1370,17 +1370,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
 
         Opcode::Trap | Opcode::ResumableTrap => {
             let trap_info = (ctx.srcloc(insn), inst_trapcode(ctx.data(insn)).unwrap());
-            // N.B.: we generate safepoint metadata for this explicit trap CLIF instruction, but
-            // not traps that we generate for error conditions of various sorts (e.g.,
-            // divide-by-zero), because the latter are not resumable and so semantically actually
-            // have no live references (the whole Wasm module terminates). Only CLIF-level traps
-            // possibly come from resumable traps, such as interrupt checks.
-            let safepoint_info = if ctx.is_safepoint(insn) {
-                Some(Box::new(ctx.abi().gen_safepoint_info()))
-            } else {
-                None
-            };
-            ctx.emit(Inst::Udf { trap_info, safepoint_info })
+            ctx.emit(Inst::Udf { trap_info });
         }
 
         Opcode::Trapif | Opcode::Trapff => {
@@ -1422,12 +1412,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 kind: CondBrKind::Cond(cond),
             });
 
-            let safepoint_info = if ctx.is_safepoint(insn) {
-                Some(Box::new(ctx.abi().gen_safepoint_info()))
-            } else {
-                None
-            };
-            ctx.emit(Inst::Udf { trap_info, safepoint_info })
+            ctx.emit(Inst::Udf { trap_info })
         }
 
         Opcode::Safepoint => {
@@ -1498,12 +1483,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 let arg_reg = input_to_reg(ctx, *input, NarrowValueMode::None);
                 abi.emit_copy_reg_to_arg(ctx, i, arg_reg);
             }
-            let safepoint_info = if ctx.is_safepoint(insn) {
-                Some(Box::new(ctx.abi().gen_safepoint_info()))
-            } else {
-                None
-            };
-            abi.emit_call(ctx, safepoint_info);
+            abi.emit_call(ctx);
             for (i, output) in outputs.iter().enumerate() {
                 let retval_reg = output_to_reg(ctx, *output);
                 abi.emit_copy_retval_to_reg(ctx, i, retval_reg);
@@ -1770,7 +1750,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 kind: CondBrKind::Cond(lower_fp_condcode(FloatCC::Ordered)),
             });
             let trap_info = (ctx.srcloc(insn), TrapCode::BadConversionToInteger);
-            ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+            ctx.emit(Inst::Udf { trap_info });
 
             let tmp = ctx.alloc_tmp(RegClass::V128, I128);
 
@@ -1811,7 +1791,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     kind: CondBrKind::Cond(lower_fp_condcode(low_cond)),
                 });
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerOverflow);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
 
                 // <= high_bound
                 lower_constant_f32(ctx, tmp, high_bound);
@@ -1824,7 +1804,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     kind: CondBrKind::Cond(lower_fp_condcode(FloatCC::LessThan)),
                 });
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerOverflow);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
             } else {
                 // From float64.
                 let (low_bound, low_cond, high_bound) = match (signed, out_bits) {
@@ -1854,7 +1834,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     kind: CondBrKind::Cond(lower_fp_condcode(low_cond)),
                 });
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerOverflow);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
 
                 // <= high_bound
                 lower_constant_f64(ctx, tmp, high_bound);
@@ -1867,7 +1847,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     kind: CondBrKind::Cond(lower_fp_condcode(FloatCC::LessThan)),
                 });
                 let trap_info = (ctx.srcloc(insn), TrapCode::IntegerOverflow);
-                ctx.emit(Inst::Udf { trap_info, safepoint_info: None });
+                ctx.emit(Inst::Udf { trap_info });
             };
 
             // Do the conversion.

@@ -8,12 +8,12 @@ block0(v0: r64):
 
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
-; nextln: sub sp, sp, #8
-; nextln: virtual_sp_offset_adjust 8
-; nextln: stur xzr, [sp]
-; nextln: stur x0, [sp]
-; nextln: ldur x0, [sp]
-; nextln: add sp, sp, #8
+; nextln: sub sp, sp, #16
+; nextln: virtual_sp_offset_adjust 16
+; nextln: stur xzr, [sp, #8]
+; nextln: stur x0, [sp, #8]
+; nextln: ldur x0, [sp, #8]
+; nextln: add sp, sp, #16
 ; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
@@ -25,12 +25,12 @@ block0(v0: r32):
 
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
-; nextln: sub sp, sp, #8
-; nextln: virtual_sp_offset_adjust 8
-; nextln: stur xzr, [sp]
-; nextln: stur x0, [sp]
-; nextln: ldur x0, [sp]
-; nextln: add sp, sp, #8
+; nextln: sub sp, sp, #16
+; nextln: virtual_sp_offset_adjust 16
+; nextln: stur xzr, [sp, #8]
+; nextln: stur x0, [sp, #8]
+; nextln: ldur x0, [sp, #8]
+; nextln: add sp, sp, #16
 ; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
@@ -43,14 +43,14 @@ block0(v0: r64):
 
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
-; nextln: sub sp, sp, #8
-; nextln: virtual_sp_offset_adjust 8
-; nextln: stur xzr, [sp]
-; nextln: stur x0, [sp]
-; nextln: ldur x0, [sp]
+; nextln: sub sp, sp, #16
+; nextln: virtual_sp_offset_adjust 16
+; nextln: stur xzr, [sp, #8]
+; nextln: stur x0, [sp, #8]
+; nextln: ldur x0, [sp, #8]
 ; nextln: subs xzr, x0, #0
 ; nextln: cset x0, eq
-; nextln: add sp, sp, #8
+; nextln: add sp, sp, #16
 ; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
@@ -63,14 +63,14 @@ block0(v0: r64):
 
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
-; nextln: sub sp, sp, #8
-; nextln: virtual_sp_offset_adjust 8
-; nextln: stur xzr, [sp]
-; nextln: stur x0, [sp]
-; nextln: ldur x0, [sp]
+; nextln: sub sp, sp, #16
+; nextln: virtual_sp_offset_adjust 16
+; nextln: stur xzr, [sp, #8]
+; nextln: stur x0, [sp, #8]
+; nextln: ldur x0, [sp, #8]
 ; nextln: adds xzr, x0, #1
 ; nextln: cset x0, eq
-; nextln: add sp, sp, #8
+; nextln: add sp, sp, #16
 ; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
@@ -83,11 +83,11 @@ block0:
 
 ; check: stp fp, lr, [sp, #-16]!
 ; nextln: mov fp, sp
-; nextln: sub sp, sp, #8
-; nextln: virtual_sp_offset_adjust 8
-; nextln: stur xzr, [sp]
+; nextln: sub sp, sp, #16
+; nextln: virtual_sp_offset_adjust 16
+; nextln: stur xzr, [sp, #8]
 ; nextln: movz x0, #0
-; nextln: add sp, sp, #8
+; nextln: add sp, sp, #16
 ; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
@@ -113,49 +113,49 @@ block3(v7: r64, v8: r64):
     return v7, v8, v9
 }
 
-; check:  stp fp, lr, [sp, #-16]!
-; nextln:  mov fp, sp
-; nextln:  sub sp, sp, #56
-; nextln:  virtual_sp_offset_adjust 40
-; nextln:  stur xzr, [sp, #32]
-; nextln:  stur xzr, [sp, #24]
-; nextln:  stur xzr, [sp, #16]
-; nextln:  stur xzr, [sp, #8]
-; nextln:  stur xzr, [sp]
-; nextln:  stur x1, [sp, #24]
-; nextln:  stur x0, [sp, #32]
-; nextln:  ldur x0, [sp, #32]
-; nextln:  ldr x16, 8 ; b 12 ; data
-; nextln:  blr x16
-; nextln:  mov x1, sp
-; nextln:  ldur x2, [sp, #32]
-; nextln:  stur x2, [x1]
-; nextln:  and w0, w0, #1
-; nextln:  cbz x0, label1 ; b label3
-; check:   Block 1
-; check:   b label2
-; check:   Block 2
-; check:   ldur x0, [sp, #32]
-; nextln:  ldur x1, [sp, #24]
-; nextln:  stur x0, [sp, #8]
-; nextln:  stur x1, [sp, #16]
-; nextln:  b label5
-; check:   Block 3
-; check:   b label4
-; check:   Block 4
-; check:   ldur x0, [sp, #24]
-; nextln:  ldur x1, [sp, #32]
-; nextln:  stur x0, [sp, #8]
-; nextln:  stur x1, [sp, #16]
-; nextln:  b label5
-; check:   Block 5
-; check:   mov x0, sp
-; nextln:  ldur x0, [x0]
-; nextln:  stur x0, [sp]
-; nextln:  ldur x2, [sp]
-; nextln:  ldur x1, [sp, #8]
-; nextln:  ldur x0, [sp, #16]
-; nextln:  add sp, sp, #40
-; nextln:  mov sp, fp
-; nextln:  ldp fp, lr, [sp], #16
-; nextln:  ret
+; check: stp fp, lr, [sp, #-16]!
+; nextln: mov fp, sp
+; nextln: sub sp, sp, #64
+; nextln: virtual_sp_offset_adjust 48
+; nextln: stur xzr, [sp, #40]
+; nextln: stur xzr, [sp, #32]
+; nextln: stur xzr, [sp, #24]
+; nextln: stur xzr, [sp, #16]
+; nextln: stur xzr, [sp, #8]
+; nextln: stur x1, [sp, #32]
+; nextln: stur x0, [sp, #40]
+; nextln: ldur x0, [sp, #40]
+; nextln: ldr x16, 8 ; b 12 ; data
+; nextln: blr x16
+; nextln: mov x1, sp
+; nextln: ldur x2, [sp, #40]
+; nextln: stur x2, [x1]
+; nextln: and w0, w0, #1
+; nextln: cbz x0, label1 ; b label3
+; check: Block 1:
+; check: b label2
+; check: Block 2:
+; check: ldur x0, [sp, #40]
+; nextln: ldur x1, [sp, #32]
+; nextln: stur x0, [sp, #16]
+; nextln: stur x1, [sp, #24]
+; nextln: b label5
+; check: Block 3:
+; check: b label4
+; check: Block 4:
+; check: ldur x0, [sp, #32]
+; nextln: ldur x1, [sp, #40]
+; nextln: stur x0, [sp, #16]
+; nextln: stur x1, [sp, #24]
+; nextln: b label5
+; check: Block 5:
+; check: mov x0, sp
+; nextln: ldur x0, [x0]
+; nextln: stur x0, [sp, #8]
+; nextln: ldur x2, [sp, #8]
+; nextln: ldur x1, [sp, #16]
+; nextln: ldur x0, [sp, #24]
+; nextln: add sp, sp, #48
+; nextln: mov sp, fp
+; nextln: ldp fp, lr, [sp], #16
+; nextln: ret

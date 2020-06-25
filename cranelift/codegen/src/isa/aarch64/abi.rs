@@ -651,7 +651,6 @@ impl AArch64ABIBody {
             });
             insts.push(Inst::Udf {
                 trap_info: (ir::SourceLoc::default(), ir::TrapCode::StackOverflow),
-                safepoint_info: None,
             });
         }
     }
@@ -689,6 +688,11 @@ fn load_stack(mem: MemArg, into_reg: Writable<Reg>, ty: Type) -> Inst {
             mem,
             srcloc: None,
         },
+        types::I128 => Inst::FpuLoad128 {
+            rd: into_reg,
+            mem,
+            srcloc: None,
+        },
         _ => unimplemented!("load_stack({})", ty),
     }
 }
@@ -721,6 +725,11 @@ fn store_stack(mem: MemArg, from_reg: Reg, ty: Type) -> Inst {
             srcloc: None,
         },
         types::F64 => Inst::FpuStore64 {
+            rd: from_reg,
+            mem,
+            srcloc: None,
+        },
+        types::I128 => Inst::FpuStore128 {
             rd: from_reg,
             mem,
             srcloc: None,
@@ -1001,54 +1010,6 @@ impl ABIBody for AArch64ABIBody {
 
     fn gen_epilogue_placeholder(&self) -> Inst {
         Inst::EpiloguePlaceholder {}
-    }
-
-    fn set_num_refslots(&mut self, slots: u32) {
-        self.num_refslots = slots;
-    }
-
-    fn get_num_refslots(&self) -> u32 {
-        self.num_refslots
-    }
-
-    fn gen_refslot_init(&self, slot: RefSlot) -> Inst {
-        assert!(slot.get() < self.num_refslots);
-        let nominal_sp_offset = -(slot.get() as i64 * 8) - 8;
-        Inst::Store64 {
-            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
-            rd: zero_reg(),
-            srcloc: None,
-        }
-    }
-
-    fn gen_refslot_store(&self, to_slot: RefSlot, from_reg: Reg) -> Inst {
-        assert!(to_slot.get() < self.num_refslots);
-        let nominal_sp_offset = -(to_slot.get() as i64 * 8) - 8;
-        Inst::Store64 {
-            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
-            rd: from_reg,
-            srcloc: None,
-        }
-    }
-
-    fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Inst {
-        assert!(from_slot.get() < self.num_refslots);
-        let nominal_sp_offset = -(from_slot.get() as i64 * 8) - 8;
-        Inst::ULoad64 {
-            mem: MemArg::NominalSPOffset(nominal_sp_offset, I64),
-            rd: to_reg,
-            srcloc: None,
-        }
-    }
-
-    fn gen_safepoint_info(&self) -> SafepointInfo {
-        let nominal_sp_start = -((self.num_refslots * 8) as i32);
-        let nominal_sp_end = 0;
-
-        SafepointInfo {
-            nominal_sp_start,
-            nominal_sp_end,
-        }
     }
 
     fn set_num_spillslots(&mut self, slots: usize) {
@@ -1356,12 +1317,28 @@ impl ABIBody for AArch64ABIBody {
         }
     }
 
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Type) -> Inst {
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Option<Type>) -> Inst {
+        let ty = ty_from_ty_hint_or_reg_class(ty, from_reg.to_reg());
         self.store_spillslot(to_slot, ty, from_reg.to_reg())
     }
 
-    fn gen_reload(&self, to_reg: Writable<RealReg>, from_slot: SpillSlot, ty: Type) -> Inst {
+    fn gen_reload(
+        &self,
+        to_reg: Writable<RealReg>,
+        from_slot: SpillSlot,
+        ty: Option<Type>,
+    ) -> Inst {
+        let ty = ty_from_ty_hint_or_reg_class(ty, from_reg.to_reg().to_reg());
         self.load_spillslot(from_slot, ty, to_reg.map(|r| r.to_reg()))
+    }
+}
+
+fn ty_from_ty_hint_or_reg_class(r: Reg, ty: Option<Type>) -> Type {
+    match (ty, from_reg.to_reg().get_class()) {
+        (Some(t), _) => t,
+        (None, RegClass::I64) => I64,
+        (None, RegClass::V128) => I128,
+        _ => panic!("Unexpected register class!"),
     }
 }
 
@@ -1520,7 +1497,7 @@ impl ABICall for AArch64ABICall {
         }
     }
 
-    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C, safepoint_info: Option<Box<SafepointInfo>>) {
+    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) {
         let (uses, defs) = (
             mem::replace(&mut self.uses, Default::default()),
             mem::replace(&mut self.defs, Default::default()),
@@ -1543,7 +1520,6 @@ impl ABICall for AArch64ABICall {
                     loc: self.loc,
                     opcode: self.opcode,
                 }),
-                safepoint_info,
             }),
             &CallDest::ExtName(ref name, RelocDistance::Far) => {
                 ctx.emit(Inst::LoadExtName {
@@ -1560,7 +1536,6 @@ impl ABICall for AArch64ABICall {
                         loc: self.loc,
                         opcode: self.opcode,
                     }),
-                    safepoint_info,
                 });
             }
             &CallDest::Reg(reg) => ctx.emit(Inst::CallInd {
@@ -1571,7 +1546,6 @@ impl ABICall for AArch64ABICall {
                     loc: self.loc,
                     opcode: self.opcode,
                 }),
-                safepoint_info,
             }),
         }
     }

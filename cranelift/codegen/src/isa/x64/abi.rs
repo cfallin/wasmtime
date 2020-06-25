@@ -540,11 +540,16 @@ impl ABIBody for X64ABIBody {
         }
     }
 
-    fn gen_spill(&self, _to_slot: SpillSlot, _from_reg: RealReg, _ty: Type) -> Inst {
+    fn gen_spill(&self, _to_slot: SpillSlot, _from_reg: RealReg, _ty: Option<Type>) -> Inst {
         unimplemented!()
     }
 
-    fn gen_reload(&self, _to_reg: Writable<RealReg>, _from_slot: SpillSlot, _ty: Type) -> Inst {
+    fn gen_reload(
+        &self,
+        _to_reg: Writable<RealReg>,
+        _from_slot: SpillSlot,
+        _ty: Option<Type>,
+    ) -> Inst {
         unimplemented!()
     }
 }

@@ -322,15 +322,6 @@ pub struct JTSequenceInfo {
     pub targets_for_term: Vec<MachLabel>, // needed for MachTerminator.
 }
 
-/// Information at a safepoint: describes what stack slots contain live
-/// reference-typed values (e.g., `R32` or `R64`) at this program point.
-/// Specified in terms of *nominal* SP offsets (see aarch64/abi.rs for details).
-#[derive(Clone, Debug)]
-pub struct SafepointInfo {
-    pub nominal_sp_start: i32,
-    pub nominal_sp_end: i32,
-}
-
 /// Instruction formats.
 #[derive(Clone, Debug)]
 pub enum Inst {
@@ -774,12 +765,10 @@ pub enum Inst {
     /// target.
     Call {
         info: Box<CallInfo>,
-        safepoint_info: Option<Box<SafepointInfo>>,
     },
     /// A machine indirect-call instruction.
     CallInd {
         info: Box<CallIndInfo>,
-        safepoint_info: Option<Box<SafepointInfo>>,
     },
 
     // ---- branches (exactly one must appear at end of BB) ----
@@ -835,7 +824,6 @@ pub enum Inst {
     /// runtime.
     Udf {
         trap_info: (SourceLoc, TrapCode),
-        safepoint_info: Option<Box<SafepointInfo>>,
     },
 
     /// Compute the address (using a PC-relative offset) of a memory location, using the `ADR`
@@ -2096,6 +2084,10 @@ impl MachInst for Inst {
         // to account for them here (otherwise the worst case would be 2^31 * 4, clearly not
         // feasible for other reasons).
         44
+    }
+
+    fn ref_type_rc(_: &settings::Flags) -> RegClass {
+        RegClass::I64
     }
 }
 

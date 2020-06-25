@@ -140,14 +140,13 @@
 //! Given these invariants, we argue why each optimization preserves execution
 //! semantics below (grep for "Preserves execution semantics").
 
-use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc};
+use crate::binemit::{Addend, CodeOffset, CodeSink, Reloc, Stackmap};
 use crate::ir::{ExternalName, Opcode, SourceLoc, TrapCode};
 use crate::machinst::{BlockIndex, MachInstLabelUse, VCodeInst};
 
 use log::trace;
 use smallvec::SmallVec;
 use std::mem;
-use std::vec::Vec;
 
 /// A buffer of output to be produced, fixed up, and then emitted to a CodeSink
 /// in bulk.
@@ -1164,17 +1163,13 @@ impl<I: VCodeInst> MachBuffer<I> {
     /// `stack_offsets` are based) and the FP value. By subtracting
     /// `offset_to_fp` from each `stack_offsets` element, one can obtain
     /// live-reference offsets from FP instead.
-    pub fn add_stackmap(&mut self, insn_len: CodeOffset, offset_to_fp: u32, stack_offsets: &[u32]) {
-        if stack_offsets.len() > 0 {
-            let offset = self.cur_offset();
-            let stack_offsets = stack_offsets.to_vec();
-            self.stackmaps.push(MachStackMap {
-                offset_to_fp,
-                offset,
-                offset_end: offset + insn_len,
-                stack_offsets,
-            });
-        }
+    pub fn add_stackmap(&mut self, insn_len: CodeOffset, stackmap: Stackmap) {
+        let offset = self.cur_offset();
+        self.stackmaps.push(MachStackMap {
+            offset,
+            offset_end: offset + insn_len,
+            stackmap,
+        });
     }
 }
 
@@ -1326,12 +1321,8 @@ pub struct MachStackMap {
     /// The code offset at the *end* of the instruction at which this stackmap
     /// applies.
     pub offset_end: CodeOffset,
-    /// The FP offset from SP at this program point. Can be used to convert
-    /// live-reference offsets to FP-relative.
-    pub offset_to_fp: u32,
-    /// The stack offsets (from current SP at this program point) containing
-    /// references.
-    pub stack_offsets: Vec<u32>,
+    /// The Stackmap itself.
+    pub stackmap: Stackmap,
 }
 
 /// Record of branch instruction in the buffer, to facilitate editing.

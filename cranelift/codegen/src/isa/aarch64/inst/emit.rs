@@ -1454,7 +1454,10 @@ impl MachInstEmit for Inst {
             &Inst::EpiloguePlaceholder => {
                 // Noop; this is just a placeholder for epilogues.
             }
-            &Inst::Call { ref info, ref safepoint_info } => {
+            &Inst::Call {
+                ref info,
+                ref safepoint_info,
+            } => {
                 sink.add_reloc(info.loc, Reloc::Arm64Call, &info.dest, 0);
                 if let &Some(ref safepoint) = safepoint_info {
                     emit_safepoint_info(sink, &**safepoint, state);
@@ -1464,7 +1467,10 @@ impl MachInstEmit for Inst {
                     sink.add_call_site(info.loc, info.opcode);
                 }
             }
-            &Inst::CallInd { ref info, ref safepoint_info } => {
+            &Inst::CallInd {
+                ref info,
+                ref safepoint_info,
+            } => {
                 if let &Some(ref safepoint) = safepoint_info {
                     emit_safepoint_info(sink, &**safepoint, state);
                 }
@@ -1512,7 +1518,10 @@ impl MachInstEmit for Inst {
             &Inst::Brk => {
                 sink.put4(0xd4200000);
             }
-            &Inst::Udf { trap_info, ref safepoint_info } => {
+            &Inst::Udf {
+                trap_info,
+                ref safepoint_info,
+            } => {
                 let (srcloc, code) = trap_info;
                 sink.add_trap(srcloc, code);
                 if let &Some(ref safepoint) = safepoint_info {

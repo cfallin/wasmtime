@@ -66,27 +66,6 @@ pub trait ABIBody {
     /// the epilogue should be inserted.
     fn gen_epilogue_placeholder(&self) -> Self::I;
 
-    /// Set the number of refslots to expect. This must be called before generating
-    /// refslot-referencing instructions.
-    fn set_num_refslots(&mut self, slots: u32);
-
-    /// Get the number of refslots.
-    fn get_num_refslots(&self) -> u32;
-
-    /// Generate a refslot initialization. The returned instruction initializes the given refslot
-    /// to a null reference.
-    fn gen_refslot_init(&self, slot: RefSlot) -> Self::I;
-
-    /// Generate a refslot store.
-    fn gen_refslot_store(&self, to_slot: RefSlot, from_reg: Reg) -> Self::I;
-
-    /// Generate a refslot load.
-    fn gen_refslot_load(&self, from_slot: RefSlot, to_reg: Writable<Reg>) -> Self::I;
-
-    /// Generate safepoint information, to be used by the backend by attaching to another
-    /// instruction.
-    fn gen_safepoint_info(&self) -> <Self::I as MachInstEmit>::SafepointInfo;
-
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.
     // Every function below this line may only be called post-regalloc.
@@ -148,11 +127,20 @@ pub trait ABIBody {
     /// Get the spill-slot size.
     fn get_spillslot_size(&self, rc: RegClass, ty: Type) -> u32;
 
-    /// Generate a spill.
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Type) -> Self::I;
+    /// Generate a spill. The type, if known, is given; this can be used to
+    /// generate a store instruction optimized for the particular type rather
+    /// than the RegClass (e.g., only F64 that resides in a V128 register). If
+    /// no type is given, the implementation should spill the whole register.
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Option<Type>) -> Self::I;
 
-    /// Generate a reload (fill).
-    fn gen_reload(&self, to_reg: Writable<RealReg>, from_slot: SpillSlot, ty: Type) -> Self::I;
+    /// Generate a reload (fill). As for spills, the type may be given to allow
+    /// a more optimized load instruction to be generated.
+    fn gen_reload(
+        &self,
+        to_reg: Writable<RealReg>,
+        from_slot: SpillSlot,
+        ty: Option<Type>,
+    ) -> Self::I;
 }
 
 /// Trait implemented by an object that tracks ABI-related state and can
@@ -211,9 +199,5 @@ pub trait ABICall {
     ///
     /// This function should only be called once, as it is allowed to re-use
     /// parts of the ABICall object in emitting instructions.
-    fn emit_call<C: LowerCtx<I = Self::I>>(
-        &mut self,
-        ctx: &mut C,
-        safepoint_info: Option<Box<<Self::I as MachInstEmit>::SafepointInfo>>,
-    );
+    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C);
 }

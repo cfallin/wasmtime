@@ -906,13 +906,15 @@ impl MachInst for Inst {
         15
     }
 
+    fn ref_type_rc(_: &settings::Flags) -> RegClass {
+        RegClass::I64
+    }
+
     type LabelUse = LabelUse;
 }
 
 impl MachInstEmit for Inst {
     type State = EmitState;
-
-    type SafepointInfo = ();
 
     fn emit(&self, sink: &mut MachBuffer<Inst>, _flags: &settings::Flags, _: &mut Self::State) {
         emit::emit(self, sink);
