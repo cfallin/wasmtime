@@ -28,8 +28,7 @@ byteorder = { version = "1.3.2", default-features = false }
 peepmatic-runtime = { path = "../peepmatic/crates/runtime", optional = true, version = "0.2.0" }
 
 # Julian's regalloc reftypes patch
-#regalloc = { git = "https://github.com/cfallin/regalloc.rs", rev = "c1e06772b7487faf716c7e26e4dbbb39352278b2" }
-regalloc = { path = "/home/cfallin/moz/regalloc.rs/lib" }
+regalloc = { git = "https://github.com/cfallin/regalloc.rs", rev = "1191577b2545a84191875f3614fc59768f694a8c" }
 
 # It is a goal of the cranelift-codegen crate to have minimal external dependencies.
 # Please don't add any unless they are essential to the task of creating binary
