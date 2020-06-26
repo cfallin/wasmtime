@@ -1688,7 +1688,7 @@ dependencies = [
 [[package]]
 name = "regalloc"
 version = "0.0.26"
-source = "git+https://github.com/cfallin/regalloc.rs?rev=6360ff1e7afd54f06a47c967a4e40f83b93477cd#6360ff1e7afd54f06a47c967a4e40f83b93477cd"
+source = "git+https://github.com/cfallin/regalloc.rs?rev=1191577b2545a84191875f3614fc59768f694a8c#1191577b2545a84191875f3614fc59768f694a8c"
 dependencies = [
  "log",
  "rustc-hash",

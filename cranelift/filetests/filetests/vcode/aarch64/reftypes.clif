@@ -99,8 +99,8 @@ block3(v7: r64, v8: r64):
 ; nextln: stur x0, [sp, #24]
 ; nextln: stur x19, [sp, #32]
 ; nextln: stur x20, [sp, #40]
+; nextln: (safepoint: slots [S0, S1, S2]
 ; nextln: blr x16
-; nextln: (safepoint: slots [S0, S1, S2])
 ; nextln: ldur x19, [sp, #32]
 ; nextln: ldur x20, [sp, #40]
 ; nextln: mov x1, sp
