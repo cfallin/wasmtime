@@ -395,7 +395,8 @@ impl<I: VCodeInst> VCode<I> {
                 if safept_idx < result.new_safepoint_insns.len()
                     && (result.new_safepoint_insns[safept_idx].get() as usize) == i
                 {
-                    final_safepoint_insns.push(final_insns.len() as InsnIndex);
+                    let idx = final_insns.len() - 1;
+                    final_safepoint_insns.push(idx as InsnIndex);
                     safept_idx += 1;
                 }
             }
@@ -649,8 +650,8 @@ impl<I: VCodeInst> ShowWithRRU for VCode<I> {
                 {
                     write!(
                         &mut s,
-                        "      (safepoint: slots {:?})\n",
-                        self.safepoint_slots[safepoint_idx]
+                        "      (safepoint: slots {:?} with EmitState {:?})\n",
+                        self.safepoint_slots[safepoint_idx], state,
                     )
                     .unwrap();
                     safepoint_idx += 1;
