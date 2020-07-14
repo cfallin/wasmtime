@@ -26,7 +26,8 @@ smallvec = { version = "1.0.0" }
 thiserror = "1.0.4"
 byteorder = { version = "1.3.2", default-features = false }
 peepmatic-runtime = { path = "../peepmatic/crates/runtime", optional = true, version = "0.2.0" }
-regalloc = { version = "0.0.27" }
+#regalloc = { version = "0.0.27" }
+regalloc = { git = "https://github.com/cfallin/regalloc.rs", rev = "50e6a44fb9d8c27b603f1a849f77638e79f7490d" }
 # It is a goal of the cranelift-codegen crate to have minimal external dependencies.
 # Please don't add any unless they are essential to the task of creating binary
 # machine code. Integration tests that need external dependencies can be
