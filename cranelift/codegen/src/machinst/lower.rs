@@ -16,6 +16,7 @@ use crate::machinst::{
     ABIBody, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode, VCodeBuilder,
     VCodeInst,
 };
+use crate::num_uses::NumUses;
 use crate::CodegenResult;
 
 use regalloc::{Reg, RegClass, StackmapRequestInfo, VirtualReg, Writable};
@@ -268,6 +269,9 @@ pub struct Lower<'func, I: VCodeInst> {
     /// The vreg containing the special VmContext parameter, if it is present in the current
     /// function's signature.
     vm_context: Option<Reg>,
+
+    /// Number of uses for each SSA value.
+    num_uses: SecondaryMap<Inst, u32>,
 }
 
 /// Notion of "relocation distance". This gives an estimate of how far away a symbol will be from a
@@ -388,6 +392,10 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
         let vreg_needed = std::iter::repeat(false).take(next_vreg as usize).collect();
 
+        // Compute number of uses of each value, in order to disallow merging of
+        // values with more than one uses.
+        let num_uses = NumUses::compute(f).take_uses();
+
         Ok(Lower {
             f,
             vcode,
@@ -404,6 +412,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             ir_insts: vec![],
             pinned_reg: None,
             vm_context,
+            num_uses,
         })
     }
 
@@ -803,7 +812,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     self.inst_color(src_inst)
                 );
                 if !has_side_effect_or_load(self.f, src_inst)
-                    || self.inst_color(at_inst) == self.inst_color(src_inst)
+                    && self.inst_color(at_inst) == self.inst_color(src_inst)
+                    && self.num_uses[src_inst] == 1
                 {
                     Some((src_inst, result_idx))
                 } else {
