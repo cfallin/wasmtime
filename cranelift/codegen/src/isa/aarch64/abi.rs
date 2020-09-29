@@ -738,8 +738,11 @@ fn is_caller_save_reg(call_conv: isa::CallConv, r: RealReg) -> bool {
             r.get_hw_encoding() <= 17
         }
         RegClass::V128 => {
-            // v0 - v7 inclusive and v16 - v31 inclusive are caller-saves.
-            r.get_hw_encoding() <= 7 || (r.get_hw_encoding() >= 16 && r.get_hw_encoding() <= 31)
+            // All vector regs are caller-saves for the purposes of our implementation, because the
+            // actual convention (upper 64 bits of v0-v7 and v16-v31 are caller-saves) can't be
+            // represented without partial registers, which our regalloc doesn't support. We thus
+            // conservatively save *all* vector regs across calls.
+            true
         }
         _ => panic!("Unexpected RegClass"),
     }

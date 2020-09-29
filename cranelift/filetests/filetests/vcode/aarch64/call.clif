@@ -130,3 +130,206 @@ block0(v0: i8):
 ; nextln:  mov sp, fp
 ; nextln:  ldp fp, lr, [sp], #16
 ; nextln:  ret
+
+function %f8(f64) -> f64 {
+    fn0 = %g(f64) -> f64
+block0(v0: f64):
+    v1 = call fn0(v0)
+    v2 = call fn0(v0)
+    v3 = call fn0(v0)
+    v4 = call fn0(v0)
+    v5 = call fn0(v0)
+    v6 = call fn0(v0)
+    v7 = call fn0(v0)
+    v8 = call fn0(v0)
+    v9 = call fn0(v0)
+    v10 = call fn0(v0)
+    v11 = call fn0(v0)
+    v12 = call fn0(v0)
+    v13 = call fn0(v0)
+    v14 = call fn0(v0)
+    v15 = call fn0(v0)
+    v16 = call fn0(v0)
+    v17 = call fn0(v0)
+    v18 = call fn0(v0)
+    v19 = call fn0(v0)
+    v20 = call fn0(v0)
+    v21 = call fn0(v0)
+    v22 = call fn0(v0)
+    v23 = call fn0(v0)
+    v24 = call fn0(v0)
+    v25 = call fn0(v0)
+    v26 = call fn0(v0)
+    v27 = call fn0(v0)
+    v28 = call fn0(v0)
+    v29 = call fn0(v0)
+    v30 = call fn0(v0)
+    v31 = call fn0(v0)
+    v32 = call fn0(v0)
+    v33 = fadd.f64 v1, v2
+    v34 = fadd.f64 v3, v4
+    v35 = fadd.f64 v5, v6
+    v36 = fadd.f64 v7, v8
+    v37 = fadd.f64 v9, v10
+    v38 = fadd.f64 v11, v12
+    v39 = fadd.f64 v13, v14
+    v40 = fadd.f64 v15, v16
+    v41 = fadd.f64 v17, v18
+    v42 = fadd.f64 v19, v20
+    v43 = fadd.f64 v21, v22
+    v44 = fadd.f64 v23, v24
+    v45 = fadd.f64 v25, v26
+    v46 = fadd.f64 v27, v28
+    v47 = fadd.f64 v29, v30
+    v48 = fadd.f64 v31, v32
+
+    v49 = fadd.f64 v33, v34
+    v50 = fadd.f64 v35, v36
+    v51 = fadd.f64 v37, v38
+    v52 = fadd.f64 v39, v40
+    v53 = fadd.f64 v41, v42
+    v54 = fadd.f64 v43, v44
+    v55 = fadd.f64 v45, v46
+    v56 = fadd.f64 v47, v48
+
+    v57 = fadd.f64 v49, v50
+    v58 = fadd.f64 v51, v52
+    v59 = fadd.f64 v53, v54
+    v60 = fadd.f64 v55, v56
+
+    v61 = fadd.f64 v57, v58
+    v62 = fadd.f64 v59, v60
+
+    v63 = fadd.f64 v61, v62
+
+    return v63
+}
+
+; check: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
+; nextln: ldr d0, [sp
+; nextln: ldr x0,
+; nextln: blr x0
+; nextln: str d0, [sp
