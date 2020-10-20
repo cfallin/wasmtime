@@ -43,12 +43,12 @@ pub(crate) fn iter_impl(dir: &Dir) -> Option<Result<EntryImpl>> {
 }
 
 impl EntryExt for Entry {
-    #[cfg(target_os = "freebsd")]
+    #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
     fn ino(&self) -> u64 {
         self.0.d_fileno.into()
     }
 
-    #[cfg(not(target_os = "freebsd"))]
+    #[cfg(not(any(target_os = "freebsd", target_os = "openbsd")))]
     fn ino(&self) -> u64 {
         self.0.d_ino.into()
     }

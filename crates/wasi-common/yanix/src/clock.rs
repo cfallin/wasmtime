@@ -1,5 +1,5 @@
 use crate::from_success_code;
-use std::io::Result;
+use std::io::{Result, Error, ErrorKind};
 use std::mem::MaybeUninit;
 
 #[derive(Debug, Copy, Clone)]
@@ -11,24 +11,37 @@ pub enum ClockId {
 }
 
 impl ClockId {
-    pub fn as_raw(&self) -> libc::clockid_t {
+    #[cfg(not(target_os = "openbsd"))]
+    pub fn as_raw(&self) -> Result<libc::clockid_t> {
         match self {
-            Self::Realtime => libc::CLOCK_REALTIME,
-            Self::Monotonic => libc::CLOCK_MONOTONIC,
-            Self::ProcessCPUTime => libc::CLOCK_PROCESS_CPUTIME_ID,
-            Self::ThreadCPUTime => libc::CLOCK_THREAD_CPUTIME_ID,
+            Self::Realtime => Ok(libc::CLOCK_REALTIME),
+            Self::Monotonic => Ok(libc::CLOCK_MONOTONIC),
+            Self::ProcessCPUTime => Ok(libc::CLOCK_PROCESS_CPUTIME_ID),
+            Self::ThreadCPUTime => Ok(libc::CLOCK_THREAD_CPUTIME_ID),
+        }
+    }
+
+    #[cfg(target_os = "openbsd")]
+    pub fn as_raw(&self) -> Result<libc::clockid_t> {
+        match self {
+            Self::Realtime => Ok(libc::CLOCK_REALTIME),
+            Self::Monotonic => Ok(libc::CLOCK_MONOTONIC),
+            Self::ProcessCPUTime => Err(Error::from(ErrorKind::InvalidInput)),
+            Self::ThreadCPUTime => Err(Error::from(ErrorKind::InvalidInput)),
         }
     }
 }
 
 pub fn clock_getres(clock_id: ClockId) -> Result<libc::timespec> {
+    let id = clock_id.as_raw()?;
     let mut timespec = MaybeUninit::<libc::timespec>::uninit();
-    from_success_code(unsafe { libc::clock_getres(clock_id.as_raw(), timespec.as_mut_ptr()) })?;
+    from_success_code(unsafe { libc::clock_getres(id, timespec.as_mut_ptr()) })?;
     Ok(unsafe { timespec.assume_init() })
 }
 
 pub fn clock_gettime(clock_id: ClockId) -> Result<libc::timespec> {
+    let id = clock_id.as_raw()?;
     let mut timespec = MaybeUninit::<libc::timespec>::uninit();
-    from_success_code(unsafe { libc::clock_gettime(clock_id.as_raw(), timespec.as_mut_ptr()) })?;
+    from_success_code(unsafe { libc::clock_gettime(id, timespec.as_mut_ptr()) })?;
     Ok(unsafe { timespec.assume_init() })
 }

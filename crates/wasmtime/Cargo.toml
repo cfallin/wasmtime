@@ -18,7 +18,7 @@ wasmtime-profiling = { path = "../profiling", version = "0.20.0" }
 target-lexicon = { version = "0.11.0", default-features = false }
 wasmparser = "0.63.0"
 anyhow = "1.0.19"
-region = "2.2.0"
+region = { git = "https://github.com/cfallin/region-rs", branch = "query-feature", default-features = false }
 libc = "0.2"
 cfg-if = "0.1.9"
 backtrace = "0.3.42"

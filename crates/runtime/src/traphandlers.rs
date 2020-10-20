@@ -170,6 +170,10 @@ cfg_if::cfg_if! {
                 } else if #[cfg(all(target_os = "freebsd", target_arch = "x86_64"))] {
                     let cx = &*(cx as *const libc::ucontext_t);
                     cx.uc_mcontext.mc_rip as *const u8
+                } else if #[cfg(all(target_os = "openbsd", target_arch = "x86_64"))] {
+                    let cx = cx as *const u64;
+                    let rip = *cx.offset(21);
+                    rip as *const u8
                 } else {
                     compile_error!("unsupported platform");
                 }

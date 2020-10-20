@@ -45,6 +45,7 @@ impl From<io::Error> for WasiError {
                 libc::ENOSPC => Self::ENOSPC,
                 libc::ESPIPE => Self::ESPIPE,
                 libc::EROFS => Self::EROFS,
+                #[cfg(not(target_os = "openbsd"))]
                 libc::EMLINK => Self::EMLINK,
                 libc::EPIPE => Self::EPIPE,
                 libc::EDOM => Self::EDOM,
@@ -57,8 +58,10 @@ impl From<io::Error> for WasiError {
                 libc::ELOOP => Self::ELOOP,
                 libc::ENOMSG => Self::ENOMSG,
                 libc::EIDRM => Self::EIDRM,
+                #[cfg(not(target_os = "openbsd"))]
                 libc::ENOLINK => Self::ENOLINK,
                 libc::EPROTO => Self::EPROTO,
+                #[cfg(not(target_os = "openbsd"))]
                 libc::EMULTIHOP => Self::EMULTIHOP,
                 libc::EBADMSG => Self::EBADMSG,
                 libc::EOVERFLOW => Self::EOVERFLOW,

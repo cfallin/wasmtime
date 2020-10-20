@@ -1735,12 +1735,12 @@ checksum = "26412eb97c6b088a6997e05f69403a802a92d520de2f8e63c2b65f9e0f47c4e8"
 [[package]]
 name = "region"
 version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877e54ea2adcd70d80e9179344c97f93ef0dffd6b03e1f4529e6e83ab2fa9ae0"
+source = "git+https://github.com/cfallin/region-rs?branch=query-feature#5f1e4c16723b0ba332b9b31d37b89b7417ebeb0e"
 dependencies = [
  "bitflags",
  "libc",
  "mach",
+ "take-until",
  "winapi",
 ]
 
@@ -2010,6 +2010,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "take-until"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4e17d8598067a8c134af59cd33c1c263470e089924a11ab61cf61690919fe3b"
 
 [[package]]
 name = "target-lexicon"
