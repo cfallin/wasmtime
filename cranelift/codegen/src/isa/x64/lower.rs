@@ -376,18 +376,88 @@ fn emit_extract_lane<C: LowerCtx<I = Inst>>(
 ///
 /// Note: make sure that there are no instructions modifying the flags between a call to this
 /// function and the use of the flags!
-fn emit_cmp<C: LowerCtx<I = Inst>>(ctx: &mut C, insn: IRInst) {
+fn emit_cmp<C: LowerCtx<I = Inst>>(ctx: &mut C, insn: IRInst, cond_code: IntCC) -> CC {
     let ty = ctx.input_ty(insn, 0);
 
     let inputs = [InsnInput { insn, input: 0 }, InsnInput { insn, input: 1 }];
 
-    // TODO Try to commute the operands (and invert the condition) if one is an immediate.
-    let lhs = put_input_in_reg(ctx, inputs[0]);
-    let rhs = input_to_reg_mem_imm(ctx, inputs[1]);
+    if ty == types::I128 {
+        let lhs = put_input_in_regs(ctx, inputs[0]);
+        let rhs = put_input_in_regs(ctx, inputs[1]);
+        assert_eq!(lhs.len(), 2);
+        assert_eq!(rhs.len(), 2);
 
-    // Cranelift's icmp semantics want to compare lhs - rhs, while Intel gives
-    // us dst - src at the machine instruction level, so invert operands.
-    ctx.emit(Inst::cmp_rmi_r(ty.bytes() as u8, rhs, lhs));
+        let result = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+
+        match cond_code {
+            IntCC::Equal => {
+                let msb_eq = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[0]), rhs.regs()[0]));
+                ctx.emit(Inst::setcc(CC::Z, msb_eq));
+
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[1]), rhs.regs()[1]));
+                ctx.emit(Inst::setcc(CC::Z, result));
+
+                ctx.emit(Inst::alu_rmi_r(/* is_64 = */ false, AluRmiROpcode::And, RegMemImm::reg(msb_eq.to_reg()), result));
+            }
+            IntCC::NotEqual => {
+                let msb_ne = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[0]), rhs.regs()[0]));
+                ctx.emit(Inst::setcc(CC::NZ, msb_ne));
+
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[1]), rhs.regs()[1]));
+                ctx.emit(Inst::setcc(CC::NZ, result));
+
+                ctx.emit(Inst::alu_rmi_r(/* is_64 = */ false, AluRmiROpcode::Or, RegMemImm::reg(msb_ne.to_reg()), result));
+            }
+            _ => {
+                let cc1 = CC::from_intcc(cond_code.without_equal());
+                let cc2 = CC::from_intcc(cond_code.inverse().without_equal());
+                let cc3 = CC::from_intcc(cond_code.unsigned());
+
+                // X = cc1 || (!cc2 && cc3)
+
+                let b1 = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[1]), rhs.regs()[1]));
+                ctx.emit(Inst::setcc(cc1, b1));
+
+                let b2 = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[1]), rhs.regs()[1]));
+                ctx.emit(Inst::setcc(cc2, b2));
+
+                let b3 = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::cmp_rmi_r(8, RegMemImm::reg(lhs.regs()[0]), rhs.regs()[0]));
+                ctx.emit(Inst::setcc(cc3, b3));
+
+                // c1 = !b2
+                let c1 = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::gen_move(c1, b2.to_reg(), types::B1));
+                ctx.emit(Inst::not(1, c1));
+
+                // c2 = c1 && c3
+                let c2 = ctx.alloc_tmp(types::B1).only_reg().unwrap();
+                ctx.emit(Inst::gen_move(c2, c1.to_reg(), types::B1));
+                ctx.emit(Inst::alu_rmi_r(/* is_64 = */ false, AluRmiROpcode::And, RegMemImm::reg(b3.to_reg()), c2));
+
+                // result = b1 || c2
+                ctx.emit(Inst::gen_move(result, b1.to_reg(), types::B1));
+                ctx.emit(Inst::alu_rmi_r(/* is_64 = */ false, AluRmiROpcode::And, RegMemImm::reg(c2.to_reg()), result));
+            }
+        }
+
+        ctx.emit(Inst::cmp_rmi_r(1, RegMemImm::imm(0), result.to_reg()));
+        CC::NZ
+    } else {
+        // TODO Try to commute the operands (and invert the condition) if one is an immediate.
+        let lhs = put_input_in_reg(ctx, inputs[0]);
+        let rhs = input_to_reg_mem_imm(ctx, inputs[1]);
+
+        // Cranelift's icmp semantics want to compare lhs - rhs, while Intel gives
+        // us dst - src at the machine instruction level, so invert operands.
+        ctx.emit(Inst::cmp_rmi_r(ty.bytes() as u8, rhs, lhs));
+
+        CC::from_intcc(cond_code)
+    }
 }
 
 /// A specification for a fcmp emission.
@@ -2001,8 +2071,7 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             let dst = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
             let ty = ctx.input_ty(insn, 0);
             if !ty.is_vector() {
-                emit_cmp(ctx, insn);
-                let cc = CC::from_intcc(condcode);
+                let cc = emit_cmp(ctx, insn, condcode);
                 ctx.emit(Inst::setcc(cc, dst));
             } else {
                 assert_eq!(ty.bits(), 128);
@@ -2289,11 +2358,10 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 ctx.emit_safepoint(Inst::TrapIf { trap_code, cc });
             } else if op == Opcode::Trapif {
                 let cond_code = ctx.data(insn).cond_code().unwrap();
-                let cc = CC::from_intcc(cond_code);
 
                 // Verification ensures that the input is always a single-def ifcmp.
                 let ifcmp = matches_input(ctx, inputs[0], Opcode::Ifcmp).unwrap();
-                emit_cmp(ctx, ifcmp);
+                let cc = emit_cmp(ctx, ifcmp, cond_code);
 
                 ctx.emit_safepoint(Inst::TrapIf { trap_code, cc });
             } else {
@@ -3778,9 +3846,8 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 let dst = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
 
                 let cc = if let Some(icmp) = matches_input(ctx, flag_input, Opcode::Icmp) {
-                    emit_cmp(ctx, icmp);
                     let cond_code = ctx.data(icmp).cond_code().unwrap();
-                    CC::from_intcc(cond_code)
+                    emit_cmp(ctx, icmp, cond_code)
                 } else {
                     // The input is a boolean value, compare it against zero.
                     let size = ctx.input_ty(insn, 0).bytes() as u8;
@@ -3814,9 +3881,7 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 .unwrap()
                 .0;
             debug_assert_eq!(ctx.data(cmp_insn).opcode(), Opcode::Ifcmp);
-            emit_cmp(ctx, cmp_insn);
-
-            let cc = CC::from_intcc(ctx.data(insn).cond_code().unwrap());
+            let cc = emit_cmp(ctx, cmp_insn, ctx.data(insn).cond_code().unwrap());
 
             if is_int_or_ref_ty(ty) {
                 let size = ty.bytes() as u8;
@@ -4388,8 +4453,6 @@ impl LowerBackend for X64Backend {
                     let src_ty = ctx.input_ty(branches[0], 0);
 
                     if let Some(icmp) = matches_input(ctx, flag_input, Opcode::Icmp) {
-                        emit_cmp(ctx, icmp);
-
                         let cond_code = ctx.data(icmp).cond_code().unwrap();
                         let cond_code = if op0 == Opcode::Brz {
                             cond_code.inverse()
@@ -4397,7 +4460,7 @@ impl LowerBackend for X64Backend {
                             cond_code
                         };
 
-                        let cc = CC::from_intcc(cond_code);
+                        let cc = emit_cmp(ctx, icmp, cond_code);
                         ctx.emit(Inst::jmp_cond(cc, taken, not_taken));
                     } else if let Some(fcmp) = matches_input(ctx, flag_input, Opcode::Fcmp) {
                         let cond_code = ctx.data(fcmp).fp_cond_code().unwrap();
@@ -4476,9 +4539,8 @@ impl LowerBackend for X64Backend {
                     };
 
                     if let Some(ifcmp) = matches_input(ctx, flag_input, Opcode::Ifcmp) {
-                        emit_cmp(ctx, ifcmp);
                         let cond_code = ctx.data(branches[0]).cond_code().unwrap();
-                        let cc = CC::from_intcc(cond_code);
+                        let cc = emit_cmp(ctx, ifcmp, cond_code);
                         ctx.emit(Inst::jmp_cond(cc, taken, not_taken));
                     } else if let Some(ifcmp_sp) = matches_input(ctx, flag_input, Opcode::IfcmpSp) {
                         let operand = put_input_in_reg(
