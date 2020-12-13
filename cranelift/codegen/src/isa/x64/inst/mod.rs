@@ -2512,9 +2512,42 @@ impl MachInst for Inst {
         mut alloc_tmp: F,
     ) -> SmallVec<[Self; 4]> {
         let mut ret = SmallVec::new();
+
+        if ty == types::I128 {
+            if value == 0 {
+                ret.push(Inst::alu_rmi_r(
+                    ty == types::I64,
+                    AluRmiROpcode::Xor,
+                    RegMemImm::reg(to_regs.regs()[0].to_reg()),
+                    to_regs.regs()[0],
+                ));
+                ret.push(Inst::alu_rmi_r(
+                    ty == types::I64,
+                    AluRmiROpcode::Xor,
+                    RegMemImm::reg(to_regs.regs()[1].to_reg()),
+                    to_regs.regs()[1],
+                ));
+            } else {
+                let lsb = (value >> 64) as u64;
+                let msb = value as u64;
+                ret.push(Inst::imm(
+                    OperandSize::from_bytes(8),
+                    lsb.into(),
+                    to_regs.regs()[0],
+                ));
+                ret.push(Inst::imm(
+                    OperandSize::from_bytes(8),
+                    msb.into(),
+                    to_regs.regs()[1],
+                ));
+            }
+            return ret;
+        }
+
         let to_reg = to_regs
             .only_reg()
             .expect("multi-reg values not supported on x64");
+
         if ty == types::F32 {
             if value == 0 {
                 ret.push(Inst::xmm_rm_r(
