@@ -4300,6 +4300,35 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
         | Opcode::SshrImm => {
             panic!("ALU+imm and ALU+carry ops should not appear here!");
         }
+
+        Opcode::Isplit => {
+            let src_ty = ctx.input_ty(insn, 0);
+            let dst_ty = ctx.output_ty(insn, 0);
+            assert!(src_ty.is_int());
+            assert!(dst_ty.is_int());
+            assert_eq!(src_ty.bits(), dst_ty.bits() * 2);
+            let src = put_input_in_regs(ctx, inputs[0]);
+            let dst_lsb = get_output_reg(ctx, outputs[1]).only_reg().unwrap();
+            let dst_msb = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
+            assert_eq!(src.len(), 2);
+            ctx.emit(Inst::gen_move(dst_lsb, src.regs()[0], src_ty));
+            ctx.emit(Inst::gen_move(dst_msb, src.regs()[1], src_ty));
+        }
+
+        Opcode::Iconcat => {
+            let src_ty = ctx.input_ty(insn, 0);
+            let dst_ty = ctx.output_ty(insn, 0);
+            assert!(src_ty.is_int());
+            assert!(dst_ty.is_int());
+            assert_eq!(src_ty.bits() * 2, dst_ty.bits());
+            let src_lsb = put_input_in_regs(ctx, inputs[0]).only_reg().unwrap();
+            let src_msb = put_input_in_regs(ctx, inputs[1]).only_reg().unwrap();
+            let dst = get_output_reg(ctx, outputs[0]);
+            assert_eq!(dst.len(), 2);
+            ctx.emit(Inst::gen_move(dst.regs()[0], src_lsb, src_ty));
+            ctx.emit(Inst::gen_move(dst.regs()[1], src_msb, src_ty));
+        }
+
         _ => unimplemented!("unimplemented lowering for opcode {:?}", op),
     }
 
