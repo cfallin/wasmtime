@@ -107,21 +107,24 @@ fn generate_constant<C: LowerCtx<I = Inst>>(ctx: &mut C, ty: Type, c: u64) -> Va
     non_writable_value_regs(cst_copy)
 }
 
-/// Put the given input into a register, and mark it as used (side-effect).
-fn put_input_in_reg<C: LowerCtx<I = Inst>>(ctx: &mut C, spec: InsnInput) -> Reg {
+/// Put the given input into possibly multiple registers, and mark it as used (side-effect).
+fn put_input_in_regs<C: LowerCtx<I = Inst>>(ctx: &mut C, spec: InsnInput) -> ValueRegs<Reg> {
     let ty = ctx.input_ty(spec.insn, spec.input);
     let input = ctx.get_input_as_source_or_const(spec.insn, spec.input);
 
     if let Some(c) = input.constant {
         // Generate constants fresh at each use to minimize long-range register pressure.
         generate_constant(ctx, ty, c)
-            .only_reg()
-            .expect("multi-reg values not supported yet")
     } else {
         ctx.put_input_in_regs(spec.insn, spec.input)
-            .only_reg()
-            .expect("multi-reg values not supported yet")
     }
+}
+
+/// Put the given input into a register, and mark it as used (side-effect).
+fn put_input_in_reg<C: LowerCtx<I = Inst>>(ctx: &mut C, spec: InsnInput) -> Reg {
+    put_input_in_regs(ctx, spec)
+        .only_reg()
+        .expect("Multi-register value not expected")
 }
 
 /// Determines whether a load operation (indicated by `src_insn`) can be merged
@@ -889,6 +892,102 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 // Move the `lhs` to the same register as `dst`.
                 ctx.emit(Inst::gen_move(dst, lhs, ty));
                 ctx.emit(Inst::xmm_rm_r(sse_op, rhs, dst));
+            } else if ty == types::I128 || ty == types::B128 {
+                let alu_ops = match op {
+                    Opcode::Iadd => (AluRmiROpcode::Add, AluRmiROpcode::Adc),
+                    Opcode::Isub => (AluRmiROpcode::Sub, AluRmiROpcode::Sbb),
+                    // multiply handled specially below
+                    Opcode::Imul => (AluRmiROpcode::Mul, AluRmiROpcode::Mul),
+                    Opcode::Band => (AluRmiROpcode::And, AluRmiROpcode::And),
+                    Opcode::Bor => (AluRmiROpcode::Or, AluRmiROpcode::Or),
+                    Opcode::Bxor => (AluRmiROpcode::Xor, AluRmiROpcode::Xor),
+                    _ => panic!("Unsupported opcode with 128-bit integers: {:?}", op),
+                };
+                let lhs = put_input_in_regs(ctx, inputs[0]);
+                let rhs = put_input_in_regs(ctx, inputs[1]);
+                let dst = get_output_reg(ctx, outputs[0]);
+                assert_eq!(lhs.len(), 2);
+                assert_eq!(rhs.len(), 2);
+                assert_eq!(dst.len(), 2);
+
+                if op != Opcode::Imul {
+                    // add, sub, and, or, xor: just do ops on lower then upper half. Carry-flag
+                    // propagation is implicit (add/adc, sub/sbb).
+                    ctx.emit(Inst::gen_move(dst.regs()[0], lhs.regs()[0], types::I64));
+                    ctx.emit(Inst::gen_move(dst.regs()[1], lhs.regs()[1], types::I64));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        alu_ops.0,
+                        RegMemImm::reg(rhs.regs()[0]),
+                        dst.regs()[0],
+                    ));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        alu_ops.1,
+                        RegMemImm::reg(rhs.regs()[1]),
+                        dst.regs()[1],
+                    ));
+                } else {
+                    // mul:
+                    //   dst_lo = lhs_lo * rhs_lo
+                    //   dst_hi = umulhi(lhs_lo, rhs_lo) + lhs_lo * rhs_hi + lhs_hi * rhs_lo
+                    //
+                    // so we emit:
+                    //   mov dst_lo, lhs_lo
+                    //   mul dst_lo, rhs_lo
+                    //   mov dst_hi, lhs_lo
+                    //   mul dst_hi, rhs_hi
+                    //   mov tmp, lhs_hi
+                    //   mul tmp, rhs_lo
+                    //   add dst_hi, tmp
+                    //   mov rax, lhs_lo
+                    //   umulhi rhs_lo  // implicit rax arg/dst
+                    //   add dst_hi, rax
+                    let tmp = ctx.alloc_tmp(types::I64).only_reg().unwrap();
+                    ctx.emit(Inst::gen_move(dst.regs()[0], lhs.regs()[0], types::I64));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        AluRmiROpcode::Mul,
+                        RegMemImm::reg(rhs.regs()[0]),
+                        dst.regs()[0],
+                    ));
+                    ctx.emit(Inst::gen_move(dst.regs()[1], lhs.regs()[0], types::I64));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        AluRmiROpcode::Mul,
+                        RegMemImm::reg(rhs.regs()[1]),
+                        dst.regs()[1],
+                    ));
+                    ctx.emit(Inst::gen_move(tmp, lhs.regs()[1], types::I64));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        AluRmiROpcode::Mul,
+                        RegMemImm::reg(rhs.regs()[0]),
+                        tmp,
+                    ));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        AluRmiROpcode::Add,
+                        RegMemImm::reg(tmp.to_reg()),
+                        dst.regs()[1],
+                    ));
+                    ctx.emit(Inst::gen_move(
+                        Writable::from_reg(regs::rax()),
+                        lhs.regs()[0],
+                        types::I64,
+                    ));
+                    ctx.emit(Inst::mul_hi(
+                        /* size = */ 8,
+                        /* signed = */ false,
+                        RegMem::reg(rhs.regs()[0]),
+                    ));
+                    ctx.emit(Inst::alu_rmi_r(
+                        /* is_64 = */ true,
+                        AluRmiROpcode::Add,
+                        RegMemImm::reg(regs::rdx()),
+                        dst.regs()[1],
+                    ));
+                }
             } else {
                 let is_64 = ty == types::I64;
                 let alu_op = match op {
@@ -1013,17 +1112,27 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
         Opcode::Bnot => {
             let ty = ty.unwrap();
             let size = ty.bytes() as u8;
-            let src = put_input_in_reg(ctx, inputs[0]);
-            let dst = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
-            ctx.emit(Inst::gen_move(dst, src, ty));
 
             if ty.is_vector() {
+                let src = put_input_in_reg(ctx, inputs[0]);
+                let dst = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
+                ctx.emit(Inst::gen_move(dst, src, ty));
                 let tmp = ctx.alloc_tmp(ty).only_reg().unwrap();
                 ctx.emit(Inst::equals(ty, RegMem::from(tmp), tmp));
                 ctx.emit(Inst::xor(ty, RegMem::from(tmp), dst));
+            } else if ty == types::I128 || ty == types::B128 {
+                let src = put_input_in_regs(ctx, inputs[0]);
+                let dst = get_output_reg(ctx, outputs[0]);
+                ctx.emit(Inst::gen_move(dst.regs()[0], src.regs()[0], types::I64));
+                ctx.emit(Inst::not(8, dst.regs()[0]));
+                ctx.emit(Inst::gen_move(dst.regs()[1], src.regs()[1], types::I64));
+                ctx.emit(Inst::not(8, dst.regs()[1]));
             } else if ty.is_bool() {
                 unimplemented!("bool bnot")
             } else {
+                let src = put_input_in_reg(ctx, inputs[0]);
+                let dst = get_output_reg(ctx, outputs[0]).only_reg().unwrap();
+                ctx.emit(Inst::gen_move(dst, src, ty));
                 ctx.emit(Inst::not(size, dst));
             }
         }
@@ -2099,10 +2208,19 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
 
         Opcode::FallthroughReturn | Opcode::Return => {
             for i in 0..ctx.num_inputs(insn) {
-                let src_reg = put_input_in_reg(ctx, inputs[i]);
+                let src_reg = put_input_in_regs(ctx, inputs[i]);
                 let retval_reg = ctx.retval(i);
                 let ty = ctx.input_ty(insn, i);
-                ctx.emit(Inst::gen_move(retval_reg.only_reg().unwrap(), src_reg, ty));
+                assert!(src_reg.len() == retval_reg.len());
+                let (_, tys) = Inst::rc_for_type(ty)?;
+                for ((&src, &dst), &ty) in src_reg
+                    .regs()
+                    .iter()
+                    .zip(retval_reg.regs().iter())
+                    .zip(tys.iter())
+                {
+                    ctx.emit(Inst::gen_move(dst, src, ty));
+                }
             }
             // N.B.: the Ret itself is generated by the ABI.
         }

@@ -346,7 +346,9 @@ impl PrettyPrintSized for RegMem {
 #[derive(Copy, Clone, PartialEq)]
 pub enum AluRmiROpcode {
     Add,
+    Adc,
     Sub,
+    Sbb,
     And,
     Or,
     Xor,
@@ -358,7 +360,9 @@ impl fmt::Debug for AluRmiROpcode {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let name = match self {
             AluRmiROpcode::Add => "add",
+            AluRmiROpcode::Adc => "adc",
             AluRmiROpcode::Sub => "sub",
+            AluRmiROpcode::Sbb => "sbb",
             AluRmiROpcode::And => "and",
             AluRmiROpcode::Or => "or",
             AluRmiROpcode::Xor => "xor",

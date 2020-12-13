@@ -1,0 +1,141 @@
+test compile
+target x86_64
+feature "experimental_x64"
+
+function %f0(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+
+    v2 = iadd v0, v1
+; nextln:  addq    %rdx, %rdi
+; nextln:  adcq    %rcx, %rsi
+
+    return v2
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f1(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+
+    v2 = isub v0, v1
+; nextln:  subq    %rdx, %rdi
+; nextln:  sbbq    %rcx, %rsi
+
+    return v2
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f2(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+
+    v2 = band v0, v1
+; nextln:  andq    %rdx, %rdi
+; nextln:  andq    %rcx, %rsi
+
+    return v2
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f3(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+
+    v2 = bor v0, v1
+; nextln:  orq     %rdx, %rdi
+; nextln:  orq     %rcx, %rsi
+
+    return v2
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f4(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+
+    v2 = bxor v0, v1
+; nextln:  xorq    %rdx, %rdi
+; nextln:  xorq    %rcx, %rsi
+
+    return v2
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f5(i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128):
+
+    v1 = bnot v0
+; nextln:  notq    %rdi
+; nextln:  notq    %rsi
+
+    return v1
+; nextln:  movq    %rdi, %rax
+; nextln:  movq    %rsi, %rdx
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+function %f6(i128, i128) -> i128 {
+; check:   pushq   %rbp
+; nextln:  movq    %rsp, %rbp
+
+block0(v0: i128, v1: i128):
+; v0 in rdi:rsi, v1 in rdx:rcx
+
+    v2 = imul v0, v1
+; nextln:  movq    %rsi, %rax
+; nextln:  movq    %rcx, %r8
+; nextln:  movq    %rdi, %rsi
+; nextln:  imulq   %rdx, %rsi
+; nextln:  movq    %rdi, %rcx
+; nextln:  imulq   %r8, %rcx
+; nextln:  imulq   %rdx, %rax
+; nextln:  addq    %rax, %rcx
+; nextln:  movq    %rdi, %rax
+; nextln:  mul     %rdx
+; nextln:  addq    %rdx, %rcx
+; nextln:  movq    %rsi, %rax
+; nextln:  movq    %rcx, %rdx
+
+    return v2
+; nextln:  movq    %rbp, %rsp
+; nextln:  popq    %rbp
+; nextln:  ret
+}
+
+; TODO: uextend, sextend, bandnot, bornot, bxornot, brz, brnz, popcnt, icmp, bitrev, load, store, moves (across blocks), many args, many rets
