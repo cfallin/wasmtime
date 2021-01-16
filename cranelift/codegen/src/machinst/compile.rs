@@ -72,6 +72,8 @@ where
         None
     };
 
+    let bump = regalloc::Bump::new();
+    let alloc = regalloc::Alloc(&bump);
     let result = {
         let _tt = timing::regalloc();
         allocate_registers_with_opts(
@@ -82,6 +84,7 @@ where
                 run_checker,
                 algorithm,
             },
+            &alloc,
         )
         .map_err(|err| {
             debug!(

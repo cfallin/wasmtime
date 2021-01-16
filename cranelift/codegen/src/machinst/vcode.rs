@@ -368,8 +368,13 @@ impl<I: VCodeInst> VCode<I> {
         // Record the spillslot count and clobbered registers for the ABI/stack
         // setup code.
         self.abi.set_num_spillslots(result.num_spill_slots as usize);
-        self.abi
-            .set_clobbered(result.clobbered_registers.map(|r| Writable::from_reg(*r)));
+        self.abi.set_clobbered(regalloc::Set::from_vec(
+            result
+                .clobbered_registers
+                .iter()
+                .map(|r| Writable::from_reg(*r))
+                .collect(),
+        ));
 
         let mut final_insns = vec![];
         let mut final_block_ranges = vec![(0, 0); self.num_blocks()];
@@ -461,7 +466,11 @@ impl<I: VCodeInst> VCode<I> {
         // Save safepoint slot-lists. These will be passed to the `EmitState`
         // for the machine backend during emission so that it can do
         // target-specific translations of slot numbers to stack offsets.
-        self.safepoint_slots = result.stackmaps;
+        self.safepoint_slots = result
+            .stackmaps
+            .into_iter()
+            .map(|stackmap| stackmap.into_iter().collect())
+            .collect();
 
         self.prologue_epilogue_ranges = Some((
             prologue_start.unwrap()..prologue_end.unwrap(),
