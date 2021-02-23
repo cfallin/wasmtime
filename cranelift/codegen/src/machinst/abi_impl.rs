@@ -124,13 +124,13 @@ use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::mem;
 
-/// A location for an argument or return value.
-#[derive(Clone, Copy, Debug)]
-pub enum ABIArg {
-    /// In a real register (or set of registers).
+/// A location for (part of) an argument or return value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ABIArgPart {
+    /// In a real register.
     Reg {
-        /// Register(s) that hold this arg.
-        regs: ValueRegs<RealReg>,
+        /// Register that holds this arg.
+        reg: RealReg,
         /// Value type of this arg.
         ty: ir::Type,
         /// Should this arg be zero- or sign-extended?
@@ -163,24 +163,71 @@ pub enum ABIArg {
         /// Purpose of this arg.
         purpose: ir::ArgumentPurpose,
     },
+    /// Sentinel for representing no arg in `ValueRegs` wrapper.
+    None,
 }
+
+impl InvalidSentinel for ABIArgPart {
+    fn invalid_sentinel() -> Self {
+        ABIArgPart::None
+    }
+}
+
+/// An ABIArg is composed of one or more parts. This allows for a CLIF-level
+/// Value to be passed with its parts in more than one location at the ABI
+/// level. For example, a 128-bit integer may be passed in two 64-bit registers,
+/// or even a 64-bit register and a 64-bit stack slot, on a 64-bit machine. The
+/// number of "parts" should correspond to the number of registers used to store
+/// this type according to the machine backend.
+///
+/// As an invariant, the `purpose` for every part must match. As a further
+/// invariant, a `StructArg` part cannot appear with any other part.
+#[derive(Clone, Copy, Debug)]
+pub struct ABIArg(ValueRegs<ABIArgPart>);
 
 impl ABIArg {
     /// Get the purpose of this arg.
     fn get_purpose(self) -> ir::ArgumentPurpose {
-        match self {
-            ABIArg::Reg { purpose, .. } => purpose,
-            ABIArg::Stack { purpose, .. } => purpose,
-            ABIArg::StructArg { purpose, .. } => purpose,
+        match &self.parts()[0] {
+            &ABIArgPart::Reg { purpose, .. } => purpose,
+            &ABIArgPart::Stack { purpose, .. } => purpose,
+            &ABIArgPart::StructArg { purpose, .. } => purpose,
+            &ABIArgPart::None => unreachable!(),
         }
     }
 
     /// Is this a StructArg?
     fn is_struct_arg(self) -> bool {
-        match self {
-            ABIArg::StructArg { .. } => true,
+        match &self.parts()[0] {
+            &ABIArgPart::StructArg { .. } => true,
             _ => false,
         }
+    }
+
+    /// How many parts does this ABIArg have?
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Get the parts.
+    pub fn parts(&self) -> &[ABIArgPart] {
+        self.0.regs()
+    }
+
+    /// Create an ABIArg from one part.
+    pub fn one(part: ABIArgPart) -> Self {
+        Self(ValueRegs::one(part))
+    }
+
+    /// Create an ABIArg from two parts.
+    pub fn two(lo: ABIArgPart, hi: ABIArgPart) -> Self {
+        match (&lo, &hi) {
+            (&ABIArgPart::StructArg { .. }, _) | (_, &ABIArgPart::StructArg { .. }) => {
+                panic!("Cannot combine StructArg with another arg part")
+            }
+            _ => {}
+        }
+        Self(ValueRegs::two(lo, hi))
     }
 }
 
@@ -557,8 +604,8 @@ fn get_special_purpose_param_register(
     purpose: ir::ArgumentPurpose,
 ) -> Option<Reg> {
     let idx = f.signature.special_param_index(purpose)?;
-    match abi.args[idx] {
-        ABIArg::Reg { regs, .. } => Some(regs.only_reg().unwrap().to_reg()),
+    match abi.args[idx].parts()[0] {
+        ABIArgPart::Reg { reg, .. } => Some(reg.to_reg()),
         _ => None,
     }
 }
@@ -577,7 +624,8 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
             call_conv == isa::CallConv::SystemV
                 || call_conv == isa::CallConv::Fast
                 || call_conv == isa::CallConv::Cold
-                || call_conv.extends_baldrdash(),
+                || call_conv.extends_baldrdash()
+                || call_conv.extends_windows_fastcall(),
             "Unsupported calling convention: {:?}",
             call_conv
         );
@@ -776,19 +824,6 @@ fn ty_from_ty_hint_or_reg_class<M: ABIMachineSpec>(r: Reg, ty: Option<Type>) -> 
     }
 }
 
-fn gen_move_multi<M: ABIMachineSpec>(
-    dst: ValueRegs<Writable<Reg>>,
-    src: ValueRegs<Reg>,
-    ty: Type,
-) -> SmallInstVec<M::I> {
-    let mut ret = smallvec![];
-    let (_, tys) = M::I::rc_for_type(ty).unwrap();
-    for ((&dst, &src), &ty) in dst.regs().iter().zip(src.regs().iter()).zip(tys.iter()) {
-        ret.push(M::gen_move(dst, src, ty));
-    }
-    ret
-}
-
 fn gen_load_stack_multi<M: ABIMachineSpec>(
     from: StackAMode,
     dst: ValueRegs<Writable<Reg>>,
@@ -817,22 +852,6 @@ fn gen_store_stack_multi<M: ABIMachineSpec>(
     for (&src, &ty) in src.regs().iter().zip(tys.iter()) {
         ret.push(M::gen_store_stack(from.offset(offset), src, ty));
         offset += ty.bytes() as i64;
-    }
-    ret
-}
-
-fn gen_store_base_offset_multi<M: ABIMachineSpec>(
-    base: Reg,
-    mut offset: i32,
-    src: ValueRegs<Reg>,
-    ty: Type,
-) -> SmallInstVec<M::I> {
-    let mut ret = smallvec![];
-    let (_, tys) = M::I::rc_for_type(ty).unwrap();
-    // N.B.: registers are given in the `ValueRegs` in target endian order.
-    for (&src, &ty) in src.regs().iter().zip(tys.iter()) {
-        ret.push(M::gen_store_base_offset(base, offset, src, ty));
-        offset += ty.bytes() as i32;
     }
     ret
 }
@@ -893,9 +912,9 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn liveins(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &arg in &self.sig.args {
-            if let ABIArg::Reg { regs, .. } = arg {
-                for &r in regs.regs() {
-                    set.insert(r);
+            for part in arg.parts() {
+                if let ABIArgPart::Reg { reg, .. } = part {
+                    set.insert(*reg);
                 }
             }
         }
@@ -905,9 +924,9 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn liveouts(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &ret in &self.sig.rets {
-            if let ABIArg::Reg { regs, .. } = ret {
-                for &r in regs.regs() {
-                    set.insert(r);
+            for part in ret.parts() {
+                if let ABIArgPart::Reg { reg, .. } = part {
+                    set.insert(*reg);
                 }
             }
         }
@@ -935,29 +954,43 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         idx: usize,
         into_regs: ValueRegs<Writable<Reg>>,
     ) -> SmallInstVec<Self::I> {
-        match &self.sig.args[idx] {
-            // Extension mode doesn't matter (we're copying out, not in; we
-            // ignore high bits by convention).
-            &ABIArg::Reg { regs, ty, .. } => {
-                gen_move_multi::<M>(into_regs, regs.map(|r| r.to_reg()), ty)
+        assert_eq!(into_regs.len(), self.sig.args[idx].parts().len());
+        let mut insts = smallvec![];
+        for (part, into_reg) in self.sig.args[idx]
+            .parts()
+            .iter()
+            .zip(into_regs.regs().iter())
+        {
+            match part {
+                // Extension mode doesn't matter (we're copying out, not in; we
+                // ignore high bits by convention).
+                &ABIArgPart::Reg { reg, ty, .. } => {
+                    insts.push(M::gen_move(*into_reg, reg.to_reg(), ty));
+                }
+                &ABIArgPart::Stack { offset, ty, .. } => {
+                    insts.push(M::gen_load_stack(
+                        StackAMode::FPOffset(
+                            M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
+                            ty,
+                        ),
+                        *into_reg,
+                        ty,
+                    ));
+                }
+                &ABIArgPart::StructArg { offset, .. } => {
+                    insts.push(M::gen_get_stack_addr(
+                        StackAMode::FPOffset(
+                            M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
+                            I8,
+                        ),
+                        *into_reg,
+                        I8,
+                    ));
+                }
+                &ABIArgPart::None => unreachable!(),
             }
-            &ABIArg::Stack { offset, ty, .. } => gen_load_stack_multi::<M>(
-                StackAMode::FPOffset(
-                    M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                    ty,
-                ),
-                into_regs,
-                ty,
-            ),
-            &ABIArg::StructArg { offset, .. } => smallvec![M::gen_get_stack_addr(
-                StackAMode::FPOffset(
-                    M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                    I8,
-                ),
-                into_regs.only_reg().unwrap(),
-                I8,
-            )],
         }
+        insts
     }
 
     fn arg_is_needed_in_body(&self, idx: usize) -> bool {
@@ -977,88 +1010,86 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     ) -> SmallInstVec<Self::I> {
         let mut ret = smallvec![];
         let word_bits = M::word_bits() as u8;
-        match &self.sig.rets[idx] {
-            &ABIArg::Reg {
-                regs,
-                ty,
-                extension,
-                ..
-            } => {
-                let from_bits = ty_bits(ty) as u8;
-                let dest_regs = writable_value_regs(regs.map(|r| r.to_reg()));
-                let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                match (ext, from_bits) {
-                    (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                        if n < word_bits =>
-                    {
-                        let signed = ext == ArgumentExtension::Sext;
-                        let dest_reg = dest_regs
-                            .only_reg()
-                            .expect("extension only possible from one-reg value");
-                        let from_reg = from_regs
-                            .only_reg()
-                            .expect("extension only possible from one-reg value");
-                        ret.push(M::gen_extend(
-                            dest_reg,
-                            from_reg.to_reg(),
-                            signed,
-                            from_bits,
-                            /* to_bits = */ word_bits,
-                        ));
-                    }
-                    _ => ret.extend(
-                        gen_move_multi::<M>(dest_regs, non_writable_value_regs(from_regs), ty)
-                            .into_iter(),
-                    ),
-                };
-            }
-            &ABIArg::Stack {
-                offset,
-                ty,
-                extension,
-                ..
-            } => {
-                let mut ty = ty;
-                let from_bits = ty_bits(ty) as u8;
-                // A machine ABI implementation should ensure that stack frames
-                // have "reasonable" size. All current ABIs for machinst
-                // backends (aarch64 and x64) enforce a 128MB limit.
-                let off = i32::try_from(offset)
-                    .expect("Argument stack offset greater than 2GB; should hit impl limit first");
-                let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                // Trash the from_reg; it should be its last use.
-                match (ext, from_bits) {
-                    (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                        if n < word_bits =>
-                    {
-                        let from_reg = from_regs
-                            .only_reg()
-                            .expect("extension only possible from one-reg value");
-                        assert_eq!(M::word_reg_class(), from_reg.to_reg().get_class());
-                        let signed = ext == ArgumentExtension::Sext;
-                        ret.push(M::gen_extend(
-                            from_reg,
-                            from_reg.to_reg(),
-                            signed,
-                            from_bits,
-                            /* to_bits = */ word_bits,
-                        ));
-                        // Store the extended version.
-                        ty = M::word_type();
-                    }
-                    _ => {}
-                };
-                ret.extend(
-                    gen_store_base_offset_multi::<M>(
+        assert_eq!(from_regs.len(), self.sig.rets[idx].len());
+        for (part, from_reg) in self.sig.rets[idx]
+            .parts()
+            .iter()
+            .zip(from_regs.regs().iter())
+        {
+            match part {
+                &ABIArgPart::Reg {
+                    reg, ty, extension, ..
+                } => {
+                    let from_bits = ty_bits(ty) as u8;
+                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    match (ext, from_bits) {
+                        (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
+                            if n < word_bits =>
+                        {
+                            let signed = ext == ArgumentExtension::Sext;
+                            ret.push(M::gen_extend(
+                                Writable::from_reg(reg.to_reg()),
+                                from_reg.to_reg(),
+                                signed,
+                                from_bits,
+                                /* to_bits = */ word_bits,
+                            ));
+                        }
+                        _ => {
+                            ret.push(M::gen_move(
+                                Writable::from_reg(reg.to_reg()),
+                                from_reg.to_reg(),
+                                ty,
+                            ));
+                        }
+                    };
+                }
+                &ABIArgPart::Stack {
+                    offset,
+                    ty,
+                    extension,
+                    ..
+                } => {
+                    let mut ty = ty;
+                    let from_bits = ty_bits(ty) as u8;
+                    // A machine ABI implementation should ensure that stack frames
+                    // have "reasonable" size. All current ABIs for machinst
+                    // backends (aarch64 and x64) enforce a 128MB limit.
+                    let off = i32::try_from(offset).expect(
+                        "Argument stack offset greater than 2GB; should hit impl limit first",
+                    );
+                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    // Trash the from_reg; it should be its last use.
+                    match (ext, from_bits) {
+                        (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
+                            if n < word_bits =>
+                        {
+                            assert_eq!(M::word_reg_class(), from_reg.to_reg().get_class());
+                            let signed = ext == ArgumentExtension::Sext;
+                            ret.push(M::gen_extend(
+                                Writable::from_reg(from_reg.to_reg()),
+                                from_reg.to_reg(),
+                                signed,
+                                from_bits,
+                                /* to_bits = */ word_bits,
+                            ));
+                            // Store the extended version.
+                            ty = M::word_type();
+                        }
+                        _ => {}
+                    };
+                    ret.push(M::gen_store_base_offset(
                         self.ret_area_ptr.unwrap().to_reg(),
                         off,
-                        non_writable_value_regs(from_regs),
+                        from_reg.to_reg(),
                         ty,
-                    )
-                    .into_iter(),
-                );
+                    ));
+                }
+                &ABIArgPart::StructArg { .. } => {
+                    panic!("Unexpected StructArg location for return value")
+                }
+                &ABIArgPart::None => unreachable!(),
             }
-            &ABIArg::StructArg { .. } => panic!("Unexpected StructArg location for return value"),
         }
         ret
     }
@@ -1345,20 +1376,26 @@ fn abisig_to_uses_and_defs<M: ABIMachineSpec>(sig: &ABISig) -> (Vec<Reg>, Vec<Wr
     // Compute uses: all arg regs.
     let mut uses = Vec::new();
     for arg in &sig.args {
-        match arg {
-            &ABIArg::Reg { regs, .. } => uses.extend(regs.regs().iter().map(|r| r.to_reg())),
-            _ => {}
+        for part in arg.parts() {
+            match part {
+                &ABIArgPart::Reg { reg, .. } => {
+                    uses.push(reg.to_reg());
+                }
+                _ => {}
+            }
         }
     }
 
     // Compute defs: all retval regs, and all caller-save (clobbered) regs.
     let mut defs = M::get_regs_clobbered_by_call(sig.call_conv);
     for ret in &sig.rets {
-        match ret {
-            &ABIArg::Reg { regs, .. } => {
-                defs.extend(regs.regs().iter().map(|r| Writable::from_reg(r.to_reg())))
+        for part in ret.parts() {
+            match part {
+                &ABIArgPart::Reg { reg, .. } => {
+                    defs.push(Writable::from_reg(reg.to_reg()));
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -1500,95 +1537,91 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
     ) {
         let word_rc = M::word_reg_class();
         let word_bits = M::word_bits() as usize;
-        match &self.sig.args[idx] {
-            &ABIArg::Reg {
-                regs,
-                ty,
-                extension,
-                ..
-            } => {
-                let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                    let reg = regs.only_reg().unwrap();
-                    assert_eq!(word_rc, reg.get_class());
-                    let signed = match ext {
-                        ir::ArgumentExtension::Uext => false,
-                        ir::ArgumentExtension::Sext => true,
-                        _ => unreachable!(),
-                    };
-                    ctx.emit(M::gen_extend(
-                        Writable::from_reg(reg.to_reg()),
-                        from_regs.only_reg().unwrap(),
-                        signed,
-                        ty_bits(ty) as u8,
-                        word_bits as u8,
-                    ));
-                } else {
-                    for insn in gen_move_multi::<M>(
-                        writable_value_regs(regs.map(|r| r.to_reg())),
-                        from_regs,
+        assert_eq!(from_regs.len(), self.sig.args[idx].parts().len());
+        for (part, from_reg) in self.sig.args[idx]
+            .parts()
+            .iter()
+            .zip(from_regs.regs().iter())
+        {
+            match part {
+                &ABIArgPart::Reg {
+                    reg, ty, extension, ..
+                } => {
+                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
+                        assert_eq!(word_rc, reg.get_class());
+                        let signed = match ext {
+                            ir::ArgumentExtension::Uext => false,
+                            ir::ArgumentExtension::Sext => true,
+                            _ => unreachable!(),
+                        };
+                        ctx.emit(M::gen_extend(
+                            Writable::from_reg(reg.to_reg()),
+                            *from_reg,
+                            signed,
+                            ty_bits(ty) as u8,
+                            word_bits as u8,
+                        ));
+                    } else {
+                        ctx.emit(M::gen_move(Writable::from_reg(reg.to_reg()), *from_reg, ty));
+                    }
+                }
+                &ABIArgPart::Stack {
+                    offset,
+                    ty,
+                    extension,
+                    ..
+                } => {
+                    let mut ty = ty;
+                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
+                        assert_eq!(word_rc, from_reg.get_class());
+                        let signed = match ext {
+                            ir::ArgumentExtension::Uext => false,
+                            ir::ArgumentExtension::Sext => true,
+                            _ => unreachable!(),
+                        };
+                        // Extend in place in the source register. Our convention is to
+                        // treat high bits as undefined for values in registers, so this
+                        // is safe, even for an argument that is nominally read-only.
+                        ctx.emit(M::gen_extend(
+                            Writable::from_reg(*from_reg),
+                            *from_reg,
+                            signed,
+                            ty_bits(ty) as u8,
+                            word_bits as u8,
+                        ));
+                        // Store the extended version.
+                        ty = M::word_type();
+                    }
+                    ctx.emit(M::gen_store_stack(
+                        StackAMode::SPOffset(offset, ty),
+                        *from_reg,
                         ty,
-                    ) {
+                    ));
+                }
+                &ABIArgPart::StructArg { offset, size, .. } => {
+                    let src_ptr = *from_reg;
+                    let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
+                    ctx.emit(M::gen_get_stack_addr(
+                        StackAMode::SPOffset(offset, I8),
+                        dst_ptr,
+                        I8,
+                    ));
+                    // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
+                    // N.B.: because we process StructArg params *first*, this is
+                    // safe w.r.t. clobbers: we have not yet filled in any other
+                    // arg regs.
+                    let memcpy_call_conv =
+                        isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
+                    for insn in
+                        M::gen_memcpy(memcpy_call_conv, dst_ptr.to_reg(), src_ptr, size as usize)
+                            .into_iter()
+                    {
                         ctx.emit(insn);
                     }
                 }
-            }
-            &ABIArg::Stack {
-                offset,
-                ty,
-                extension,
-                ..
-            } => {
-                let mut ty = ty;
-                let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                    let from_reg = from_regs
-                        .only_reg()
-                        .expect("only one reg for sub-word value width");
-                    assert_eq!(word_rc, from_reg.get_class());
-                    let signed = match ext {
-                        ir::ArgumentExtension::Uext => false,
-                        ir::ArgumentExtension::Sext => true,
-                        _ => unreachable!(),
-                    };
-                    // Extend in place in the source register. Our convention is to
-                    // treat high bits as undefined for values in registers, so this
-                    // is safe, even for an argument that is nominally read-only.
-                    ctx.emit(M::gen_extend(
-                        Writable::from_reg(from_reg),
-                        from_reg,
-                        signed,
-                        ty_bits(ty) as u8,
-                        word_bits as u8,
-                    ));
-                    // Store the extended version.
-                    ty = M::word_type();
-                }
-                for insn in
-                    gen_store_stack_multi::<M>(StackAMode::SPOffset(offset, ty), from_regs, ty)
-                {
-                    ctx.emit(insn);
-                }
-            }
-            &ABIArg::StructArg { offset, size, .. } => {
-                let src_ptr = from_regs.only_reg().unwrap();
-                let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
-                ctx.emit(M::gen_get_stack_addr(
-                    StackAMode::SPOffset(offset, I8),
-                    dst_ptr,
-                    I8,
-                ));
-                // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
-                // N.B.: because we process StructArg params *first*, this is
-                // safe w.r.t. clobbers: we have not yet filled in any other
-                // arg regs.
-                let memcpy_call_conv = isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
-                for insn in
-                    M::gen_memcpy(memcpy_call_conv, dst_ptr.to_reg(), src_ptr, size as usize)
-                        .into_iter()
-                {
-                    ctx.emit(insn);
-                }
+                &ABIArgPart::None => unreachable!(),
             }
         }
     }
@@ -1617,25 +1650,31 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         idx: usize,
         into_regs: ValueRegs<Writable<Reg>>,
     ) {
-        match &self.sig.rets[idx] {
-            // Extension mode doesn't matter because we're copying out, not in,
-            // and we ignore high bits in our own registers by convention.
-            &ABIArg::Reg { regs, ty, .. } => {
-                for insn in gen_move_multi::<M>(into_regs, regs.map(|r| r.to_reg()), ty) {
-                    ctx.emit(insn);
+        assert_eq!(into_regs.len(), self.sig.rets[idx].parts().len());
+        for (ret, into_reg) in self.sig.rets[idx]
+            .parts()
+            .iter()
+            .zip(into_regs.regs().iter())
+        {
+            match ret {
+                // Extension mode doesn't matter because we're copying out, not in,
+                // and we ignore high bits in our own registers by convention.
+                &ABIArgPart::Reg { reg, ty, .. } => {
+                    ctx.emit(M::gen_move(*into_reg, reg.to_reg(), ty));
                 }
-            }
-            &ABIArg::Stack { offset, ty, .. } => {
-                let ret_area_base = self.sig.stack_arg_space;
-                for insn in gen_load_stack_multi::<M>(
-                    StackAMode::SPOffset(offset + ret_area_base, ty),
-                    into_regs,
-                    ty,
-                ) {
-                    ctx.emit(insn);
+                &ABIArgPart::Stack { offset, ty, .. } => {
+                    let ret_area_base = self.sig.stack_arg_space;
+                    ctx.emit(M::gen_load_stack(
+                        StackAMode::SPOffset(offset + ret_area_base, ty),
+                        *into_reg,
+                        ty,
+                    ));
                 }
+                &ABIArgPart::StructArg { .. } => {
+                    panic!("Unexpected StructArg location for return value")
+                }
+                &ABIArgPart::None => unreachable!(),
             }
-            &ABIArg::StructArg { .. } => panic!("Unexpected StructArg location for return value"),
         }
     }
 

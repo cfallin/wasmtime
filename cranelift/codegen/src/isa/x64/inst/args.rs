@@ -447,6 +447,7 @@ pub enum CmpOpcode {
     Test,
 }
 
+#[allow(dead_code)]
 pub(crate) enum InstructionSet {
     SSE,
     SSE2,
