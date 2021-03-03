@@ -16,8 +16,11 @@ pub enum CallConv {
     Cold,
     /// System V-style convention used on many platforms
     SystemV,
-    /// Windows "fastcall" convention, also used for x64 and ARM
+    /// Windows "fastcall" convention, also used for x64
     WindowsFastcall,
+    /// Windows "fastcall" convention with Rust extension for `i128` values
+    /// spread across two 64-bit integer registers.
+    WindowsFastcallRust,
     /// SpiderMonkey WebAssembly convention on systems using natively SystemV
     BaldrdashSystemV,
     /// SpiderMonkey WebAssembly convention on Windows
@@ -59,7 +62,7 @@ impl CallConv {
     /// Is the calling convention extending the Windows Fastcall ABI?
     pub fn extends_windows_fastcall(self) -> bool {
         match self {
-            Self::WindowsFastcall | Self::BaldrdashWindows => true,
+            Self::WindowsFastcall | Self::BaldrdashWindows | Self::WindowsFastcallRust => true,
             _ => false,
         }
     }
@@ -80,6 +83,7 @@ impl fmt::Display for CallConv {
             Self::Cold => "cold",
             Self::SystemV => "system_v",
             Self::WindowsFastcall => "windows_fastcall",
+            Self::WindowsFastcallRust => "windows_fastcall_rust",
             Self::BaldrdashSystemV => "baldrdash_system_v",
             Self::BaldrdashWindows => "baldrdash_windows",
             Self::Baldrdash2020 => "baldrdash_2020",
@@ -96,6 +100,7 @@ impl str::FromStr for CallConv {
             "cold" => Ok(Self::Cold),
             "system_v" => Ok(Self::SystemV),
             "windows_fastcall" => Ok(Self::WindowsFastcall),
+            "windows_fastcall_rust" => Ok(Self::WindowsFastcallRust),
             "baldrdash_system_v" => Ok(Self::BaldrdashSystemV),
             "baldrdash_windows" => Ok(Self::BaldrdashWindows),
             "baldrdash_2020" => Ok(Self::Baldrdash2020),

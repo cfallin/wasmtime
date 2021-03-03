@@ -124,37 +124,30 @@ use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::mem;
 
-/// A location for (part of) an argument or return value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ABIArgPart {
-    /// In a real register.
-    Reg {
-        /// Register that holds this arg.
-        reg: RealReg,
-        /// Value type of this arg.
-        ty: ir::Type,
-        /// Should this arg be zero- or sign-extended?
-        extension: ir::ArgumentExtension,
-        /// Purpose of this arg.
+/// A location for an argument or return value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ABIArg {
+    /// In one or more storage slots (register or stack locations).
+    ///
+    /// This allows for a CLIF-level value to be spread among multiple ABI value
+    /// slots/locations. For example, a 128-bit value in some ABIs on 64-bit
+    /// machines may be passed in two separate 64-bit registers, or even a
+    /// register and a stack slot.
+    Slots {
+        /// The location(s) of the value or values.
+        slots: Vec<ABIArgSlot>,
+        /// The argument purpose, as copied from the CLIF.
         purpose: ir::ArgumentPurpose,
     },
-    /// Arguments only: on stack, at given offset from SP at entry.
-    Stack {
-        /// Offset of this arg relative to the base of stack args.
-        offset: i64,
-        /// Value type of this arg.
-        ty: ir::Type,
-        /// Should this arg be zero- or sign-extended?
-        extension: ir::ArgumentExtension,
-        /// Purpose of this arg.
-        purpose: ir::ArgumentPurpose,
-    },
+
     /// Structure argument. We reserve stack space for it, but the CLIF-level
     /// semantics are a little weird: the value passed to the call instruction,
     /// and received in the corresponding block param, is a *pointer*. On the
     /// caller side, we memcpy the data from the passed-in pointer to the stack
     /// area; on the callee side, we compute a pointer to this stack area and
     /// provide that as the argument's value.
+    ///
+    /// Invalid as return value.
     StructArg {
         /// Offset of this arg relative to base of stack args.
         offset: i64,
@@ -163,71 +156,107 @@ pub enum ABIArgPart {
         /// Purpose of this arg.
         purpose: ir::ArgumentPurpose,
     },
-    /// Sentinel for representing no arg in `ValueRegs` wrapper.
-    None,
+
+    /// By-reference argument. On the callee side, we accept a pointer to the
+    /// value, and it could be placed anywhere (though the caller likely has
+    /// placed it somewhere in the caller's stack frame). On the caller side, we
+    /// allocate space above the args and then pass a pointer.
+    ///
+    /// Invalid as return value.
+    ByRef {
+        /// Value type of this arg.
+        ty: ir::Type,
+        /// Purpose of this arg.
+        purpose: ir::ArgumentPurpose,
+        /// The slot in which the pointer is passed.
+        ptr: ABIArgSlot,
+        /// Types of each register part corresponding to this arg.
+        reg_tys: Vec<ir::Type>,
+        /// Offset in by-ref area when generating callsite.
+        byref_offset: i64,
+    },
 }
 
-impl InvalidSentinel for ABIArgPart {
-    fn invalid_sentinel() -> Self {
-        ABIArgPart::None
-    }
+/// A location ("slot") for a single value: a register or a stack location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ABIArgSlot {
+    /// In a real register.
+    Reg {
+        /// Register that holds this value.
+        reg: RealReg,
+        /// Value type of this particular slot (*not* necessarily the original
+        /// arg).
+        ty: ir::Type,
+        /// Should this value be zero- or sign-extended (or neither)?
+        extension: ir::ArgumentExtension,
+    },
+    /// Arguments only: on stack, at given offset from SP at entry.
+    Stack {
+        /// Offset of this arg relative to the base of stack args.
+        offset: i64,
+        /// Value type of this particular slot.
+        ty: ir::Type,
+        /// Should this arg be zero- or sign-extended (or neither)?
+        extension: ir::ArgumentExtension,
+    },
 }
-
-/// An ABIArg is composed of one or more parts. This allows for a CLIF-level
-/// Value to be passed with its parts in more than one location at the ABI
-/// level. For example, a 128-bit integer may be passed in two 64-bit registers,
-/// or even a 64-bit register and a 64-bit stack slot, on a 64-bit machine. The
-/// number of "parts" should correspond to the number of registers used to store
-/// this type according to the machine backend.
-///
-/// As an invariant, the `purpose` for every part must match. As a further
-/// invariant, a `StructArg` part cannot appear with any other part.
-#[derive(Clone, Copy, Debug)]
-pub struct ABIArg(ValueRegs<ABIArgPart>);
 
 impl ABIArg {
     /// Get the purpose of this arg.
-    fn get_purpose(self) -> ir::ArgumentPurpose {
-        match &self.parts()[0] {
-            &ABIArgPart::Reg { purpose, .. } => purpose,
-            &ABIArgPart::Stack { purpose, .. } => purpose,
-            &ABIArgPart::StructArg { purpose, .. } => purpose,
-            &ABIArgPart::None => unreachable!(),
+    fn get_purpose(&self) -> ir::ArgumentPurpose {
+        match self {
+            &ABIArg::Slots { purpose, .. } => purpose,
+            &ABIArg::StructArg { purpose, .. } => purpose,
+            &ABIArg::ByRef { purpose, .. } => purpose,
         }
     }
 
     /// Is this a StructArg?
-    fn is_struct_arg(self) -> bool {
-        match &self.parts()[0] {
-            &ABIArgPart::StructArg { .. } => true,
+    fn is_struct_arg(&self) -> bool {
+        match self {
+            &ABIArg::StructArg { .. } => true,
             _ => false,
         }
     }
 
-    /// How many parts does this ABIArg have?
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Get the parts.
-    pub fn parts(&self) -> &[ABIArgPart] {
-        self.0.regs()
-    }
-
-    /// Create an ABIArg from one part.
-    pub fn one(part: ABIArgPart) -> Self {
-        Self(ValueRegs::one(part))
-    }
-
-    /// Create an ABIArg from two parts.
-    pub fn two(lo: ABIArgPart, hi: ABIArgPart) -> Self {
-        match (&lo, &hi) {
-            (&ABIArgPart::StructArg { .. }, _) | (_, &ABIArgPart::StructArg { .. }) => {
-                panic!("Cannot combine StructArg with another arg part")
-            }
-            _ => {}
+    /// Is this a by-ref arg?
+    fn is_byref_arg(&self) -> bool {
+        match self {
+            &ABIArg::ByRef { .. } => true,
+            _ => false,
         }
-        Self(ValueRegs::two(lo, hi))
+    }
+
+    /// A single-slot argument.
+    pub(crate) fn slot(slot: ABIArgSlot, purpose: ir::ArgumentPurpose) -> ABIArg {
+        ABIArg::Slots {
+            slots: vec![slot],
+            purpose,
+        }
+    }
+
+    /// A single-reg argument.
+    pub(crate) fn reg(reg: RealReg, ty: Type, extension: ir::ArgumentExtension, purpose: ir::ArgumentPurpose) -> ABIArg {
+        ABIArg::slot(ABIArgSlot::Reg { reg, ty, extension }, purpose)
+    }
+
+    /// A single-stack-slot argument.
+    pub(crate) fn stack(offset: i64, ty: Type, extension: ir::ArgumentExtension, purpose: ir::ArgumentPurpose) -> ABIArg {
+        ABIArg::slot(ABIArgSlot::Stack { offset, ty, extension }, purpose)
+    }
+
+    fn visit_slots<F: Fn(&ABIArgSlot)>(&self, f: F) {
+        match self {
+            &ABIArg::Slots { ref slots, .. } => {
+                for slot in slots {
+                    f(slot);
+                }
+            }
+            &ABIArg::ByRef { ref ptr, .. } => {
+                f(ptr);
+            }
+            &ABIArg::StructArg { .. } => {}
+        }
     }
 }
 
@@ -318,14 +347,15 @@ pub trait ABIMachineSpec {
     /// and stack slots.
     ///
     /// Returns the list of argument locations, the stack-space used (rounded up
-    /// to as alignment requires), and if `add_ret_area_ptr` was passed, the
-    /// index of the extra synthetic arg that was added.
+    /// to as alignment requires), an Option giving the index of the extra
+    /// synthetic `ret_area_ptr` arg if added, and the space required by a
+    /// caller to set up by-reference args when calling this function.
     fn compute_arg_locs(
         call_conv: isa::CallConv,
         params: &[ir::AbiParam],
         args_or_rets: ArgsOrRets,
         add_ret_area_ptr: bool,
-    ) -> CodegenResult<(Vec<ABIArg>, i64, Option<usize>)>;
+    ) -> CodegenResult<(Vec<ABIArg>, i64, Option<usize>, i64)>;
 
     /// Returns the offset from FP to the argument area, i.e., jumping over the saved FP, return
     /// address, and maybe other standard elements depending on ABI (e.g. Wasm TLS reg).
@@ -503,6 +533,8 @@ struct ABISig {
     stack_ret_space: i64,
     /// Index in `args` of the stack-return-value-area argument.
     stack_ret_arg: Option<usize>,
+    /// Spcae on stack used to store by-reference arguments.
+    stack_byref_space: i64,
     /// Calling convention used.
     call_conv: isa::CallConv,
 }
@@ -511,14 +543,14 @@ impl ABISig {
     fn from_func_sig<M: ABIMachineSpec>(sig: &ir::Signature) -> CodegenResult<ABISig> {
         // Compute args and retvals from signature. Handle retvals first,
         // because we may need to add a return-area arg to the args.
-        let (rets, stack_ret_space, _) = M::compute_arg_locs(
+        let (rets, stack_ret_space, _, _) = M::compute_arg_locs(
             sig.call_conv,
             &sig.returns,
             ArgsOrRets::Rets,
             /* extra ret-area ptr = */ false,
         )?;
         let need_stack_return_area = stack_ret_space > 0;
-        let (args, stack_arg_space, stack_ret_arg) = M::compute_arg_locs(
+        let (args, stack_arg_space, stack_ret_arg, stack_byref_space) = M::compute_arg_locs(
             sig.call_conv,
             &sig.params,
             ArgsOrRets::Args,
@@ -541,6 +573,7 @@ impl ABISig {
             stack_arg_space,
             stack_ret_space,
             stack_ret_arg,
+            stack_byref_space,
             call_conv: sig.call_conv,
         })
     }
@@ -604,8 +637,13 @@ fn get_special_purpose_param_register(
     purpose: ir::ArgumentPurpose,
 ) -> Option<Reg> {
     let idx = f.signature.special_param_index(purpose)?;
-    match abi.args[idx].parts()[0] {
-        ABIArgPart::Reg { reg, .. } => Some(reg.to_reg()),
+    match abi.args[idx] {
+        ABIArg::Slots { ref slots, .. } => {
+            match &slots[0] {
+                &ABIArgSlot::Reg { reg, .. } => Some(reg.to_reg()),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -856,6 +894,138 @@ fn gen_store_stack_multi<M: ABIMachineSpec>(
     ret
 }
 
+/// How do we reach stack slots when accessing them? Either via FP,
+/// for arguments in the current function; SP, for a callee; or via an explicit
+/// base register, for return values.
+#[derive(Clone)]
+enum SlotStackFrame {
+    /// Stack-offset slots refer to offsets in the argument area of the current
+    /// function's frame. Calling-convention information is required so that we
+    /// know where this is relative to the FP register.
+    FP {
+        call_conv: isa::CallConv,
+        flags: settings::Flags,
+    },
+    /// Stack-offset slots are offset from the current SP.
+    SP { offset: i32 },
+    /// Stack-offset slots are offset from the given register.
+    Reg { base: Reg },
+    /// No stack args are allowed. This is used for return slots when no
+    /// return-area pointer exists.
+    None,
+}
+
+fn gen_load_slot_into_reg<M: ABIMachineSpec>(
+    slot: &ABIArgSlot,
+    into_reg: Writable<Reg>,
+    stack_frame: SlotStackFrame,
+) -> M::I {
+    match slot {
+        &ABIArgSlot::Reg { reg, ty, .. } => M::gen_move(into_reg, reg.to_reg(), ty),
+        &ABIArgSlot::Stack { offset, ty, .. } => match stack_frame {
+            SlotStackFrame::FP { call_conv, flags } => M::gen_load_stack(
+                StackAMode::FPOffset(M::fp_to_arg_offset(call_conv, &flags) + offset, ty),
+                into_reg,
+                ty,
+            ),
+            SlotStackFrame::SP { offset: sp_off } => {
+                M::gen_load_stack(StackAMode::SPOffset(offset + sp_off as i64, ty), into_reg, ty)
+            }
+            SlotStackFrame::Reg { base } => {
+                M::gen_load_base_offset(into_reg, base, offset as i32, ty)
+            }
+            SlotStackFrame::None => {
+                panic!("No stack args allowed in this context");
+            }
+        },
+    }
+}
+
+fn gen_store_slot_from_reg<M: ABIMachineSpec>(
+    slot: &ABIArgSlot,
+    from_reg: Reg,
+    tmp: Writable<Reg>,
+    call_conv: isa::CallConv,
+    stack_frame: SlotStackFrame,
+) -> SmallInstVec<M::I> {
+    let word_bits = M::word_bits() as u8;
+    let mut ret = smallvec![];
+    match slot {
+        &ABIArgSlot::Reg {
+            reg, ty, extension, ..
+        } => {
+            let from_bits = ty_bits(ty) as u8;
+            let ext = M::get_ext_mode(call_conv, extension);
+            match (ext, from_bits) {
+                (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n) if n < word_bits => {
+                    let signed = ext == ArgumentExtension::Sext;
+                    ret.push(M::gen_extend(
+                        Writable::from_reg(reg.to_reg()),
+                        from_reg,
+                        signed,
+                        from_bits,
+                        /* to_bits = */ word_bits,
+                    ));
+                }
+                _ => {
+                    ret.push(M::gen_move(Writable::from_reg(reg.to_reg()), from_reg, ty));
+                }
+            };
+        }
+        &ABIArgSlot::Stack {
+            offset,
+            ty,
+            extension,
+            ..
+        } => {
+            let mut ty = ty;
+            let from_bits = ty_bits(ty) as u8;
+            // A machine ABI implementation should ensure that stack frames
+            // have "reasonable" size. All current ABIs for machinst
+            // backends (aarch64 and x64) enforce a 128MB limit.
+            let off = i32::try_from(offset)
+                .expect("Argument stack offset greater than 2GB; should hit impl limit first");
+            let ext = M::get_ext_mode(call_conv, extension);
+            let r = match (ext, from_bits) {
+                (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n) if n < word_bits => {
+                    assert_eq!(M::word_reg_class(), from_reg.get_class());
+                    let signed = ext == ArgumentExtension::Sext;
+                    ret.push(M::gen_extend(
+                        tmp, from_reg, signed, from_bits, /* to_bits = */ word_bits,
+                    ));
+                    // Store the extended version.
+                    ty = M::word_type();
+                    tmp.to_reg()
+                }
+                _ => from_reg,
+            };
+            match stack_frame {
+                SlotStackFrame::FP { call_conv, flags } => {
+                    ret.push(M::gen_store_stack(
+                        StackAMode::FPOffset(M::fp_to_arg_offset(call_conv, &flags) + offset, ty),
+                        r,
+                        ty,
+                    ));
+                }
+                SlotStackFrame::SP { offset: sp_off } => {
+                    ret.push(M::gen_store_stack(
+                        StackAMode::SPOffset(offset + sp_off as i64, ty),
+                        r,
+                        ty,
+                    ));
+                }
+                SlotStackFrame::Reg { base } => {
+                    ret.push(M::gen_store_base_offset(base, offset as i32, r, ty));
+                }
+                SlotStackFrame::None => {
+                    panic!("No stack args allowed in this context");
+                }
+            }
+        }
+    }
+    ret
+}
+
 fn ensure_struct_return_ptr_is_returned(sig: &ir::Signature) -> ir::Signature {
     let params_structret = sig
         .params
@@ -912,11 +1082,11 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn liveins(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &arg in &self.sig.args {
-            for part in arg.parts() {
-                if let ABIArgPart::Reg { reg, .. } = part {
-                    set.insert(*reg);
+            arg.visit_slots(|slot| match slot {
+                &ABIArgSlot::Reg { reg, .. } => {
+                    set.insert(reg);
                 }
-            }
+            });
         }
         set
     }
@@ -924,11 +1094,11 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn liveouts(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &ret in &self.sig.rets {
-            for part in ret.parts() {
-                if let ABIArgPart::Reg { reg, .. } = part {
-                    set.insert(*reg);
+            ret.visit_slots(|slot| match slot {
+                &ABIArgSlot::Reg { reg, .. } => {
+                    set.insert(reg);
                 }
-            }
+            });
         }
         set
     }
@@ -953,41 +1123,51 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         &self,
         idx: usize,
         into_regs: ValueRegs<Writable<Reg>>,
+        ptr_tmp: Writable<Reg>,
     ) -> SmallInstVec<Self::I> {
-        assert_eq!(into_regs.len(), self.sig.args[idx].parts().len());
+        let frame = SlotStackFrame::FP {
+            call_conv: self.sig.call_conv,
+            flags: self.flags,
+        };
         let mut insts = smallvec![];
-        for (part, into_reg) in self.sig.args[idx]
-            .parts()
-            .iter()
-            .zip(into_regs.regs().iter())
-        {
-            match part {
-                // Extension mode doesn't matter (we're copying out, not in; we
-                // ignore high bits by convention).
-                &ABIArgPart::Reg { reg, ty, .. } => {
-                    insts.push(M::gen_move(*into_reg, reg.to_reg(), ty));
+        match &self.sig.args[idx] {
+            &ABIArg::Slots { ref slots, .. } => {
+                assert_eq!(into_regs.len(), slots.len());
+                for (slot, into_reg) in slots.iter().zip(into_regs.regs().iter()) {
+                    insts.push(gen_load_slot_into_reg::<M>(slot, *into_reg, frame));
                 }
-                &ABIArgPart::Stack { offset, ty, .. } => {
-                    insts.push(M::gen_load_stack(
-                        StackAMode::FPOffset(
-                            M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                            ty,
-                        ),
-                        *into_reg,
-                        ty,
-                    ));
-                }
-                &ABIArgPart::StructArg { offset, .. } => {
-                    insts.push(M::gen_get_stack_addr(
-                        StackAMode::FPOffset(
-                            M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                            I8,
-                        ),
-                        *into_reg,
+            }
+            &ABIArg::StructArg { offset, .. } => {
+                let into_reg = into_regs
+                    .only_reg()
+                    .expect("StructArg pointer result should be one reg");
+                insts.push(M::gen_get_stack_addr(
+                    StackAMode::FPOffset(
+                        M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                         I8,
+                    ),
+                    into_reg,
+                    I8,
+                ));
+            }
+            &ABIArg::ByRef {
+                ty,
+                ref ptr,
+                ref reg_tys,
+                ..
+            } => {
+                let mut offset = 0;
+                // Load the pointer value
+                insts.push(gen_load_slot_into_reg::<M>(ptr, ptr_tmp, gen_load_stack));
+                for (reg, reg_ty) in into_regs.regs().iter().zip(reg_tys.iter()) {
+                    insts.push(M::gen_load_base_offset(
+                        *reg,
+                        ptr_tmp.to_reg(),
+                        offset,
+                        *reg_ty,
                     ));
+                    offset += reg_ty.bytes() as i32;
                 }
-                &ABIArgPart::None => unreachable!(),
             }
         }
         insts
@@ -1007,88 +1187,33 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         &self,
         idx: usize,
         from_regs: ValueRegs<Writable<Reg>>,
+        ptr_tmp: Writable<Reg>,
     ) -> SmallInstVec<Self::I> {
+        let frame = match self.ret_area_ptr {
+            Some(reg) => SlotStackFrame::Reg { base: reg.to_reg() },
+            None => SlotStackFrame::None,
+        };
         let mut ret = smallvec![];
-        let word_bits = M::word_bits() as u8;
-        assert_eq!(from_regs.len(), self.sig.rets[idx].len());
-        for (part, from_reg) in self.sig.rets[idx]
-            .parts()
-            .iter()
-            .zip(from_regs.regs().iter())
-        {
-            match part {
-                &ABIArgPart::Reg {
-                    reg, ty, extension, ..
-                } => {
-                    let from_bits = ty_bits(ty) as u8;
-                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                    match (ext, from_bits) {
-                        (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                            if n < word_bits =>
-                        {
-                            let signed = ext == ArgumentExtension::Sext;
-                            ret.push(M::gen_extend(
-                                Writable::from_reg(reg.to_reg()),
-                                from_reg.to_reg(),
-                                signed,
-                                from_bits,
-                                /* to_bits = */ word_bits,
-                            ));
-                        }
-                        _ => {
-                            ret.push(M::gen_move(
-                                Writable::from_reg(reg.to_reg()),
-                                from_reg.to_reg(),
-                                ty,
-                            ));
-                        }
-                    };
-                }
-                &ABIArgPart::Stack {
-                    offset,
-                    ty,
-                    extension,
-                    ..
-                } => {
-                    let mut ty = ty;
-                    let from_bits = ty_bits(ty) as u8;
-                    // A machine ABI implementation should ensure that stack frames
-                    // have "reasonable" size. All current ABIs for machinst
-                    // backends (aarch64 and x64) enforce a 128MB limit.
-                    let off = i32::try_from(offset).expect(
-                        "Argument stack offset greater than 2GB; should hit impl limit first",
-                    );
-                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                    // Trash the from_reg; it should be its last use.
-                    match (ext, from_bits) {
-                        (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                            if n < word_bits =>
-                        {
-                            assert_eq!(M::word_reg_class(), from_reg.to_reg().get_class());
-                            let signed = ext == ArgumentExtension::Sext;
-                            ret.push(M::gen_extend(
-                                Writable::from_reg(from_reg.to_reg()),
-                                from_reg.to_reg(),
-                                signed,
-                                from_bits,
-                                /* to_bits = */ word_bits,
-                            ));
-                            // Store the extended version.
-                            ty = M::word_type();
-                        }
-                        _ => {}
-                    };
-                    ret.push(M::gen_store_base_offset(
-                        self.ret_area_ptr.unwrap().to_reg(),
-                        off,
+        match &self.sig.rets[idx] {
+            &ABIArg::Slots { ref slots, .. } => {
+                assert_eq!(from_regs.len(), slots.len());
+                for (from_reg, slot) in from_regs.regs().iter().zip(slots.iter()) {
+                    ret.extend(gen_store_slot_from_reg::<M>(
+                        slot,
                         from_reg.to_reg(),
-                        ty,
+                        *from_reg,
+                        self.call_conv,
+                        frame,
                     ));
                 }
-                &ABIArgPart::StructArg { .. } => {
-                    panic!("Unexpected StructArg location for return value")
-                }
-                &ABIArgPart::None => unreachable!(),
+            }
+            &ABIArg::StructArg { .. } => {
+                panic!("StructArg is not supported as return value");
+            }
+            &ABIArg::ByRef {
+                ..
+            } => {
+                panic!("ByRef is not supported as return value");
             }
         }
         ret
@@ -1096,7 +1221,12 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
 
     fn gen_retval_area_setup(&self) -> Option<Self::I> {
         if let Some(i) = self.sig.stack_ret_arg {
-            let insts = self.gen_copy_arg_to_regs(i, ValueRegs::one(self.ret_area_ptr.unwrap()));
+            let insts = self.gen_copy_arg_to_regs(
+                i,
+                ValueRegs::one(self.ret_area_ptr.unwrap()),
+                self.ret_area_ptr.unwrap(),
+            );
+            assert_eq!(insts.len(), 1);
             let inst = insts.into_iter().next().unwrap();
             trace!(
                 "gen_retval_area_setup: inst {:?}; ptr reg is {:?}",
@@ -1376,27 +1506,23 @@ fn abisig_to_uses_and_defs<M: ABIMachineSpec>(sig: &ABISig) -> (Vec<Reg>, Vec<Wr
     // Compute uses: all arg regs.
     let mut uses = Vec::new();
     for arg in &sig.args {
-        for part in arg.parts() {
-            match part {
-                &ABIArgPart::Reg { reg, .. } => {
-                    uses.push(reg.to_reg());
-                }
-                _ => {}
+        arg.visit_slots(|slot| match slot {
+            &ABIArgSlot::Reg { reg, .. } => {
+                uses.push(reg.to_reg());
             }
-        }
+            _ => {}
+        });
     }
 
     // Compute defs: all retval regs, and all caller-save (clobbered) regs.
     let mut defs = M::get_regs_clobbered_by_call(sig.call_conv);
     for ret in &sig.rets {
-        for part in ret.parts() {
-            match part {
-                &ABIArgPart::Reg { reg, .. } => {
-                    defs.push(Writable::from_reg(reg.to_reg()));
-                }
-                _ => {}
+        ret.visit_slots(|slot| match slot {
+            &ABIArgSlot::Reg { reg, .. } => {
+                defs.push(Writable::from_reg(reg.to_reg()));
             }
-        }
+            _ => {}
+        });
     }
 
     (uses, defs)
@@ -1515,7 +1641,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
     }
 
     fn accumulate_outgoing_args_size<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C) {
-        let off = self.sig.stack_arg_space + self.sig.stack_ret_space;
+        let off = self.sig.stack_arg_space + self.sig.stack_ret_space + self.sig.stack_byref_space;
         ctx.abi().accumulate_outgoing_args_size(off as u32);
     }
 
@@ -1537,91 +1663,80 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
     ) {
         let word_rc = M::word_reg_class();
         let word_bits = M::word_bits() as usize;
-        assert_eq!(from_regs.len(), self.sig.args[idx].parts().len());
-        for (part, from_reg) in self.sig.args[idx]
-            .parts()
-            .iter()
-            .zip(from_regs.regs().iter())
-        {
-            match part {
-                &ABIArgPart::Reg {
-                    reg, ty, extension, ..
-                } => {
-                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                    if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                        assert_eq!(word_rc, reg.get_class());
-                        let signed = match ext {
-                            ir::ArgumentExtension::Uext => false,
-                            ir::ArgumentExtension::Sext => true,
-                            _ => unreachable!(),
-                        };
-                        ctx.emit(M::gen_extend(
-                            Writable::from_reg(reg.to_reg()),
-                            *from_reg,
-                            signed,
-                            ty_bits(ty) as u8,
-                            word_bits as u8,
-                        ));
-                    } else {
-                        ctx.emit(M::gen_move(Writable::from_reg(reg.to_reg()), *from_reg, ty));
-                    }
-                }
-                &ABIArgPart::Stack {
-                    offset,
-                    ty,
-                    extension,
-                    ..
-                } => {
-                    let mut ty = ty;
-                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                    if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                        assert_eq!(word_rc, from_reg.get_class());
-                        let signed = match ext {
-                            ir::ArgumentExtension::Uext => false,
-                            ir::ArgumentExtension::Sext => true,
-                            _ => unreachable!(),
-                        };
-                        // Extend in place in the source register. Our convention is to
-                        // treat high bits as undefined for values in registers, so this
-                        // is safe, even for an argument that is nominally read-only.
-                        ctx.emit(M::gen_extend(
-                            Writable::from_reg(*from_reg),
-                            *from_reg,
-                            signed,
-                            ty_bits(ty) as u8,
-                            word_bits as u8,
-                        ));
-                        // Store the extended version.
-                        ty = M::word_type();
-                    }
-                    ctx.emit(M::gen_store_stack(
-                        StackAMode::SPOffset(offset, ty),
+        let frame = SlotStackFrame::SP { offset: 0 };
+        match &self.sig.args[idx] {
+            &ABIArg::Slots { ref slots, .. } => {
+                assert_eq!(from_regs.len(), slots.len());
+                for (from_reg, slot) in from_regs.regs().iter().zip(slots.iter()) {
+                    let tmp = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
+                    for inst in gen_store_slot_from_reg::<M>(
+                        slot,
                         *from_reg,
-                        ty,
-                    ));
-                }
-                &ABIArgPart::StructArg { offset, size, .. } => {
-                    let src_ptr = *from_reg;
-                    let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
-                    ctx.emit(M::gen_get_stack_addr(
-                        StackAMode::SPOffset(offset, I8),
-                        dst_ptr,
-                        I8,
-                    ));
-                    // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
-                    // N.B.: because we process StructArg params *first*, this is
-                    // safe w.r.t. clobbers: we have not yet filled in any other
-                    // arg regs.
-                    let memcpy_call_conv =
-                        isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
-                    for insn in
-                        M::gen_memcpy(memcpy_call_conv, dst_ptr.to_reg(), src_ptr, size as usize)
-                            .into_iter()
-                    {
-                        ctx.emit(insn);
+                        tmp,
+                        self.sig.call_conv,
+                        frame,
+                    ) {
+                        ctx.emit(inst);
                     }
                 }
-                &ABIArgPart::None => unreachable!(),
+            }
+            &ABIArg::StructArg { offset, size, .. } => {
+                let src_ptr = from_regs
+                    .only_reg()
+                    .expect("StructArg ptr with more than one reg");
+                let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
+                ctx.emit(M::gen_get_stack_addr(
+                    StackAMode::SPOffset(offset, I8),
+                    dst_ptr,
+                    I8,
+                ));
+                // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
+                // N.B.: because we process StructArg params *first*, this is
+                // safe w.r.t. clobbers: we have not yet filled in any other
+                // arg regs.
+                let memcpy_call_conv = isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
+                for insn in
+                    M::gen_memcpy(memcpy_call_conv, dst_ptr.to_reg(), src_ptr, size as usize)
+                        .into_iter()
+                {
+                    ctx.emit(insn);
+                }
+            }
+            &ABIArg::ByRef {
+                ty,
+                ref ptr,
+                ref reg_tys,
+                byref_offset,
+                ..
+            } => {
+                // Store into space reserved on-stack.
+                let mut offset = self.sig.stack_arg_space + self.sig.stack_ret_space + byref_offset;
+                let offset_start = offset;
+                assert_eq!(reg_tys.len(), from_regs.regs().len());
+                for (reg, ty) in from_regs.regs().iter().zip(reg_tys.iter()) {
+                    ctx.emit(M::gen_store_stack(
+                        StackAMode::SPOffset(offset, *ty),
+                        *reg,
+                        *ty,
+                    ));
+                    offset += ty.bytes() as i64;
+                }
+                // Copy pointer to actual slot.
+                let ptr_reg = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
+                ctx.emit(M::gen_get_stack_addr(
+                    StackAMode::SPOffset(offset_start, I8),
+                    ptr_reg,
+                    I8,
+                ));
+                for inst in gen_store_slot_from_reg::<M>(
+                    ptr,
+                    ptr_reg.to_reg(),
+                    ptr_reg,
+                    self.sig.call_conv,
+                    frame,
+                ) {
+                    ctx.emit(inst);
+                }
             }
         }
     }
@@ -1650,30 +1765,21 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         idx: usize,
         into_regs: ValueRegs<Writable<Reg>>,
     ) {
-        assert_eq!(into_regs.len(), self.sig.rets[idx].parts().len());
-        for (ret, into_reg) in self.sig.rets[idx]
-            .parts()
-            .iter()
-            .zip(into_regs.regs().iter())
-        {
-            match ret {
-                // Extension mode doesn't matter because we're copying out, not in,
-                // and we ignore high bits in our own registers by convention.
-                &ABIArgPart::Reg { reg, ty, .. } => {
-                    ctx.emit(M::gen_move(*into_reg, reg.to_reg(), ty));
+        let frame = SlotStackFrame::SP { offset: 0 };
+        match &self.sig.rets[idx] {
+            &ABIArg::Slots { ref slots, .. } => {
+                assert_eq!(into_regs.len(), slots.len());
+                for (slot, into_reg) in slots.iter().zip(into_regs.regs().iter()) {
+                    ctx.emit(gen_load_slot_into_reg::<M>(slot, *into_reg, frame));
                 }
-                &ABIArgPart::Stack { offset, ty, .. } => {
-                    let ret_area_base = self.sig.stack_arg_space;
-                    ctx.emit(M::gen_load_stack(
-                        StackAMode::SPOffset(offset + ret_area_base, ty),
-                        *into_reg,
-                        ty,
-                    ));
-                }
-                &ABIArgPart::StructArg { .. } => {
-                    panic!("Unexpected StructArg location for return value")
-                }
-                &ABIArgPart::None => unreachable!(),
+            }
+            &ABIArg::StructArg { .. } => {
+                panic!("Struct arg is invalid in return position");
+            }
+            &ABIArg::ByRef {
+                ..
+            } => {
+                panic!("ByRef arg is invalid in return position");
             }
         }
     }

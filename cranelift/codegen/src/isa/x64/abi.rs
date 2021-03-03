@@ -31,41 +31,41 @@ fn try_fill_baldrdash_reg(call_conv: CallConv, param: &ir::AbiParam) -> Option<A
         match &param.purpose {
             &ir::ArgumentPurpose::VMContext => {
                 // This is SpiderMonkey's `WasmTlsReg`.
-                Some(ABIArg::one(ABIArgPart::Reg {
-                    reg: regs::r14().to_real_reg(),
-                    ty: types::I64,
-                    extension: param.extension,
-                    purpose: param.purpose,
-                }))
+                Some(ABIArg::reg(
+                    regs::r14().to_real_reg(),
+                    types::I64,
+                    param.extension,
+                    param.purpose,
+                ))
             }
             &ir::ArgumentPurpose::SignatureId => {
                 // This is SpiderMonkey's `WasmTableCallSigReg`.
-                Some(ABIArg::one(ABIArgPart::Reg {
-                    reg: regs::r10().to_real_reg(),
-                    ty: types::I64,
-                    extension: param.extension,
-                    purpose: param.purpose,
-                }))
+                Some(ABIArg::reg(
+                    regs::r10().to_real_reg(),
+                    types::I64,
+                    param.extension,
+                    param.purpose,
+                ))
             }
             &ir::ArgumentPurpose::CalleeTLS => {
                 // This is SpiderMonkey's callee TLS slot in the extended frame of Wasm's ABI-2020.
                 assert!(call_conv == isa::CallConv::Baldrdash2020);
-                Some(ABIArg::one(ABIArgPart::Stack {
-                    offset: BALDRDASH_CALLEE_TLS_OFFSET,
-                    ty: ir::types::I64,
-                    extension: ir::ArgumentExtension::None,
-                    purpose: param.purpose,
-                }))
+                Some(ABIArg::stack(
+                    BALDRDASH_CALLEE_TLS_OFFSET,
+                    ir::types::I64,
+                    ir::ArgumentExtension::None,
+                    param.purpose,
+                ))
             }
             &ir::ArgumentPurpose::CallerTLS => {
                 // This is SpiderMonkey's caller TLS slot in the extended frame of Wasm's ABI-2020.
                 assert!(call_conv == isa::CallConv::Baldrdash2020);
-                Some(ABIArg::one(ABIArgPart::Stack {
-                    offset: BALDRDASH_CALLER_TLS_OFFSET,
-                    ty: ir::types::I64,
-                    extension: ir::ArgumentExtension::None,
-                    purpose: param.purpose,
-                }))
+                Some(ABIArg::stack(
+                    BALDRDASH_CALLER_TLS_OFFSET,
+                    ir::types::I64,
+                    ir::ArgumentExtension::None,
+                    param.purpose,
+                ))
             }
             _ => None,
         }
@@ -100,7 +100,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         params: &[ir::AbiParam],
         args_or_rets: ArgsOrRets,
         add_ret_area_ptr: bool,
-    ) -> CodegenResult<(Vec<ABIArg>, i64, Option<usize>)> {
+    ) -> CodegenResult<(Vec<ABIArg>, i64, Option<usize>, i64)> {
         let is_baldrdash = call_conv.extends_baldrdash();
         let is_fastcall = call_conv.extends_windows_fastcall();
         let has_baldrdash_tls = call_conv == isa::CallConv::Baldrdash2020;
@@ -108,6 +108,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let mut next_gpr = 0;
         let mut next_vreg = 0;
         let mut next_stack: u64 = 0;
+        let mut next_byref: u64 = 0;
         let mut next_param_idx = 0; // Fastcall cares about overall param index
         let mut ret = vec![];
 
@@ -158,37 +159,50 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 let size = size as u64;
                 assert!(size % 8 == 0, "StructArgument size is not properly aligned");
                 next_stack += size;
-                ret.push(ABIArg::one(ABIArgPart::StructArg {
+                ret.push(ABIArg::StructArg {
                     offset,
                     size,
                     purpose: param.purpose,
-                }));
+                });
                 continue;
             }
 
             // Find regclass(es) of the register(s) used to store a value of this type.
             let (rcs, reg_tys) = Inst::rc_for_type(param.value_type)?;
 
-            // Now assign ABIArgParts for each register-sized part.
+            // Now assign slots for each register-sized part.
             //
-            // It's a little unclear how multi-reg values interact with
-            // allocation, and whether they are treated as one large aggregate
-            // (i.e., a struct) or as a series of separate register-sized
-            // virtual arguments. We care about being standards-compliant if a
-            // standard exists, but we also care about matching the Rust ABI
-            // where possible because that is one Cranelift use-case.
+            // Note that life is simple here *except* when it comes to
+            // 128-bit-sized values. There are several cases:
             //
-            // So let's experiment -- see the following example for multi-reg
-            // value (i128) treatment by rustc: https://godbolt.org/z/PhG3ob
+            // - on SysV platforms, 128-bit integer values that are stored in
+            //   two 64-bit registers get arg slots just as if they were two
+            //   separate 64-bit args. On Fastcall platforms *with Rust ABI*,
+            //   the same is true.
             //
-            // On both SysV and Fastcall platforms, the rustc convention is to
-            // break down an i128 into two i64s and allocate arg space as if
-            // these were separate arguments, *even if* one goes in a reg and
-            // the other goes on the stack. This makes our life quite simple!
+            // - on Fastcall platforms, 128-bit values of any sort are passed
+            //   by reference.
+            //
+            // - on SysV platforms, 128-bit vector values are passed in
+            //   a vector (XMM) reg.
+            //
+            // For examples of rustc behavior under Fastcall and SysV, see:
+            // https://godbolt.org/z/PhG3ob
 
-            let mut parts: SmallVec<[ABIArgPart; 2]> = smallvec![];
-            for (rc, reg_ty) in rcs.iter().zip(reg_tys.iter()) {
-                let intreg = *rc == RegClass::I64;
+            let by_ref = call_conv.extends_windows_fastcall() &&
+                param.value_type.bits() > 64 &&
+                (call_conv != CallConv::WindowsFastcallRust ||
+                 param.value_type.is_vector()) &&
+                args_or_rets == ArgsOrRets::Args;
+
+            let mut slots = vec![];
+            let rcs_and_tys = if by_ref {
+                vec![(RegClass::I64, I64)]
+            } else {
+                rcs.iter().cloned().zip(reg_tys.iter().cloned()).collect::<Vec<_>>()
+            };
+            for &(rc, reg_ty) in &rcs_and_tys {
+                let intreg = rc == RegClass::I64;
                 let nextreg = if intreg {
                     match args_or_rets {
                         ArgsOrRets::Args => {
@@ -215,11 +229,10 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                     } else {
                         next_vreg += 1;
                     }
-                    parts.push(ABIArgPart::Reg {
+                    slots.push(ABIArgSlot::Reg {
                         reg: reg.to_real_reg(),
-                        ty: *reg_ty,
+                        ty: reg_ty,
                         extension: param.extension,
-                        purpose: param.purpose,
                     });
                 } else {
                     // Compute size. Every arg takes a minimum slot of 8 bytes. (16-byte
@@ -229,25 +242,16 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                     // Align.
                     debug_assert!(size.is_power_of_two());
                     next_stack = (next_stack + size - 1) & !(size - 1);
-                    parts.push(ABIArgPart::Stack {
+                    slots.push(ABIArgSlot::Stack {
                         offset: next_stack as i64,
-                        ty: *reg_ty,
+                        ty: reg_ty,
                         extension: param.extension,
-                        purpose: param.purpose,
                     });
                     next_stack += size;
                 }
             }
 
-            match parts.len() {
-                1 => {
-                    ret.push(ABIArg::one(parts[0]));
-                }
-                2 => {
-                    ret.push(ABIArg::two(parts[0], parts[1]));
-                }
-                _ => panic!("Too many argument parts"),
-            }
+            ret.push(ABIArg::Slots { slots, purpose: param.purpose });
         }
 
         if args_or_rets == ArgsOrRets::Rets && is_baldrdash {
@@ -257,19 +261,19 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let extra_arg = if add_ret_area_ptr {
             debug_assert!(args_or_rets == ArgsOrRets::Args);
             if let Some(reg) = get_intreg_for_arg(&call_conv, next_gpr, next_param_idx) {
-                ret.push(ABIArg::one(ABIArgPart::Reg {
-                    reg: reg.to_real_reg(),
-                    ty: types::I64,
-                    extension: ir::ArgumentExtension::None,
-                    purpose: ir::ArgumentPurpose::Normal,
-                }));
+                ret.push(ABIArg::reg(
+                        reg.to_real_reg(),
+                        types::I64,
+                        ir::ArgumentExtension::None,
+                        ir::ArgumentPurpose::Normal,
+                ));
             } else {
-                ret.push(ABIArg::one(ABIArgPart::Stack {
-                    offset: next_stack as i64,
-                    ty: types::I64,
-                    extension: ir::ArgumentExtension::None,
-                    purpose: ir::ArgumentPurpose::Normal,
-                }));
+                ret.push(ABIArg::stack(
+                    next_stack as i64,
+                    types::I64,
+                    ir::ArgumentExtension::None,
+                    ir::ArgumentPurpose::Normal,
+                ));
                 next_stack += 8;
             }
             Some(ret.len() - 1)
@@ -284,7 +288,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             return Err(CodegenError::ImplLimitExceeded);
         }
 
-        Ok((ret, next_stack as i64, extra_arg))
+        Ok((ret, next_stack as i64, extra_arg, next_byref as i64))
     }
 
     fn fp_to_arg_offset(call_conv: isa::CallConv, flags: &settings::Flags) -> i64 {

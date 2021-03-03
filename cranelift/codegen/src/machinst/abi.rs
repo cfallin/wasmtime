@@ -61,11 +61,13 @@ pub trait ABICallee {
     fn stackslot_offsets(&self) -> &PrimaryMap<StackSlot, u32>;
 
     /// Generate an instruction which copies an argument to a destination
-    /// register.
+    /// register. A pointer-sized temporary register `ptr_tmp` must be provided
+    /// and may or may not be used.
     fn gen_copy_arg_to_regs(
         &self,
         idx: usize,
         into_reg: ValueRegs<Writable<Reg>>,
+        ptr_tmp: Writable<Reg>,
     ) -> SmallInstVec<Self::I>;
 
     /// Is the given argument needed in the body (as opposed to, e.g., serving
@@ -85,6 +87,7 @@ pub trait ABICallee {
         &self,
         idx: usize,
         from_reg: ValueRegs<Writable<Reg>>,
+        ptr_tmp: Writable<Reg>,
     ) -> SmallInstVec<Self::I>;
 
     /// Generate a return instruction.

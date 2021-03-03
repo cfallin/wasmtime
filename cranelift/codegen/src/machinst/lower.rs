@@ -15,6 +15,7 @@ use crate::ir::{
     InstructionData, MemFlags, Opcode, Signature, SourceLoc, Type, Value, ValueDef,
     ValueLabelAssignments, ValueLabelStart,
 };
+use crate::ir::types::I64;
 use crate::machinst::{
     writable_value_regs, ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode,
     VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, ValueRegs,
@@ -464,7 +465,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     continue;
                 }
                 let regs = writable_value_regs(self.value_regs[*param]);
-                for insn in self.vcode.abi().gen_copy_arg_to_regs(i, regs).into_iter() {
+                let ptr_tmp = self.alloc_tmp(I64).only_reg().unwrap();
+                for insn in self.vcode.abi().gen_copy_arg_to_regs(i, regs, ptr_tmp).into_iter() {
                     self.emit(insn);
                 }
                 if self.abi().signature().params[i].purpose == ArgumentPurpose::StructReturn {
@@ -504,10 +506,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         let retval_regs = self.retval_regs.clone();
         for (i, regs) in retval_regs.into_iter().enumerate() {
             let regs = writable_value_regs(regs);
+            let ptr_tmp = self.alloc_tmp(I64).only_reg().unwrap();
             for insn in self
                 .vcode
                 .abi()
-                .gen_copy_regs_to_retval(i, regs)
+                .gen_copy_regs_to_retval(i, regs, ptr_tmp)
                 .into_iter()
             {
                 self.emit(insn);
