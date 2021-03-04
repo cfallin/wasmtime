@@ -189,15 +189,22 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             // For examples of rustc behavior under Fastcall and SysV, see:
             // https://godbolt.org/z/PhG3ob
 
-            let by_ref = call_conv.extends_windows_fastcall() &&
+            let i128_fastcall = call_conv.extends_windows_fastcall() &&
                 param.value_type.bits() > 64 &&
                 (call_conv != CallConv::WindowsFastcallRust ||
-                 param.value_type.is_vector()) &&
-                args_or_rets == ArgsOrRets::Args;
+                 param.value_type.is_vector());
 
             let mut slots = vec![];
-            let rcs_and_tys = if by_ref {
-                vec![(RegClass::I64, I64)]
+            let rcs_and_tys = if i128_fastcall {
+                match args_or_rets {
+                    ArgsOrRets::Args => {
+                        // By-ref: this is the pointer value.
+                        vec![(RegClass::I64, I64)]
+                    }
+                    ArgsOrRets::Rets => {
+                        vec![(RegClass::V128, I128)]
+                    }
+                }
             } else {
                 rcs.iter().cloned().zip(reg_tys.iter().cloned()).collect::<Vec<_>>()
             };
@@ -251,7 +258,20 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 }
             }
 
-            ret.push(ABIArg::Slots { slots, purpose: param.purpose });
+            if i128_fastcall && args_or_rets == ArgsOrRets::Args {
+                let ptr = slots[0];
+                let offset = next_byref;
+                next_byref += 16;
+                ret.push(ABIArg::ByRef {
+                    ty: param.value_type,
+                    purpose: param.purpose,
+                    ptr,
+                    reg_tys: vec![I64, I64],
+                    byref_offset: offset,
+                });
+            } else {
+                ret.push(ABIArg::Slots { slots, purpose: param.purpose });
+            }
         }
 
         if args_or_rets == ArgsOrRets::Rets && is_baldrdash {
