@@ -1,6 +1,6 @@
 //! Unwind information for Windows x64 ABI.
 
-use crate::isa::{unwind::winx64::UnwindInfo, unwind::input};
+use crate::isa::{unwind::input, unwind::winx64::UnwindInfo};
 use crate::result::CodegenResult;
 use regalloc::{Reg, RegClass};
 
@@ -51,5 +51,4 @@ mod tests {
             None
         );
     }
-
 }

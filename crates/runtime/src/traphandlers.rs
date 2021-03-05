@@ -559,9 +559,7 @@ impl<'a> CallThreadState<'a> {
                 debug_assert_eq!(ret, 0);
                 Err(Trap::User(data))
             }
-            UnwindReason::LibTrap(trap) => {
-                Err(trap)
-            }
+            UnwindReason::LibTrap(trap) => Err(trap),
             UnwindReason::JitTrap { backtrace, pc } => {
                 debug_assert_eq!(ret, 0);
                 let maybe_interrupted = unsafe {

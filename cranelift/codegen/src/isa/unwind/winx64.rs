@@ -4,7 +4,7 @@ use crate::isa::unwind::input;
 use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
-use log::warn;
+use log::{debug, warn};
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,11 @@ pub(crate) enum UnwindCode {
         offset: u8,
         reg: u8,
     },
+    SaveReg {
+        offset: u8,
+        reg: u8,
+        stack_offset: u32,
+    },
     SaveXmm {
         offset: u8,
         reg: u8,
@@ -68,6 +73,8 @@ impl UnwindCode {
             PushNonvolatileRegister = 0,
             LargeStackAlloc = 1,
             SmallStackAlloc = 2,
+            SaveNonVolatileRegister = 4,
+            SaveNonVolatileRegisterFar = 5,
             SaveXmm128 = 8,
             SaveXmm128Far = 9,
         }
@@ -77,18 +84,35 @@ impl UnwindCode {
                 writer.write_u8(*offset);
                 writer.write_u8((*reg << 4) | (UnwindOperation::PushNonvolatileRegister as u8));
             }
-            Self::SaveXmm {
+            Self::SaveReg {
+                offset,
+                reg,
+                stack_offset,
+            }
+            | Self::SaveXmm {
                 offset,
                 reg,
                 stack_offset,
             } => {
+                let is_xmm = match self {
+                    Self::SaveXmm { .. } => true,
+                    _ => false,
+                };
+                let (op_small, op_large) = if is_xmm {
+                    (UnwindOperation::SaveXmm128, UnwindOperation::SaveXmm128Far)
+                } else {
+                    (
+                        UnwindOperation::SaveNonVolatileRegister,
+                        UnwindOperation::SaveNonVolatileRegisterFar,
+                    )
+                };
                 writer.write_u8(*offset);
                 let scaled_stack_offset = stack_offset / 16;
                 if scaled_stack_offset <= core::u16::MAX as u32 {
-                    writer.write_u8((*reg << 4) | (UnwindOperation::SaveXmm128 as u8));
+                    writer.write_u8((*reg << 4) | (op_small as u8));
                     writer.write_u16::<LittleEndian>(scaled_stack_offset as u16);
                 } else {
-                    writer.write_u8((*reg << 4) | (UnwindOperation::SaveXmm128Far as u8));
+                    writer.write_u8((*reg << 4) | (op_large as u8));
                     writer.write_u16::<LittleEndian>(*stack_offset as u16);
                     writer.write_u16::<LittleEndian>((stack_offset >> 16) as u16);
                 }
@@ -125,7 +149,7 @@ impl UnwindCode {
                     3
                 }
             }
-            Self::SaveXmm { stack_offset, .. } => {
+            Self::SaveXmm { stack_offset, .. } | Self::SaveReg { stack_offset, .. } => {
                 if *stack_offset <= core::u16::MAX as u32 {
                     2
                 } else {
@@ -219,7 +243,7 @@ impl UnwindInfo {
             .fold(0, |nodes, c| nodes + c.node_count())
     }
 
-    pub(crate) fn build<Reg: PartialEq + Copy, MR: RegisterMapper<Reg>>(
+    pub(crate) fn build<Reg: PartialEq + Copy + std::fmt::Debug, MR: RegisterMapper<Reg>>(
         unwind: input::UnwindInfo<Reg>,
     ) -> CodegenResult<Self> {
         use crate::isa::unwind::input::UnwindCode as InputUnwindCode;
@@ -249,9 +273,11 @@ impl UnwindInfo {
                                 *unwind_codes.last_mut().unwrap() =
                                     UnwindCode::PushRegister { offset, reg };
                             } else {
-                                // TODO add `UnwindCode::SaveRegister` to handle multiple register
-                                // pushes with single `UnwindCode::StackAlloc`.
-                                // For now, just omit that information.
+                                unwind_codes.push(UnwindCode::SaveReg {
+                                    offset,
+                                    reg,
+                                    stack_offset: *stack_offset,
+                                });
                             }
                         }
                         MappedRegister::Xmm(reg) => {
@@ -272,6 +298,8 @@ impl UnwindInfo {
                 _ => {}
             }
         }
+
+        debug!("UnwindInfo {:?} -> unwind_codes {:?}", unwind, unwind_codes);
 
         Ok(Self {
             flags: 0, // this assumes cranelift functions have no SEH handlers
