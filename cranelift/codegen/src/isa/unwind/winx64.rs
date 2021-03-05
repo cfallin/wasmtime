@@ -1,6 +1,6 @@
 //! Windows x64 ABI unwind information.
 
-use crate::isa::{unwind::input, RegUnit};
+use crate::isa::unwind::input;
 use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
@@ -143,9 +143,9 @@ pub(crate) enum MappedRegister {
 }
 
 /// Maps UnwindInfo register to Windows x64 unwind data.
-pub(crate) trait RegisterMapper {
+pub(crate) trait RegisterMapper<Reg> {
     /// Maps RegUnit.
-    fn map(reg: RegUnit) -> MappedRegister;
+    fn map(reg: Reg) -> MappedRegister;
 }
 
 /// Represents Windows x64 unwind information.
@@ -219,8 +219,8 @@ impl UnwindInfo {
             .fold(0, |nodes, c| nodes + c.node_count())
     }
 
-    pub(crate) fn build<MR: RegisterMapper>(
-        unwind: input::UnwindInfo<RegUnit>,
+    pub(crate) fn build<Reg: PartialEq + Copy, MR: RegisterMapper<Reg>>(
+        unwind: input::UnwindInfo<Reg>,
     ) -> CodegenResult<Self> {
         use crate::isa::unwind::input::UnwindCode as InputUnwindCode;
 
@@ -251,9 +251,7 @@ impl UnwindInfo {
                             } else {
                                 // TODO add `UnwindCode::SaveRegister` to handle multiple register
                                 // pushes with single `UnwindCode::StackAlloc`.
-                                return Err(CodegenError::Unsupported(
-                                    "Unsupported UnwindCode::PushRegister sequence".into(),
-                                ));
+                                // For now, just omit that information.
                             }
                         }
                         MappedRegister::Xmm(reg) => {

@@ -11,6 +11,9 @@ use regalloc::Reg;
 #[cfg(feature = "unwind")]
 pub(crate) mod systemv;
 
+#[cfg(feature = "unwind")]
+pub(crate) mod winx64;
+
 pub struct X64UnwindInfo;
 
 impl UnwindInfoGenerator<Inst> for X64UnwindInfo {

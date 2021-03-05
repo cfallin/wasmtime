@@ -4,7 +4,7 @@ use self::inst::EmitInfo;
 
 use super::TargetIsa;
 use crate::ir::{condcodes::IntCC, Function};
-use crate::isa::unwind::systemv::RegisterMappingError;
+use crate::isa::unwind::systemv;
 use crate::isa::x64::{inst::regs::create_reg_universe_systemv, settings as x64_settings};
 use crate::isa::Builder as IsaBuilder;
 use crate::machinst::{compile, MachBackend, MachCompileResult, TargetIsaAdapter, VCode};
@@ -126,9 +126,8 @@ impl MachBackend for X64Backend {
             (Some(info), UnwindInfoKind::SystemV) => {
                 inst::unwind::systemv::create_unwind_info(info.clone())?.map(UnwindInfo::SystemV)
             }
-            (Some(_info), UnwindInfoKind::Windows) => {
-                //TODO inst::unwind::winx64::create_unwind_info(info.clone())?.map(|u| UnwindInfo::WindowsX64(u))
-                None
+            (Some(info), UnwindInfoKind::Windows) => {
+                inst::unwind::winx64::create_unwind_info(info.clone())?.map(|u| UnwindInfo::WindowsX64(u))
             }
             _ => None,
         })
@@ -140,7 +139,7 @@ impl MachBackend for X64Backend {
     }
 
     #[cfg(feature = "unwind")]
-    fn map_reg_to_dwarf(&self, reg: Reg) -> Result<u16, RegisterMappingError> {
+    fn map_reg_to_dwarf(&self, reg: Reg) -> Result<u16, systemv::RegisterMappingError> {
         inst::unwind::systemv::map_reg(reg).map(|reg| reg.0)
     }
 }
