@@ -86,3 +86,45 @@ pub mod input {
         pub initial_sp_offset: u8,
     }
 }
+
+/// Unwind pseudoinstruction used in VCode backends: represents that
+/// at the present location, an action has just been taken.
+///
+/// VCode backends always emit unwind info that is relative to a frame
+/// pointer, because we are planning to allow for dynamic frame allocation,
+/// and because it makes the design quite a lot simpler in general: we don't
+/// have to be precise about SP adjustments throughout the body of the function.
+///
+/// We also emit information for prologues, but not for epilogues. This is
+/// because we do not expect (for now) any unwinds to originate from within
+/// epilogue code; our epilogues are short and atomic, with no stack checks,
+/// destructor invocations, or the like.
+///
+/// Unwind pseudoinstructions are emitted inline by ABI code as it generates
+/// a prologue.
+///
+/// Thus, for the usual case, a prologue might look like (using x64 as
+/// an example):
+///
+/// ```plain
+/// push rbp
+/// mov rbp, rsp
+/// unwind BP=rsp
+/// sub rsp, 32
+/// mov [rsp+0], r12
+/// unwind [BP-32]=r12
+/// mov [rsp+8], r13
+/// unwind [BP-24]=r13
+/// ...
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub enum UnwindInst {
+    /// The frame-pointer register for this architecture has just been
+    /// set to the current stack location, and the word at FP is the
+    /// previous FP value.
+    CreateFPFrame,
+    /// The stack slot at the given offset from FP has been used to
+    /// save the given register.
+    SaveReg { fp_offset: i32, reg: RealReg },
+}

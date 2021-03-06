@@ -58,6 +58,8 @@ fn fuel_consumed(wasm: &[u8]) -> u64 {
 
 #[test]
 fn iloop() {
+    let _ = env_logger::init();
+
     iloop_aborts(
         r#"
             (module

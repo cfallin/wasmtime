@@ -21,12 +21,12 @@ pub(crate) fn create_unwind_info(
         }
     };
 
-    Ok(Some(UnwindInfo::build::<RegisterMapper>(unwind)?))
+    Ok(Some(UnwindInfo::build::<RegUnit, RegisterMapper>(unwind)?))
 }
 
 struct RegisterMapper;
 
-impl crate::isa::unwind::winx64::RegisterMapper for RegisterMapper {
+impl crate::isa::unwind::winx64::RegisterMapper<RegUnit> for RegisterMapper {
     fn map(reg: RegUnit) -> crate::isa::unwind::winx64::MappedRegister {
         use crate::isa::unwind::winx64::MappedRegister;
         if GPR.contains(reg) {
