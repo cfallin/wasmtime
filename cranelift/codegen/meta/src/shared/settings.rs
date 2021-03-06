@@ -235,6 +235,17 @@ pub(crate) fn define() -> SettingGroup {
         false,
     );
 
+    settings.add_bool(
+        "no_unwind_info",
+        r#"
+           Do not generate unwind info. This reduces metadata size
+           and improves compile time, but may result in the inability
+           for the debugger to trace frames, will break GC tracing
+           that relies on libunwind (such as in Wasmtime), and may
+           break platforms that require unwind info (such as Windows).
+          "#,
+        false);
+
     // BaldrMonkey requires that not-yet-relocated function addresses be encoded
     // as all-ones bitpatterns.
     settings.add_bool(

@@ -474,7 +474,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
 
     fn gen_clobber_save(
         call_conv: isa::CallConv,
-        _: &settings::Flags,
+        flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
     ) -> (u64, SmallVec<[Self::I; 16]>) {
@@ -483,15 +483,17 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let clobbered = get_callee_saves(&call_conv, clobbers);
         let clobbered_size = compute_clobber_size(&clobbered);
 
-        // Emit unwind info: start the frame. The frame (from unwind
-        // consumers' point of view) starts at clobbbers, just below
-        // the FP and return address. Spill slots and stack slots are
-        // part of our actual frame but do not concern the unwinder.
-        insts.push(Inst::Unwind {
-            inst: UnwindInst::CreateFPFrame {
-                fp_offset: u8::try_from(clobbered_size).expect("Clobbers are too large"),
-            },
-        });
+        if !flags.no_unwind_info() {
+            // Emit unwind info: start the frame. The frame (from unwind
+            // consumers' point of view) starts at clobbbers, just below
+            // the FP and return address. Spill slots and stack slots are
+            // part of our actual frame but do not concern the unwinder.
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::CreateFPFrame {
+                    fp_offset: u8::try_from(clobbered_size).expect("Clobbers are too large"),
+                },
+            });
+        }
 
         // Adjust the stack pointer downward for clobbers.
         let stack_size = fixed_frame_storage_size + clobbered_size;
@@ -532,12 +534,14 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 }
                 _ => unreachable!(),
             };
-            insts.push(Inst::Unwind {
-                inst: UnwindInst::SaveReg {
-                    frame_offset: (off - fixed_frame_storage_size) as u8,
-                    reg: r_reg,
-                },
-            });
+            if !flags.no_unwind_info() {
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SaveReg {
+                        frame_offset: (off - fixed_frame_storage_size) as u8,
+                        reg: r_reg,
+                    },
+                });
+            }
         }
 
         (clobbered_size as u64, insts)

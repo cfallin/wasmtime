@@ -537,7 +537,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
     // nominal SP offset; abi_impl generic code will do that.
     fn gen_clobber_save(
         call_conv: isa::CallConv,
-        _: &settings::Flags,
+        flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
     ) -> (u64, SmallVec<[Inst; 16]>) {
@@ -550,13 +550,16 @@ impl ABIMachineSpec for AArch64MachineDeps {
         insts.extend(Self::gen_sp_reg_adjust(
             -(clobber_size + fixed_frame_storage_size as i32),
         ));
-        // The *unwind* frame (but not the actual frame) starts at the
-        // clobbers, just below the saved FP/LR pair.
-        insts.push(Inst::Unwind {
-            inst: UnwindInst::CreateFPFrame {
-                fp_offset: u8::try_from(clobber_size).expect("clobbers are too large"),
-            },
-        });
+
+        if !flags.no_unwind_info() {
+            // The *unwind* frame (but not the actual frame) starts at the
+            // clobbers, just below the saved FP/LR pair.
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::CreateFPFrame {
+                    fp_offset: u8::try_from(clobber_size).expect("clobbers are too large"),
+                },
+            });
+        }
 
         for (i, reg_pair) in clobbered_int.chunks(2).enumerate() {
             let (r1, r2) = if reg_pair.len() == 2 {
@@ -583,18 +586,20 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 ),
                 flags: MemFlags::trusted(),
             });
-            insts.push(Inst::Unwind {
-                inst: UnwindInst::SaveReg {
-                    frame_offset: (i * 16) as u8,
-                    reg: r1.to_real_reg(),
-                },
-            });
-            insts.push(Inst::Unwind {
-                inst: UnwindInst::SaveReg {
-                    frame_offset: (i * 16 + 8) as u8,
-                    reg: r2.to_real_reg(),
-                },
-            });
+            if !flags.no_unwind_info() {
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SaveReg {
+                        frame_offset: (i * 16) as u8,
+                        reg: r1.to_real_reg(),
+                    },
+                });
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SaveReg {
+                        frame_offset: (i * 16 + 8) as u8,
+                        reg: r2.to_real_reg(),
+                    },
+                });
+            }
         }
 
         let vec_offset = int_save_bytes;
@@ -610,12 +615,14 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 ),
                 flags: MemFlags::trusted(),
             });
-            insts.push(Inst::Unwind {
-                inst: UnwindInst::SaveReg {
-                    frame_offset: (vec_offset + (i * 16)) as u8,
-                    reg: reg.to_reg(),
-                },
-            });
+            if flags.no_unwind_info() {
+                insts.push(Inst::Unwind {
+                    inst: UnwindInst::SaveReg {
+                        frame_offset: (vec_offset + (i * 16)) as u8,
+                        reg: reg.to_reg(),
+                    },
+                });
+            }
         }
 
         (total_save_bytes as u64, insts)

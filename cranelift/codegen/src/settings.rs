@@ -399,6 +399,7 @@ enable_simd = false
 enable_atomics = true
 enable_safepoints = false
 enable_llvm_abi_extensions = false
+no_unwind_info = false
 emit_all_ones_funcaddrs = false
 enable_probestack = true
 probestack_func_adjusts_sp = false

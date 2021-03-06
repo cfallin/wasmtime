@@ -1,7 +1,5 @@
 //! Unwind information for Windows x64 ABI.
 
-use crate::isa::{unwind::input, unwind::winx64::UnwindInfo};
-use crate::result::CodegenResult;
 use regalloc::{Reg, RegClass};
 
 pub(crate) struct RegisterMapper;

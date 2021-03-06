@@ -2,6 +2,7 @@
 ; would result in an out-of-bounds panic. (#2147)
 
 test compile
+set no_unwind_info=true
 target aarch64
 
 function u0:0() -> i8 system_v {
