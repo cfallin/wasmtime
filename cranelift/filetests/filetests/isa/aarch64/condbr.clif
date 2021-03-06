@@ -12,7 +12,6 @@ block0(v0: i64, v1: i64):
 ; nextln: mov fp, sp
 ; nextln: subs xzr, x0, x1
 ; nextln: cset x0, eq
-; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -38,12 +37,10 @@ block2:
 ; nextln: b.eq label1 ; b label2
 ; check: Block 1:
 ; check: movz x0, #1
-; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 ; check: Block 2:
 ; check: movz x0, #2
-; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
 
@@ -63,6 +60,5 @@ block1:
 ; nextln: subs xzr, x0, x1
 ; check: Block 1:
 ; check: movz x0, #1
-; nextln: mov sp, fp
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret

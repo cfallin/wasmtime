@@ -9,7 +9,6 @@ block0(v0: i32, v1: i32):
     v2 = iadd v0, v1
     ; check: add w0, w0, w1
     return v2
-    ; check: mov sp, fp
     ; check: ldp fp, lr, [sp], #16
     ; check: ret
 }

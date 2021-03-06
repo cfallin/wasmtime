@@ -244,7 +244,8 @@ pub(crate) fn define() -> SettingGroup {
            that relies on libunwind (such as in Wasmtime), and may
            break platforms that require unwind info (such as Windows).
           "#,
-        false);
+        false,
+    );
 
     // BaldrMonkey requires that not-yet-relocated function addresses be encoded
     // as all-ones bitpatterns.

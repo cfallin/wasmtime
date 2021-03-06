@@ -503,17 +503,11 @@ impl ABIMachineSpec for AArch64MachineDeps {
     fn gen_epilogue_frame_restore() -> SmallInstVec<Inst> {
         let mut insts = SmallVec::new();
 
-        // MOV (alias of ORR) interprets x31 as XZR, so use an ADD here.
-        // MOV to SP is an alias of ADD.
-        insts.push(Inst::AluRRImm12 {
-            alu_op: ALUOp::Add64,
-            rd: writable_stack_reg(),
-            rn: fp_reg(),
-            imm12: Imm12 {
-                bits: 0,
-                shift12: false,
-            },
-        });
+        // N.B.: sp is already adjusted to the appropriate place by the
+        // clobber-restore code (which also frees the fixed frame). Hence, there
+        // is no need for the usual `mov sp, fp` here.
+
+        // `ldp fp, lr, [sp], #16`
         insts.push(Inst::LoadP64 {
             rt: writable_fp_reg(),
             rt2: writable_link_reg(),
@@ -547,9 +541,6 @@ impl ABIMachineSpec for AArch64MachineDeps {
         let (int_save_bytes, vec_save_bytes) = saved_reg_stack_size(&clobbered_int, &clobbered_vec);
         let total_save_bytes = int_save_bytes + vec_save_bytes;
         let clobber_size = total_save_bytes as i32;
-        insts.extend(Self::gen_sp_reg_adjust(
-            -(clobber_size + fixed_frame_storage_size as i32),
-        ));
 
         if !flags.no_unwind_info() {
             // The *unwind* frame (but not the actual frame) starts at the
@@ -561,7 +552,18 @@ impl ABIMachineSpec for AArch64MachineDeps {
             });
         }
 
-        for (i, reg_pair) in clobbered_int.chunks(2).enumerate() {
+        // We use pre-indexed addressing modes here, rather than the possibly
+        // more efficient "subtract sp once then used fixed offsets" scheme,
+        // because we cannot guarantee that the offset of a clobber-save slot
+        // will be within a SImm7 (+127/-128 byte) offset range of sp after
+        // allocating the whole frame. Because clobbers are at the top of the
+        // frame (due to unwind-info restrictions), this more general scheme is
+        // sometimes necessary.
+        //
+        // `frame_offset` tracks offset above start-of-clobbers for unwind-info
+        // purposes.
+        let mut frame_offset = clobber_size as u8;
+        for reg_pair in clobbered_int.chunks(2) {
             let (r1, r2) = if reg_pair.len() == 2 {
                 // .to_reg().to_reg(): Writable<RealReg> --> RealReg --> Reg
                 (reg_pair[0].to_reg().to_reg(), reg_pair[1].to_reg().to_reg())
@@ -572,57 +574,56 @@ impl ABIMachineSpec for AArch64MachineDeps {
             debug_assert!(r1.get_class() == RegClass::I64);
             debug_assert!(r2.get_class() == RegClass::I64);
 
-            // stp r1, r2, [sp, #(i * #16)]
+            // stp r1, r2, [sp, #-16]!
             insts.push(Inst::StoreP64 {
                 rt: r1,
                 rt2: r2,
-                mem: PairAMode::SignedOffset(
-                    stack_reg(),
-                    SImm7Scaled::maybe_from_i64(
-                        fixed_frame_storage_size as i64 + (i as i64 * 16),
-                        types::I64,
-                    )
-                    .unwrap(),
+                mem: PairAMode::PreIndexed(
+                    writable_stack_reg(),
+                    SImm7Scaled::maybe_from_i64(-16, types::I64).unwrap(),
                 ),
                 flags: MemFlags::trusted(),
             });
             if !flags.no_unwind_info() {
+                frame_offset -= 8;
+                if r2 != zero_reg() {
+                    insts.push(Inst::Unwind {
+                        inst: UnwindInst::SaveReg {
+                            frame_offset,
+                            reg: r2.to_real_reg(),
+                        },
+                    });
+                }
+                frame_offset -= 8;
                 insts.push(Inst::Unwind {
                     inst: UnwindInst::SaveReg {
-                        frame_offset: (i * 16) as u8,
+                        frame_offset,
                         reg: r1.to_real_reg(),
-                    },
-                });
-                insts.push(Inst::Unwind {
-                    inst: UnwindInst::SaveReg {
-                        frame_offset: (i * 16 + 8) as u8,
-                        reg: r2.to_real_reg(),
                     },
                 });
             }
         }
 
-        let vec_offset = int_save_bytes;
-        for (i, reg) in clobbered_vec.iter().enumerate() {
+        for reg in clobbered_vec.iter() {
             insts.push(Inst::FpuStore128 {
                 rd: reg.to_reg().to_reg(),
-                mem: AMode::Unscaled(
-                    stack_reg(),
-                    SImm9::maybe_from_i64(
-                        fixed_frame_storage_size as i64 + vec_offset as i64 + (i as i64 * 16),
-                    )
-                    .unwrap(),
-                ),
+                mem: AMode::PreIndexed(writable_stack_reg(), SImm9::maybe_from_i64(-16).unwrap()),
                 flags: MemFlags::trusted(),
             });
-            if flags.no_unwind_info() {
+            if !flags.no_unwind_info() {
+                frame_offset -= 16;
                 insts.push(Inst::Unwind {
                     inst: UnwindInst::SaveReg {
-                        frame_offset: (vec_offset + (i * 16)) as u8,
+                        frame_offset,
                         reg: reg.to_reg(),
                     },
                 });
             }
+        }
+
+        // Allocate the fixed frame below the clobbers if necessary.
+        if fixed_frame_storage_size > 0 {
+            insts.extend(Self::gen_sp_reg_adjust(-(fixed_frame_storage_size as i32)));
         }
 
         (total_save_bytes as u64, insts)
@@ -637,8 +638,11 @@ impl ABIMachineSpec for AArch64MachineDeps {
         let mut insts = SmallVec::new();
         let (clobbered_int, clobbered_vec) = get_regs_saved_in_prologue(call_conv, clobbers);
 
-        let (int_save_bytes, vec_save_bytes) = saved_reg_stack_size(&clobbered_int, &clobbered_vec);
-        for (i, reg_pair) in clobbered_int.chunks(2).enumerate() {
+        // Free the fixed frame if necessary.
+        if fixed_frame_storage_size > 0 {
+            insts.extend(Self::gen_sp_reg_adjust(fixed_frame_storage_size as i32));
+        }
+        for reg_pair in clobbered_int.chunks(2) {
             let (r1, r2) = if reg_pair.len() == 2 {
                 (
                     reg_pair[0].map(|r| r.to_reg()),
@@ -651,42 +655,24 @@ impl ABIMachineSpec for AArch64MachineDeps {
             debug_assert!(r1.to_reg().get_class() == RegClass::I64);
             debug_assert!(r2.to_reg().get_class() == RegClass::I64);
 
-            // ldp r1, r2, [sp, #(i * 16)]
+            // ldp r1, r2, [sp], #16
             insts.push(Inst::LoadP64 {
                 rt: r1,
                 rt2: r2,
-                mem: PairAMode::SignedOffset(
-                    stack_reg(),
-                    SImm7Scaled::maybe_from_i64(
-                        fixed_frame_storage_size as i64 + (i as i64 * 16),
-                        types::I64,
-                    )
-                    .unwrap(),
+                mem: PairAMode::PostIndexed(
+                    writable_stack_reg(),
+                    SImm7Scaled::maybe_from_i64(16, I64).unwrap(),
                 ),
                 flags: MemFlags::trusted(),
             });
         }
 
-        for (i, reg) in clobbered_vec.iter().enumerate() {
+        for reg in clobbered_vec.iter() {
             insts.push(Inst::FpuLoad128 {
                 rd: Writable::from_reg(reg.to_reg().to_reg()),
-                mem: AMode::Unscaled(
-                    stack_reg(),
-                    SImm9::maybe_from_i64(
-                        fixed_frame_storage_size as i64 + (i as i64 * 16) + int_save_bytes as i64,
-                    )
-                    .unwrap(),
-                ),
+                mem: AMode::PostIndexed(writable_stack_reg(), SImm9::maybe_from_i64(16).unwrap()),
                 flags: MemFlags::trusted(),
             });
-        }
-
-        // For non-baldrdash calling conventions, the frame pointer
-        // will be moved into the stack pointer in the epilogue, so we
-        // can skip restoring the stack pointer value with this `add`.
-        if call_conv.extends_baldrdash() {
-            let total_save_bytes = (int_save_bytes + vec_save_bytes) as i32;
-            insts.extend(Self::gen_sp_reg_adjust(total_save_bytes));
         }
 
         // If this is Baldrdash-2020, restore the callee (i.e., our) TLS
