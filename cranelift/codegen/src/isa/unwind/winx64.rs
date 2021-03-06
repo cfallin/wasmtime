@@ -267,11 +267,28 @@ impl UnwindInfo {
                     let offset = ensure_unwind_offset(*offset)?;
                     match reg {
                         MappedRegister::Int(reg) => {
-                            unwind_codes.push(UnwindCode::SaveReg {
-                                offset,
-                                reg,
-                                stack_offset: *stack_offset,
-                            });
+                            // Attempt to convert sequence of the `InputUnwindCode`:
+                            // `StackAlloc { size = word_size }`, `SaveRegister { stack_offset: 0 }`
+                            // to the shorter `UnwindCode::PushRegister`.
+                            let push_reg_sequence = if let Some(UnwindCode::StackAlloc {
+                                offset: alloc_offset,
+                                size,
+                            }) = unwind_codes.last()
+                            {
+                                *size == word_size && offset == *alloc_offset && *stack_offset == 0
+                            } else {
+                                false
+                            };
+                            if push_reg_sequence {
+                                *unwind_codes.last_mut().unwrap() =
+                                    UnwindCode::PushRegister { offset, reg };
+                            } else {
+                                unwind_codes.push(UnwindCode::SaveReg {
+                                    offset,
+                                    reg,
+                                    stack_offset: *stack_offset,
+                                });
+                            }
                         }
                         MappedRegister::Xmm(reg) => {
                             unwind_codes.push(UnwindCode::SaveXmm {
