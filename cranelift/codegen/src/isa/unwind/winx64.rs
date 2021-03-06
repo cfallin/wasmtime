@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Windows x64 ABI unwind information.
 
 use crate::binemit::CodeOffset;
