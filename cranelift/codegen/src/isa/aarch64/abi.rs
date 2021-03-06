@@ -642,7 +642,16 @@ impl ABIMachineSpec for AArch64MachineDeps {
         if fixed_frame_storage_size > 0 {
             insts.extend(Self::gen_sp_reg_adjust(fixed_frame_storage_size as i32));
         }
-        for reg_pair in clobbered_int.chunks(2) {
+
+        for reg in clobbered_vec.iter().rev() {
+            insts.push(Inst::FpuLoad128 {
+                rd: Writable::from_reg(reg.to_reg().to_reg()),
+                mem: AMode::PostIndexed(writable_stack_reg(), SImm9::maybe_from_i64(16).unwrap()),
+                flags: MemFlags::trusted(),
+            });
+        }
+
+        for reg_pair in clobbered_int.chunks(2).rev() {
             let (r1, r2) = if reg_pair.len() == 2 {
                 (
                     reg_pair[0].map(|r| r.to_reg()),
@@ -663,14 +672,6 @@ impl ABIMachineSpec for AArch64MachineDeps {
                     writable_stack_reg(),
                     SImm7Scaled::maybe_from_i64(16, I64).unwrap(),
                 ),
-                flags: MemFlags::trusted(),
-            });
-        }
-
-        for reg in clobbered_vec.iter() {
-            insts.push(Inst::FpuLoad128 {
-                rd: Writable::from_reg(reg.to_reg().to_reg()),
-                mem: AMode::PostIndexed(writable_stack_reg(), SImm9::maybe_from_i64(16).unwrap()),
                 flags: MemFlags::trusted(),
             });
         }

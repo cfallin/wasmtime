@@ -86,13 +86,13 @@ block0(v0: f64):
 ; nextln: str q14, [sp, #-16]!
 ; nextln: str q15, [sp, #-16]!
 
-; check: ldr q8, [sp], #16
-; nextln: ldr q9, [sp], #16
-; nextln: ldr q10, [sp], #16
-; nextln: ldr q11, [sp], #16
-; nextln: ldr q12, [sp], #16
-; nextln: ldr q13, [sp], #16
+; check: ldr q15, [sp], #16
 ; nextln: ldr q14, [sp], #16
-; nextln: ldr q15, [sp], #16
+; nextln: ldr q13, [sp], #16
+; nextln: ldr q12, [sp], #16
+; nextln: ldr q11, [sp], #16
+; nextln: ldr q10, [sp], #16
+; nextln: ldr q9, [sp], #16
+; nextln: ldr q8, [sp], #16
 ; nextln: ldp fp, lr, [sp], #16
 ; nextln: ret
