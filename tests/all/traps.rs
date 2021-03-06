@@ -133,7 +133,6 @@ fn test_trap_stack_overflow() -> Result<()> {
         .downcast::<Trap>()?;
 
     let trace = e.trace();
-    println!("trace = {:?}", trace);
     assert!(trace.len() >= 32);
     for i in 0..trace.len() {
         assert_eq!(trace[i].module_name().unwrap(), "rec_mod");
