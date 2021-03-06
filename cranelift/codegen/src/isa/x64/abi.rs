@@ -3,7 +3,7 @@
 use crate::ir::types::*;
 use crate::ir::{self, types, ExternalName, LibCall, MemFlags, Opcode, TrapCode, Type};
 use crate::isa;
-use crate::isa::{x64::inst::*, CallConv};
+use crate::isa::{unwind::UnwindInst, x64::inst::*, CallConv};
 use crate::machinst::abi_impl::*;
 use crate::machinst::*;
 use crate::settings;
@@ -477,19 +477,24 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         _: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
-        _outgoing_args_size: u32,
     ) -> (u64, SmallVec<[Self::I; 16]>) {
         let mut insts = SmallVec::new();
-        // Find all clobbered registers that are callee-save. These are only I64
-        // registers (all XMM registers are caller-save) so we can compute the
-        // total size of the needed stack space easily.
+        // Find all clobbered registers that are callee-save.
         let clobbered = get_callee_saves(&call_conv, clobbers);
-        let stack_size = compute_clobber_size(&clobbered) + fixed_frame_storage_size;
-        // Align to 16 bytes.
-        let stack_size = align_to(stack_size, 16);
-        let clobbered_size = stack_size - fixed_frame_storage_size;
-        // Adjust the stack pointer downward with one `sub rsp, IMM`
-        // instruction.
+        let clobbered_size = compute_clobber_size(&clobbered);
+
+        // Emit unwind info: start the frame. The frame (from unwind
+        // consumers' point of view) starts at clobbbers, just below
+        // the FP and return address. Spill slots and stack slots are
+        // part of our actual frame but do not concern the unwinder.
+        insts.push(Inst::Unwind {
+            inst: UnwindInst::CreateFPFrame {
+                fp_offset: u8::try_from(clobbered_size).expect("Clobbers are too large"),
+            },
+        });
+
+        // Adjust the stack pointer downward for clobbers.
+        let stack_size = fixed_frame_storage_size + clobbered_size;
         if stack_size > 0 {
             insts.push(Inst::alu_rmi_r(
                 OperandSize::Size64,
@@ -498,18 +503,21 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 Writable::from_reg(regs::rsp()),
             ));
         }
-        // Store each clobbered register in order at offsets from RSP.
-        let mut cur_offset = 0;
+        // Store each clobbered register in order at offsets from RSP,
+        // placing them above the fixed frame slots.
+        let mut cur_offset = fixed_frame_storage_size;
         for reg in &clobbered {
             let r_reg = reg.to_reg();
-            match r_reg.get_class() {
+            let off = match r_reg.get_class() {
                 RegClass::I64 => {
                     insts.push(Inst::store(
                         types::I64,
                         r_reg.to_reg(),
                         Amode::imm_reg(cur_offset, regs::rsp()),
                     ));
+                    let off = cur_offset;
                     cur_offset += 8;
+                    off
                 }
                 RegClass::V128 => {
                     cur_offset = align_to(cur_offset, 16);
@@ -518,10 +526,18 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                         r_reg.to_reg(),
                         Amode::imm_reg(cur_offset, regs::rsp()),
                     ));
+                    let off = cur_offset;
                     cur_offset += 16;
+                    off
                 }
                 _ => unreachable!(),
-            }
+            };
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::SaveReg {
+                    frame_offset: (off - fixed_frame_storage_size) as u8,
+                    reg: r_reg,
+                },
+            });
         }
 
         (clobbered_size as u64, insts)
@@ -531,17 +547,17 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         call_conv: isa::CallConv,
         flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
-        _fixed_frame_storage_size: u32,
-        _outgoing_args_size: u32,
+        fixed_frame_storage_size: u32,
     ) -> SmallVec<[Self::I; 16]> {
         let mut insts = SmallVec::new();
 
         let clobbered = get_callee_saves(&call_conv, clobbers);
-        let stack_size = compute_clobber_size(&clobbered);
-        let stack_size = align_to(stack_size, 16);
+        let stack_size = fixed_frame_storage_size + compute_clobber_size(&clobbered);
 
-        // Restore regs by loading from offsets of RSP.
-        let mut cur_offset = 0;
+        // Restore regs by loading from offsets of RSP. RSP will be
+        // returned to nominal-RSP at this point, so we can use the
+        // same offsets that we used when saving clobbers above.
+        let mut cur_offset = fixed_frame_storage_size;
         for reg in &clobbered {
             let rreg = reg.to_reg();
             match rreg.get_class() {
@@ -990,5 +1006,5 @@ fn compute_clobber_size(clobbers: &Vec<Writable<RealReg>>) -> u32 {
             _ => unreachable!(),
         }
     }
-    clobbered_size
+    align_to(clobbered_size, 16)
 }

@@ -2,9 +2,9 @@
 
 use crate::binemit::{CodeOffset, StackMap};
 use crate::ir::{types, ExternalName, Opcode, SourceLoc, TrapCode, Type, ValueLabel};
+use crate::isa::unwind::UnwindInst;
 use crate::isa::x64::abi::X64ABIMachineSpec;
 use crate::isa::x64::settings as x64_settings;
-use crate::isa::unwind::UnwindInst;
 use crate::isa::CallConv;
 use crate::machinst::*;
 use crate::{settings, settings::Flags, CodegenError, CodegenResult};

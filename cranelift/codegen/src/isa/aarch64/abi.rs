@@ -8,6 +8,7 @@ use crate::ir::Opcode;
 use crate::ir::{ExternalName, LibCall};
 use crate::isa;
 use crate::isa::aarch64::{inst::EmitState, inst::*};
+use crate::isa::unwind::UnwindInst;
 use crate::machinst::*;
 use crate::settings;
 use crate::{CodegenError, CodegenResult};
@@ -15,6 +16,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use regalloc::{RealReg, Reg, RegClass, Set, Writable};
 use smallvec::{smallvec, SmallVec};
+use std::convert::TryFrom;
 
 // We use a generic implementation that factors out AArch64 and x64 ABI commonalities, because
 // these ABIs are very similar.
@@ -538,16 +540,23 @@ impl ABIMachineSpec for AArch64MachineDeps {
         _: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
         fixed_frame_storage_size: u32,
-        _outgoing_args_size: u32,
     ) -> (u64, SmallVec<[Inst; 16]>) {
         let mut insts = SmallVec::new();
         let (clobbered_int, clobbered_vec) = get_regs_saved_in_prologue(call_conv, clobbers);
 
         let (int_save_bytes, vec_save_bytes) = saved_reg_stack_size(&clobbered_int, &clobbered_vec);
-        let total_save_bytes = (vec_save_bytes + int_save_bytes) as i32;
+        let total_save_bytes = int_save_bytes + vec_save_bytes;
+        let clobber_size = total_save_bytes as i32;
         insts.extend(Self::gen_sp_reg_adjust(
-            -(total_save_bytes + fixed_frame_storage_size as i32),
+            -(clobber_size + fixed_frame_storage_size as i32),
         ));
+        // The *unwind* frame (but not the actual frame) starts at the
+        // clobbers, just below the saved FP/LR pair.
+        insts.push(Inst::Unwind {
+            inst: UnwindInst::CreateFPFrame {
+                fp_offset: u8::try_from(clobber_size).expect("clobbers are too large"),
+            },
+        });
 
         for (i, reg_pair) in clobbered_int.chunks(2).enumerate() {
             let (r1, r2) = if reg_pair.len() == 2 {
@@ -566,9 +575,25 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 rt2: r2,
                 mem: PairAMode::SignedOffset(
                     stack_reg(),
-                    SImm7Scaled::maybe_from_i64((i * 16) as i64, types::I64).unwrap(),
+                    SImm7Scaled::maybe_from_i64(
+                        fixed_frame_storage_size as i64 + (i as i64 * 16),
+                        types::I64,
+                    )
+                    .unwrap(),
                 ),
                 flags: MemFlags::trusted(),
+            });
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::SaveReg {
+                    frame_offset: (i * 16) as u8,
+                    reg: r1.to_real_reg(),
+                },
+            });
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::SaveReg {
+                    frame_offset: (i * 16 + 8) as u8,
+                    reg: r2.to_real_reg(),
+                },
             });
         }
 
@@ -578,9 +603,18 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 rd: reg.to_reg().to_reg(),
                 mem: AMode::Unscaled(
                     stack_reg(),
-                    SImm9::maybe_from_i64((vec_offset + (i * 16)) as i64).unwrap(),
+                    SImm9::maybe_from_i64(
+                        fixed_frame_storage_size as i64 + vec_offset as i64 + (i as i64 * 16),
+                    )
+                    .unwrap(),
                 ),
                 flags: MemFlags::trusted(),
+            });
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::SaveReg {
+                    frame_offset: (vec_offset + (i * 16)) as u8,
+                    reg: reg.to_reg(),
+                },
             });
         }
 
@@ -591,8 +625,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
         call_conv: isa::CallConv,
         flags: &settings::Flags,
         clobbers: &Set<Writable<RealReg>>,
-        _fixed_frame_storage_size: u32,
-        _outgoing_args_size: u32,
+        fixed_frame_storage_size: u32,
     ) -> SmallVec<[Inst; 16]> {
         let mut insts = SmallVec::new();
         let (clobbered_int, clobbered_vec) = get_regs_saved_in_prologue(call_conv, clobbers);
@@ -617,7 +650,11 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 rt2: r2,
                 mem: PairAMode::SignedOffset(
                     stack_reg(),
-                    SImm7Scaled::maybe_from_i64((i * 16) as i64, types::I64).unwrap(),
+                    SImm7Scaled::maybe_from_i64(
+                        fixed_frame_storage_size as i64 + (i as i64 * 16),
+                        types::I64,
+                    )
+                    .unwrap(),
                 ),
                 flags: MemFlags::trusted(),
             });
@@ -628,7 +665,10 @@ impl ABIMachineSpec for AArch64MachineDeps {
                 rd: Writable::from_reg(reg.to_reg().to_reg()),
                 mem: AMode::Unscaled(
                     stack_reg(),
-                    SImm9::maybe_from_i64(((i * 16) + int_save_bytes) as i64).unwrap(),
+                    SImm9::maybe_from_i64(
+                        fixed_frame_storage_size as i64 + (i as i64 * 16) + int_save_bytes as i64,
+                    )
+                    .unwrap(),
                 ),
                 flags: MemFlags::trusted(),
             });

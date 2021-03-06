@@ -2379,6 +2379,10 @@ impl MachInstEmit for Inst {
             &Inst::ValueLabelMarker { .. } => {
                 // Nothing; this is only used to compute debug info.
             }
+
+            &Inst::Unwind { ref inst } => {
+                sink.add_unwind(inst.clone());
+            }
         }
 
         let end_off = sink.cur_offset();

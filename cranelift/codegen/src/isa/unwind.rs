@@ -1,4 +1,7 @@
 //! Represents information relating to function unwinding.
+
+use regalloc::RealReg;
+
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
@@ -109,12 +112,12 @@ pub mod input {
 /// ```plain
 /// push rbp
 /// mov rbp, rsp
-/// unwind BP=rsp
+/// unwind CreateFPFrame (BP=sp; [BP] = oldBP)
 /// sub rsp, 32
 /// mov [rsp+0], r12
-/// unwind [BP-32]=r12
+/// unwind SaveReg [BP-32], r12
 /// mov [rsp+8], r13
-/// unwind [BP-24]=r13
+/// unwind SaveReg [BP-24], r13
 /// ...
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,8 +126,28 @@ pub enum UnwindInst {
     /// The frame-pointer register for this architecture has just been
     /// set to the current stack location, and the word at FP is the
     /// previous FP value.
-    CreateFPFrame,
-    /// The stack slot at the given offset from FP has been used to
-    /// save the given register.
-    SaveReg { fp_offset: i32, reg: RealReg },
+    ///
+    /// The base of the frame is at `FP - fp_offset`. Note that only
+    /// positive offsets from the base of the frame are allowed for
+    /// `SaveReg`, but the FP register itself can point to any part
+    /// of the frame.
+    CreateFPFrame {
+        /// The offset from the start of frame to the FP value (and
+        /// current SP value).
+        fp_offset: u8,
+    },
+    /// The stack slot at the given offset from the frame base has
+    /// been used to save the given register.
+    ///
+    /// Given that `CreateFPFrame` has occurred first with some
+    /// `fp_offset`, `SaveReg` with `frame_offset` indicates that the
+    /// value of `reg` is saved on the stack at address `FP -
+    /// fp_offset + frame_offset`.
+    SaveReg {
+        /// The offset from the start of frame to this register's
+        /// stack location.
+        frame_offset: u8,
+        /// The saved register.
+        reg: RealReg,
+    },
 }

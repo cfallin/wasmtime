@@ -1,6 +1,8 @@
 //! Windows x64 ABI unwind information.
 
+use crate::binemit::CodeOffset;
 use crate::isa::unwind::input;
+use crate::isa::unwind::UnwindInst;
 use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
@@ -65,6 +67,9 @@ pub(crate) enum UnwindCode {
         offset: u8,
         size: u32,
     },
+    SetFPReg {
+        offset: u8,
+    },
 }
 
 impl UnwindCode {
@@ -73,6 +78,7 @@ impl UnwindCode {
             PushNonvolatileRegister = 0,
             LargeStackAlloc = 1,
             SmallStackAlloc = 2,
+            SetFPReg = 3,
             SaveNonVolatileRegister = 4,
             SaveNonVolatileRegisterFar = 5,
             SaveXmm128 = 8,
@@ -135,7 +141,11 @@ impl UnwindCode {
                     writer.write_u32::<LittleEndian>(*size);
                 }
             }
-        };
+            Self::SetFPReg { offset } => {
+                writer.write_u8(*offset);
+                writer.write_u8(UnwindOperation::SetFPReg as u8);
+            }
+        }
     }
 
     fn node_count(&self) -> usize {
@@ -278,9 +288,6 @@ impl UnwindInfo {
                         size: *size,
                     });
                 }
-                InputUnwindCode::SetFramePointer { reg } => {
-                    todo!()
-                }
                 _ => {}
             }
         }
@@ -295,6 +302,60 @@ impl UnwindInfo {
             unwind_codes,
         })
     }
+}
+
+const UNWIND_RBP_REG: u8 = 5;
+
+pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
+    insts: &[(CodeOffset, UnwindInst)],
+) -> CodegenResult<UnwindInfo> {
+    let mut unwind_codes = vec![];
+    let mut frame_register_offset = 0;
+    let mut max_unwind_offset = 0;
+    for &(offset, ref inst) in insts {
+        let offset = ensure_unwind_offset(offset)?;
+        max_unwind_offset = offset;
+        match inst {
+            &UnwindInst::CreateFPFrame { fp_offset } => {
+                unwind_codes.push(UnwindCode::PushRegister {
+                    offset,
+                    reg: UNWIND_RBP_REG,
+                });
+                frame_register_offset = fp_offset;
+                unwind_codes.push(UnwindCode::SetFPReg { offset });
+                if fp_offset > 0 {
+                    unwind_codes.push(UnwindCode::StackAlloc {
+                        offset,
+                        size: fp_offset as u32,
+                    });
+                }
+            }
+            &UnwindInst::SaveReg { frame_offset, reg } => match MR::map(reg.to_reg()) {
+                MappedRegister::Int(reg) => {
+                    unwind_codes.push(UnwindCode::SaveReg {
+                        offset,
+                        reg,
+                        stack_offset: frame_offset as u32,
+                    });
+                }
+                MappedRegister::Xmm(reg) => {
+                    unwind_codes.push(UnwindCode::SaveXmm {
+                        offset,
+                        reg,
+                        stack_offset: frame_offset as u32,
+                    });
+                }
+            },
+        }
+    }
+
+    Ok(UnwindInfo {
+        flags: 0,
+        prologue_size: max_unwind_offset,
+        frame_register: Some(UNWIND_RBP_REG),
+        frame_register_offset,
+        unwind_codes,
+    })
 }
 
 fn ensure_unwind_offset(offset: u32) -> CodegenResult<u8> {
