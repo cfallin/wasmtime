@@ -29,8 +29,20 @@ pub fn create_cie() -> CommonInformationEntry {
 
 /// Map Cranelift registers to their corresponding Gimli registers.
 pub fn map_reg(reg: Reg) -> Result<Register, RegisterMappingError> {
+    // For AArch64 DWARF register mappings, see:
+    //
+    // https://developer.arm.com/documentation/ihi0057/e/?lang=en#dwarf-register-names
+    //
+    // X0--X31 is 0--31; V0--V31 is 64--95.
     match reg.get_class() {
-        RegClass::I64 => Ok(Register(reg.get_hw_encoding().into())),
+        RegClass::I64 => {
+            let reg = reg.get_hw_encoding() as u16;
+            Ok(Register(reg))
+        }
+        RegClass::V128 => {
+            let reg = reg.get_hw_encoding() as u16;
+            Ok(Register(64 + reg))
+        }
         _ => Err(RegisterMappingError::UnsupportedRegisterBank("class?")),
     }
 }
@@ -46,5 +58,8 @@ impl crate::isa::unwind::systemv::RegisterMapper<Reg> for RegisterMapper {
     }
     fn fp(&self) -> u16 {
         regs::fp_reg().get_hw_encoding().into()
+    }
+    fn lr(&self) -> Option<u16> {
+        Some(regs::link_reg().get_hw_encoding().into())
     }
 }

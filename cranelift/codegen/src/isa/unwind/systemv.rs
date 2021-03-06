@@ -106,6 +106,10 @@ pub(crate) trait RegisterMapper<Reg> {
     fn sp(&self) -> Register;
     /// Gets the frame pointer register.
     fn fp(&self) -> Register;
+    /// Gets the link register, if any.
+    fn lr(&self) -> Option<Register> {
+        None
+    }
 }
 
 /// Represents unwind information for a single System V ABI function.
@@ -132,6 +136,9 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
                 // FP is at CFA-16 (and CFA is currently defined as SP+8)
                 instructions.push((offset, CallFrameInstruction::CfaOffset(16)));
                 instructions.push((offset, CallFrameInstruction::Offset(mr.fp(), -16)));
+                if let Some(lr) = mr.lr() {
+                    instructions.push((offset, CallFrameInstruction::Offset(lr, -8)));
+                }
             }
             &UnwindInst::CreateFPFrame { fp_offset } => {
                 // Define CFA as FP+16
