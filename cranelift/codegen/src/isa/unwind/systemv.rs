@@ -150,10 +150,6 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
         }
     }
 
-    println!(
-        "Returning instrs {:?} with func len {:?}",
-        instructions, code_len
-    );
     Ok(UnwindInfo {
         instructions,
         len: code_len as u32,

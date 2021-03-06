@@ -10,6 +10,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movq    %rcx, %rax
 ; nextln:  movq    %rbp, %rsp
@@ -23,6 +24,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movq    %rdx, %rax
 ; nextln:  movq    %rbp, %rsp
@@ -36,6 +38,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movq    %r8, %rax
 ; nextln:  movq    %rbp, %rsp
@@ -49,6 +52,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movq    %r9, %rax
 ; nextln:  movq    %rbp, %rsp
@@ -62,6 +66,7 @@ block0(v0: i64, v1: i64, v2: f64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movaps  %xmm2, %xmm0
 ; nextln:  movq    %rbp, %rsp
@@ -75,6 +80,7 @@ block0(v0: i64, v1: i64, v2: f64, v3: i64):
 
 ; check:   pushq   %rbp
 ; nextln:  movq    %rsp, %rbp
+; nextln:  unwind PushOldFP
 ; nextln:  unwind CreateFPFrame { fp_offset: 0 }
 ; nextln:  movq    %r9, %rax
 ; nextln:  movq    %rbp, %rsp
@@ -98,6 +104,7 @@ block0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64):
 
 ; check:  pushq   %rbp
 ; nextln: movq    %rsp, %rbp
+; nextln: unwind PushOldFP
 ; nextln: unwind CreateFPFrame { fp_offset: 16 }
 ; nextln: subq    $$16, %rsp
 ; nextln: movq    %rsi, 0(%rsp)
@@ -122,6 +129,7 @@ block0(v0: i128, v1: i64, v2: i128, v3: i128):
 
 ; check:  pushq   %rbp
 ; nextln: movq    %rsp, %rbp
+; nextln: unwind PushOldFP
 ; nextln: unwind CreateFPFrame { fp_offset: 16 }
 ; nextln: subq    $$16, %rsp
 ; nextln: movq    %rsi, 0(%rsp)
@@ -152,7 +160,8 @@ block0(v0: i64):
 
 ; check:  pushq   %rbp
 ; nextln: movq    %rsp, %rbp
-; nextln:  unwind CreateFPFrame { fp_offset: 16 }
+; nextln: unwind PushOldFP
+; nextln: unwind CreateFPFrame { fp_offset: 16 }
 ; nextln: subq    $$16, %rsp
 ; nextln: movq    %rsi, 0(%rsp)
 ; nextln: unwind SaveReg { frame_offset: 0
@@ -227,6 +236,7 @@ block0(v0: i64):
 
 ; check:  pushq   %rbp
 ; nextln: movq    %rsp, %rbp
+; nextln: unwind PushOldFP
 ; nextln: unwind CreateFPFrame { fp_offset: 160 }
 ; nextln: subq    $$208, %rsp
 ; nextln: movdqu  %xmm6, 48(%rsp)
