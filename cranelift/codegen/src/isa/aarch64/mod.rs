@@ -127,11 +127,18 @@ impl MachBackend for AArch64Backend {
     ) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
         use crate::isa::unwind::UnwindInfo;
         use crate::machinst::UnwindInfoKind;
-        Ok(match (result.unwind_info.as_ref(), kind) {
-            (Some(info), UnwindInfoKind::SystemV) => {
-                inst::unwind::systemv::create_unwind_info(info.clone())?.map(UnwindInfo::SystemV)
+        Ok(match kind {
+            UnwindInfoKind::SystemV => {
+                let mapper = self::inst::unwind::systemv::RegisterMapper;
+                Some(UnwindInfo::SystemV(
+                    crate::isa::unwind::systemv::create_unwind_info_from_insts(
+                        &result.buffer.unwind_info[..],
+                        result.buffer.data.len(),
+                        &mapper,
+                    )?,
+                ))
             }
-            (Some(_info), UnwindInfoKind::Windows) => {
+            UnwindInfoKind::Windows => {
                 // TODO: support Windows unwind info on AArch64
                 None
             }
@@ -271,8 +278,8 @@ mod test {
         let golden = vec![
             253, 123, 191, 169, 253, 3, 0, 145, 129, 70, 130, 210, 0, 0, 1, 11, 225, 3, 0, 42, 161,
             0, 0, 181, 129, 70, 130, 210, 1, 0, 1, 11, 225, 3, 1, 42, 161, 255, 255, 181, 225, 3,
-            0, 42, 97, 255, 255, 181, 129, 70, 130, 210, 0, 0, 1, 75, 253, 123,
-            193, 168, 192, 3, 95, 214,
+            0, 42, 97, 255, 255, 181, 129, 70, 130, 210, 0, 0, 1, 75, 253, 123, 193, 168, 192, 3,
+            95, 214,
         ];
 
         assert_eq!(code, &golden[..]);

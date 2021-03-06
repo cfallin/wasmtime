@@ -122,11 +122,18 @@ impl MachBackend for X64Backend {
     ) -> CodegenResult<Option<crate::isa::unwind::UnwindInfo>> {
         use crate::isa::unwind::UnwindInfo;
         use crate::machinst::UnwindInfoKind;
-        Ok(match (result.unwind_info.as_ref(), kind) {
-            (Some(info), UnwindInfoKind::SystemV) => {
-                inst::unwind::systemv::create_unwind_info(info.clone())?.map(UnwindInfo::SystemV)
+        Ok(match kind {
+            UnwindInfoKind::SystemV => {
+                let mapper = self::inst::unwind::systemv::RegisterMapper;
+                Some(UnwindInfo::SystemV(
+                    crate::isa::unwind::systemv::create_unwind_info_from_insts(
+                        &result.buffer.unwind_info[..],
+                        result.buffer.data.len(),
+                        &mapper,
+                    )?,
+                ))
             }
-            (_, UnwindInfoKind::Windows) => Some(UnwindInfo::WindowsX64(
+            UnwindInfoKind::Windows => Some(UnwindInfo::WindowsX64(
                 crate::isa::unwind::winx64::create_unwind_info_from_insts::<
                     self::inst::unwind::winx64::RegisterMapper,
                 >(&result.buffer.unwind_info[..])?,

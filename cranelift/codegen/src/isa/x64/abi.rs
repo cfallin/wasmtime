@@ -433,7 +433,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         }
     }
 
-    fn gen_prologue_frame_setup() -> SmallInstVec<Self::I> {
+    fn gen_prologue_frame_setup(flags: &settings::Flags) -> SmallInstVec<Self::I> {
         let r_rsp = regs::rsp();
         let r_rbp = regs::rbp();
         let w_rbp = Writable::from_reg(r_rbp);
@@ -442,6 +442,11 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         insts.push(Inst::push64(RegMemImm::reg(r_rbp)));
         // RSP is now 0 % 16
         insts.push(Inst::mov_r_r(OperandSize::Size64, r_rsp, w_rbp));
+        if !flags.no_unwind_info() {
+            insts.push(Inst::Unwind {
+                inst: UnwindInst::PushOldFP,
+            });
+        }
         insts
     }
 

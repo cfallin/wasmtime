@@ -284,7 +284,7 @@ impl ABIMachineSpec for Arm32MachineDeps {
         Inst::VirtualSPOffsetAdj { offset }
     }
 
-    fn gen_prologue_frame_setup() -> SmallInstVec<Inst> {
+    fn gen_prologue_frame_setup(_: &settings::Flags) -> SmallInstVec<Inst> {
         let mut ret = SmallVec::new();
         let reg_list = vec![fp_reg(), lr_reg()];
         ret.push(Inst::Push { reg_list });

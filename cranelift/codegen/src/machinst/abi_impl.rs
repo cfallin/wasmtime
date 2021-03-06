@@ -421,7 +421,7 @@ pub trait ABIMachineSpec {
     /// Generate the usual frame-setup sequence for this architecture: e.g.,
     /// `push rbp / mov rbp, rsp` on x86-64, or `stp fp, lr, [sp, #-16]!` on
     /// AArch64.
-    fn gen_prologue_frame_setup() -> SmallInstVec<Self::I>;
+    fn gen_prologue_frame_setup(flags: &settings::Flags) -> SmallInstVec<Self::I>;
 
     /// Generate the usual frame-restore sequence for this architecture.
     fn gen_epilogue_frame_restore() -> SmallInstVec<Self::I>;
@@ -1248,7 +1248,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         let mut insts = smallvec![];
         if !self.call_conv.extends_baldrdash() {
             // set up frame
-            insts.extend(M::gen_prologue_frame_setup().into_iter());
+            insts.extend(M::gen_prologue_frame_setup(&self.flags).into_iter());
         }
 
         let bytes = M::word_bytes();

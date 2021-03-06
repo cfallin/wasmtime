@@ -335,11 +335,13 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
         let offset = ensure_unwind_offset(offset)?;
         max_unwind_offset = offset;
         match inst {
-            &UnwindInst::CreateFPFrame { fp_offset } => {
+            &UnwindInst::PushOldFP => {
                 unwind_codes.push(UnwindCode::PushRegister {
                     offset,
                     reg: UNWIND_RBP_REG,
                 });
+            }
+            &UnwindInst::CreateFPFrame { fp_offset } => {
                 frame_register_offset = fp_offset;
                 unwind_codes.push(UnwindCode::SetFPReg { offset });
                 if fp_offset > 0 {

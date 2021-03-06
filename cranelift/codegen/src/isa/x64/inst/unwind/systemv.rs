@@ -82,19 +82,16 @@ pub fn map_reg(reg: Reg) -> Result<Register, RegisterMappingError> {
     }
 }
 
-pub(crate) fn create_unwind_info(
-    unwind: input::UnwindInfo<Reg>,
-) -> CodegenResult<Option<UnwindInfo>> {
-    struct RegisterMapper;
-    impl crate::isa::unwind::systemv::RegisterMapper<Reg> for RegisterMapper {
-        fn map(&self, reg: Reg) -> Result<u16, RegisterMappingError> {
-            Ok(map_reg(reg)?.0)
-        }
-        fn sp(&self) -> u16 {
-            X86_64::RSP.0
-        }
-    }
-    let map = RegisterMapper;
+pub(crate) struct RegisterMapper;
 
-    Ok(Some(UnwindInfo::build(unwind, &map)?))
+impl crate::isa::unwind::systemv::RegisterMapper<Reg> for RegisterMapper {
+    fn map(&self, reg: Reg) -> Result<u16, RegisterMappingError> {
+        Ok(map_reg(reg)?.0)
+    }
+    fn sp(&self) -> u16 {
+        X86_64::RSP.0
+    }
+    fn fp(&self) -> u16 {
+        X86_64::RBP.0
+    }
 }

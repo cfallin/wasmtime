@@ -124,6 +124,9 @@ pub mod input {
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum UnwindInst {
     /// The frame-pointer register for this architecture has just been
+    /// pushed to the stack. The FP has not been set to this frame yet.
+    PushOldFP,
+    /// The frame-pointer register for this architecture has just been
     /// set to the current stack location, and the word at FP is the
     /// previous FP value.
     ///

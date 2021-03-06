@@ -1,6 +1,10 @@
+#![allow(dead_code)]
+
 //! System V ABI unwind information.
 
+use crate::binemit::CodeOffset;
 use crate::isa::unwind::input;
+use crate::isa::unwind::UnwindInst;
 use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use gimli::write::{Address, FrameDescriptionEntry};
@@ -100,6 +104,8 @@ pub(crate) trait RegisterMapper<Reg> {
     fn map(&self, reg: Reg) -> Result<Register, RegisterMappingError>;
     /// Gets stack pointer register.
     fn sp(&self) -> Register;
+    /// Gets the frame pointer register.
+    fn fp(&self) -> Register;
 }
 
 /// Represents unwind information for a single System V ABI function.
@@ -110,6 +116,48 @@ pub(crate) trait RegisterMapper<Reg> {
 pub struct UnwindInfo {
     instructions: Vec<(u32, CallFrameInstruction)>,
     len: u32,
+}
+
+pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
+    insts: &[(CodeOffset, UnwindInst)],
+    code_len: usize,
+    mr: &MR,
+) -> CodegenResult<UnwindInfo> {
+    let mut instructions = vec![];
+
+    let mut frame_base = 0; // relative to CFA
+    for &(offset, ref inst) in insts {
+        match inst {
+            &UnwindInst::PushOldFP => {
+                // FP is at CFA-16 (and CFA is currently defined as SP+8)
+                instructions.push((offset, CallFrameInstruction::CfaOffset(16)));
+                instructions.push((offset, CallFrameInstruction::Offset(mr.fp(), -16)));
+            }
+            &UnwindInst::CreateFPFrame { fp_offset } => {
+                // Define CFA as FP+16
+                instructions.push((offset, CallFrameInstruction::CfaRegister(mr.fp())));
+                // Record frame base so subsequent SaveReg insts can be translated to CFA-relative
+                // offsets
+                frame_base = -16 - (fp_offset as i32);
+            }
+            &UnwindInst::SaveReg { frame_offset, reg } => {
+                let reg = mr
+                    .map(reg.to_reg())
+                    .map_err(|e| CodegenError::RegisterMappingError(e))?;
+                let off = frame_base + (frame_offset as i32);
+                instructions.push((offset, CallFrameInstruction::Offset(reg, off)));
+            }
+        }
+    }
+
+    println!(
+        "Returning instrs {:?} with func len {:?}",
+        instructions, code_len
+    );
+    Ok(UnwindInfo {
+        instructions,
+        len: code_len as u32,
+    })
 }
 
 impl UnwindInfo {
