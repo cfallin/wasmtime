@@ -1,7 +1,7 @@
 //! Data structure for tracking the (possibly multiple) registers that hold one
 //! SSA `Value`.
 
-use regalloc::{RealReg, Reg, VirtualReg, Writable};
+use super::{PReg, Reg, VReg, Writable};
 use std::fmt::Debug;
 
 #[cfg(feature = "arm32")]
@@ -42,19 +42,29 @@ impl InvalidSentinel for Reg {
         Reg::invalid()
     }
 }
-impl InvalidSentinel for VirtualReg {
+impl InvalidSentinel for VReg {
     fn invalid_sentinel() -> Self {
-        VirtualReg::invalid()
+        VReg::invalid()
     }
 }
-impl InvalidSentinel for RealReg {
+impl InvalidSentinel for PReg {
     fn invalid_sentinel() -> Self {
-        RealReg::invalid()
+        PReg::invalid()
     }
 }
 impl InvalidSentinel for Writable<Reg> {
     fn invalid_sentinel() -> Self {
         Writable::from_reg(Reg::invalid_sentinel())
+    }
+}
+impl InvalidSentinel for Writable<VReg> {
+    fn invalid_sentinel() -> Self {
+        Writable::from_reg(VReg::invalid_sentinel())
+    }
+}
+impl InvalidSentinel for Writable<PReg> {
+    fn invalid_sentinel() -> Self {
+        Writable::from_reg(VReg::invalid_sentinel())
     }
 }
 

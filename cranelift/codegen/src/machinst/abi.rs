@@ -1,16 +1,11 @@
 //! ABI definitions.
 
+use super::{Reg, SpillSlot, Writable};
 use crate::binemit::StackMap;
 use crate::ir::{Signature, StackSlot};
 use crate::isa::CallConv;
 use crate::machinst::*;
 use crate::settings;
-use regalloc::{Reg, Set, SpillSlot, Writable};
-use smallvec::SmallVec;
-
-/// A small vector of instructions (with some reasonable size); appropriate for
-/// a small fixed sequence implementing one operation.
-pub type SmallInstVec<I> = SmallVec<[I; 4]>;
 
 /// Trait implemented by an object that tracks ABI-related state (e.g., stack
 /// layout) and can generate code while emitting the *body* of a function.
@@ -18,14 +13,11 @@ pub trait ABICallee {
     /// The instruction type for the ISA associated with this ABI.
     type I: VCodeInst;
 
-    /// Does the ABI-body code need a temp reg (and if so, of what type)? One
-    /// will be provided to `init()` as the `maybe_tmp` arg if so.
-    fn temp_needed(&self) -> Option<Type>;
+    /// Creeate a new callee-side ABI object.
+    fn create() -> Self;
 
-    /// Initialize. This is called after the ABICallee is constructed because it
-    /// may be provided with a temp vreg, which can only be allocated once the
-    /// lowering context exists.
-    fn init(&mut self, maybe_tmp: Option<Writable<Reg>>);
+    /// Initialize, allocating any temps that will be necessary.
+    fn init<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) -> Self;
 
     /// Access the (possibly legalized) signature.
     fn signature(&self) -> &Signature;
@@ -35,12 +27,6 @@ pub trait ABICallee {
 
     /// Get the calling convention implemented by this ABI object.
     fn call_conv(&self) -> CallConv;
-
-    /// Get the liveins of the function.
-    fn liveins(&self) -> Set<RealReg>;
-
-    /// Get the liveouts of the function.
-    fn liveouts(&self) -> Set<RealReg>;
 
     /// Number of arguments.
     fn num_args(&self) -> usize;
@@ -54,40 +40,26 @@ pub trait ABICallee {
     /// The offsets of all stack slots (not spill slots) for debuginfo purposes.
     fn stackslot_offsets(&self) -> &PrimaryMap<StackSlot, u32>;
 
-    /// Generate an instruction which copies an argument to a destination
-    /// register.
-    fn gen_copy_arg_to_regs(
+    /// Generate an args pseudo-instruction. This instruction is meant
+    /// to come first in the function body and capture the values of
+    /// function arguments, which it returns in VRegs. Once regalloc
+    /// is complete, it will be passed to `emit_prologue` below to
+    /// generate a true prologue.
+    fn emit_args<C: LowerCtx<I = Self;;I>>(&self, ctx: &mut C) -> Vec<ValueRegs<Reg>>;
+
+    /// Generate a return pseudo-instruction. The given values will be
+    /// used as return values. Once regalloc is complete, this
+    /// pseudo-instruction will be passed to `emit_epilogue` below to
+    /// generate a true epilogue.
+    fn emit_ret<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C, retvals: &[ValueRegs<Reg>]);
+
+    /// Get the address of a stackslot.
+    fn emit_stackslot_addr<C: LowerCtx<I = Self::I>>(
         &self,
-        idx: usize,
-        into_reg: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I>;
-
-    /// Is the given argument needed in the body (as opposed to, e.g., serving
-    /// only as a special ABI-specific placeholder)? This controls whether
-    /// lowering will copy it to a virtual reg use by CLIF instructions.
-    fn arg_is_needed_in_body(&self, idx: usize) -> bool;
-
-    /// Generate any setup instruction needed to save values to the
-    /// return-value area. This is usually used when were are multiple return
-    /// values or an otherwise large return value that must be passed on the
-    /// stack; typically the ABI specifies an extra hidden argument that is a
-    /// pointer to that memory.
-    fn gen_retval_area_setup(&self) -> Option<Self::I>;
-
-    /// Generate an instruction which copies a source register to a return value slot.
-    fn gen_copy_regs_to_retval(
-        &self,
-        idx: usize,
-        from_reg: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I>;
-
-    /// Generate a return instruction.
-    fn gen_ret(&self) -> Self::I;
-
-    /// Generate an epilogue placeholder. The returned instruction should return `true` from
-    /// `is_epilogue_placeholder()`; this is used to indicate to the lowering driver when
-    /// the epilogue should be inserted.
-    fn gen_epilogue_placeholder(&self) -> Self::I;
+        ctx: &mut C,
+        slot: StackSlot,
+        offset: u32,
+    ) -> Reg;
 
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.
@@ -100,44 +72,7 @@ pub trait ABICallee {
     fn set_num_spillslots(&mut self, slots: usize);
 
     /// Update with the clobbered registers, post-regalloc.
-    fn set_clobbered(&mut self, clobbered: Set<Writable<RealReg>>);
-
-    /// Get the address of a stackslot.
-    fn stackslot_addr(&self, slot: StackSlot, offset: u32, into_reg: Writable<Reg>) -> Self::I;
-
-    /// Load from a stackslot.
-    fn load_stackslot(
-        &self,
-        slot: StackSlot,
-        offset: u32,
-        ty: Type,
-        into_reg: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I>;
-
-    /// Store to a stackslot.
-    fn store_stackslot(
-        &self,
-        slot: StackSlot,
-        offset: u32,
-        ty: Type,
-        from_reg: ValueRegs<Reg>,
-    ) -> SmallInstVec<Self::I>;
-
-    /// Load from a spillslot.
-    fn load_spillslot(
-        &self,
-        slot: SpillSlot,
-        ty: Type,
-        into_reg: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I>;
-
-    /// Store to a spillslot.
-    fn store_spillslot(
-        &self,
-        slot: SpillSlot,
-        ty: Type,
-        from_reg: ValueRegs<Reg>,
-    ) -> SmallInstVec<Self::I>;
+    fn set_clobbered(&mut self, clobbered: Vec<Writable<PReg>>);
 
     /// Generate a stack map, given a list of spillslots and the emission state
     /// at a given program point (prior to emission fo the safepointing
@@ -148,18 +83,18 @@ pub trait ABICallee {
         state: &<Self::I as MachInstEmit>::State,
     ) -> StackMap;
 
-    /// Generate a prologue, post-regalloc. This should include any stack
-    /// frame or other setup necessary to use the other methods (`load_arg`,
-    /// `store_retval`, and spillslot accesses.)  `self` is mutable so that we
-    /// can store information in it which will be useful when creating the
+    /// Generate a prologue, post-regalloc, given the args
+    /// pseudo-instruction as input. This should include any stack
+    /// frame or other setup necessary to load the arguments, and
+    /// should save the clobbers that were provided to
+    /// `set_clobbered()`.  `self` is mutable so that we can store
+    /// information in it which will be useful when creating the
     /// epilogue.
-    fn gen_prologue(&mut self) -> SmallInstVec<Self::I>;
+    fn gen_prologue(&mut self, arginst: Self::I) -> Vec<Self::I>;
 
-    /// Generate an epilogue, post-regalloc. Note that this must generate the
-    /// actual return instruction (rather than emitting this in the lowering
-    /// logic), because the epilogue code comes before the return and the two are
-    /// likely closely related.
-    fn gen_epilogue(&self) -> SmallInstVec<Self::I>;
+    /// Generate an epilogue, post-regalloc. This is provided the
+    /// return pseudo-instruction as input.
+    fn gen_epilogue(&self, retinst: Self::I) -> Vec<Self::I>;
 
     /// Returns the full frame size for the given function, after prologue
     /// emission has run. This comprises the spill slots and stack-storage slots
@@ -179,16 +114,25 @@ pub trait ABICallee {
     /// generate a store instruction optimized for the particular type rather
     /// than the RegClass (e.g., only F64 that resides in a V128 register). If
     /// no type is given, the implementation should spill the whole register.
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Option<Type>) -> Self::I;
+    ///
+    /// This returns the instruction (rather than emitting to the
+    /// context) because it is used post-regalloc to implement edits,
+    /// rather than during lowering itself.
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg, ty: Option<Type>) -> Self::I;
 
     /// Generate a reload (fill). As for spills, the type may be given to allow
     /// a more optimized load instruction to be generated.
-    fn gen_reload(
-        &self,
-        to_reg: Writable<RealReg>,
-        from_slot: SpillSlot,
-        ty: Option<Type>,
-    ) -> Self::I;
+    ///
+    /// This returns the instruction (rather than emitting to the
+    /// context) because it is used post-regalloc to implement edits,
+    /// rather than during lowering itself.
+    fn gen_reload(&self, to_reg: Writable<Reg>, from_slot: SpillSlot, ty: Option<Type>) -> Self::I;
+
+    /// Generate a stack-to-stack move. Some architectures may be able
+    /// to do this without requiring a scratch register; on others, a
+    /// scratch register should be reserved as needed (and not
+    /// provided to the allocator).
+    fn gen_stack_move(&self, to_slot: SpillSlot, from_slot: SpillSlot, ty: Type) -> Self::I;
 }
 
 /// Trait implemented by an object that tracks ABI-related state and can
@@ -215,45 +159,16 @@ pub trait ABICaller {
     /// Access the (possibly legalized) signature.
     fn signature(&self) -> &Signature;
 
-    /// Emit a copy of an argument value from a source register, prior to the call.
-    fn emit_copy_regs_to_arg<C: LowerCtx<I = Self::I>>(
-        &self,
-        ctx: &mut C,
-        idx: usize,
-        from_reg: ValueRegs<Reg>,
-    );
+    /// Specify argument input vregs for one argument.
+    fn add_argument(&mut self, regs: ValueRegs<VReg>);
 
-    /// Specific order for copying into arguments at callsites. We must be
-    /// careful to copy into StructArgs first, because we need to be able
-    /// to invoke memcpy() before we've loaded other arg regs (see above).
-    fn get_copy_to_arg_order(&self) -> SmallVec<[usize; 8]>;
-
-    /// Emit a copy a return value into a destination register, after the call returns.
-    fn emit_copy_retval_to_regs<C: LowerCtx<I = Self::I>>(
-        &self,
-        ctx: &mut C,
-        idx: usize,
-        into_reg: ValueRegs<Writable<Reg>>,
-    );
-
-    /// Emit code to pre-adjust the stack, prior to argument copies and call.
-    fn emit_stack_pre_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C);
-
-    /// Emit code to post-adjust the satck, after call return and return-value copies.
-    fn emit_stack_post_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C);
+    /// Specify return-value output vregs for one return val.
+    fn add_retval(&mut self, regs: ValueRegs<Writable<VReg>>);
 
     /// Emit the call itself.
-    ///
-    /// The returned instruction should have proper use- and def-sets according
-    /// to the argument registers, return-value registers, and clobbered
-    /// registers for this function signature in this ABI.
-    ///
-    /// (Arg registers are uses, and retval registers are defs. Clobbered
-    /// registers are also logically defs, but should never be read; their
-    /// values are "defined" (to the regalloc) but "undefined" in every other
-    /// sense.)
-    ///
-    /// This function should only be called once, as it is allowed to re-use
-    /// parts of the ABICaller object in emitting instructions.
     fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C);
+
+    /// Return a static list of clobbers for a call with this calling
+    /// convention and possibly return-value configuration.
+    fn clobbers(&self) -> &'static [PReg];
 }

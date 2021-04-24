@@ -1,0 +1,162 @@
+//! Regalloc interface: layer of types that wrap regalloc concepts for use in MachInst backends.
+
+use regalloc2::{Allocation, Operand, OperandKind, OperandOrAllocation, OperandPolicy, OperandPos};
+use std::fmt::Debug;
+
+pub use regalloc2::{MachineEnv, PReg, RegClass, SpillSlot, VReg};
+
+/// A `Reg` encompasses everything that an instruction needs to record
+/// for a register mention. Internally, it contains either an
+/// `Operand` (before regalloc) or an `Allocation` (after regalloc).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Reg {
+    inner: OperandOrAllocation,
+}
+
+/// A `Writable` wrapper denotes, at the type level, that we are
+/// allowed to write to the given operand/reg.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Writable<T: Copy + Clone + Debug + PartialEq + Eq>(T);
+
+impl<T: Copy + Clone + Debug + PartialEq + Eq> Writable<T> {
+    /// Create a new `Writable`. Note that this is not specially
+    /// hidden or encapsulated: the user sometimes needs to assert
+    /// that they really can write to a register when generating
+    /// special code sequences. However, its use should be rare and
+    /// should be audited.
+    pub fn from_reg(r: T) -> Self {
+        Writable(r)
+    }
+
+    /// Get the inner reg.
+    pub fn to_reg(self) -> T {
+        self.0
+    }
+
+    /// Map the inner reg to another value.
+    pub fn map<F: Fn(T) -> U, U: Copy + Clone + Debug + PartialEq + Eq>(self, f: F) -> Writable<U> {
+        Writable(f(self.0))
+    }
+}
+
+impl Reg {
+    /// Create a `Reg` that wraps an `Operand`: this is the
+    /// pre-regalloc form of an instruction's register slot.
+    pub fn operand(op: Operand) -> Self {
+        Self {
+            inner: OperandOrAllocation::from_operand(op),
+        }
+    }
+
+    /// Create a `Reg` that represents an invalid value.
+    pub fn invalid() -> Self {
+        Reg::alloc(Allocation::none())
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a use (at the
+    /// before-point of its instruction).
+    pub fn reg_use(vreg: VReg) -> Self {
+        Reg::operand(Operand::reg_use(vreg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a use (at the
+    /// after-point of its instruction).
+    pub fn reg_use_at_end(vreg: VReg) -> Self {
+        Reg::operand(Operand::reg_use_at_end(vreg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a def (at the
+    /// before-point of its instruction).
+    pub fn reg_def_at_start(vreg: VReg) -> Self {
+        Reg::operand(Operand::reg_def_at_start(vreg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a def (at the
+    /// after-point of its instruction).
+    pub fn reg_def(vreg: VReg) -> Self {
+        Reg::operand(Operand::reg_def(vreg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a temp def (valid for
+    /// the whole instruction).
+    pub fn reg_temp(vreg: VReg) -> Self {
+        Reg::operand(Operand::reg_temp(vreg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a use with a fixed-reg
+    /// constraint.
+    pub fn reg_fixed_use(vreg: VReg, preg: PReg) -> Self {
+        Reg::operand(Operand::reg_fixed_use(vreg, preg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` as a def with a fixed-reg
+    /// constraint.
+    pub fn reg_fixed_def(vreg: VReg, preg: PReg) -> Self {
+        Reg::operand(Operand::reg_fixed_def(vreg, preg))
+    }
+
+    /// Create a `Reg` that wraps a `VReg` with the constraint that it
+    /// reuse the register of another Reg.
+    pub fn reg_reuse_def(vreg: VReg, reused_idx: usize) -> Self {
+        Reg::operand(Operand::new(
+            vreg,
+            OperandPolicy::Reuse(reused_idx),
+            OperandKind::Def,
+            OperandPos::After,
+        ))
+    }
+
+    /// Create a `Reg` that wraps an `Allocation`: this is the
+    /// post-regalloc form of an instruction's register slot.
+    pub fn alloc(alloc: Allocation, kind: OperandKind) -> Self {
+        Self {
+            inner: OperandOrAllocation::from_alloc_and_kind(alloc, kind),
+        }
+    }
+
+    /// Create a `Reg` that wraps an allocated `PReg`.
+    pub fn preg(preg: PReg) -> Self {
+        Reg::alloc(Allocation::reg(preg))
+    }
+
+    /// Create a `Reg` that wraps an allocated `SpillSlot`.
+    pub fn spillslot(slot: SpillSlot) -> Self {
+        Reg::alloc(Allocation::stack(slot))
+    }
+
+    /// Is this an Operand (an unallocated register-mention specification)?
+    pub fn is_operand(self) -> bool {
+        self.inner.as_operand().is_some()
+    }
+
+    /// Is this an Allocation (a post-regalloc location)?
+    pub fn is_alloc(self) -> bool {
+        self.inner.as_alloc().is_some()
+    }
+
+    /// Convert to and return the inner `Operand`, if in that mode.
+    pub fn as_operand(self) -> Option<Operand> {
+        self.inner.as_operand()
+    }
+
+    /// Convert to and return the inner `Allocation`, if in that mode.
+    pub fn as_alloc(self) -> Option<Allocation> {
+        self.inner.as_alloc()
+    }
+
+    pub fn is_def(self) -> bool {
+        self.inner.kind() == OperandKind::Def
+    }
+
+    /// Convert to and return the inner `PReg` inside an `Allocation`,
+    /// if in that mode.
+    pub fn as_preg(self) -> Option<PReg> {
+        self.as_alloc().filter_map(|a| a.as_reg())
+    }
+
+    /// Convert to and return the inner `SpillSlot` inside an
+    /// `Allocation`, if in that mode.
+    pub fn as_spillslot(self) -> Option<SpillSlot> {
+        self.as_alloc().filter_map(|a| a.as_spillslot())
+    }
+}

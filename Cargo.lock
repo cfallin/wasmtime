@@ -555,7 +555,7 @@ dependencies = [
  "peepmatic",
  "peepmatic-runtime",
  "peepmatic-traits",
- "regalloc",
+ "regalloc2",
  "serde",
  "smallvec",
  "souper-ir",
@@ -2275,14 +2275,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "regalloc"
-version = "0.0.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "571f7f397d61c4755285cd37853fe8e03271c243424a907415909379659381c5"
+name = "regalloc2"
+version = "0.0.1"
 dependencies = [
  "log",
- "rustc-hash",
- "serde",
  "smallvec",
 ]
 

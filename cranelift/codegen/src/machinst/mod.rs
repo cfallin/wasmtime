@@ -71,10 +71,6 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::hash::Hasher;
 use cranelift_entity::PrimaryMap;
-use regalloc::RegUsageCollector;
-use regalloc::{
-    RealReg, RealRegUniverse, Reg, RegClass, RegUsageMapper, SpillSlot, VirtualReg, Writable,
-};
 use smallvec::{smallvec, SmallVec};
 use std::string::String;
 use target_lexicon::Triple;
@@ -105,26 +101,45 @@ pub use inst_common::*;
 pub mod valueregs;
 pub use valueregs::*;
 pub mod debug;
+pub mod regs;
+pub use regs::*;
 
 /// A machine instruction.
 pub trait MachInst: Clone + Debug {
-    /// Return the registers referenced by this machine instruction along with
-    /// the modes of reference (use, def, modify).
-    fn get_regs(&self, collector: &mut RegUsageCollector);
+    /// Return the registers referenced by this machine instruction. 
+    ///
+    /// TODO vcode refactor: store regs out-of-band, centrally in
+    /// VCode; store only per-inst indices (u8) inside `Insts`; pass
+    /// the env when emitting.
+    fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: F);
 
-    /// Map virtual registers to physical registers using the given virt->phys
-    /// maps corresponding to the program points prior to, and after, this instruction.
-    fn map_regs<RUM: RegUsageMapper>(&mut self, maps: &RUM);
+    /// Return the registers clobbered by this machine instruction.
+    fn clobbers(&self) -> &[PReg];
 
-    /// If this is a simple move, return the (source, destination) tuple of registers.
+    /// Is this a move? If so, return a (dest, src) tuple. This must
+    /// *only* return `Some(..)` if it is legal (does not change
+    /// semantics) to delete this instruction when `src == dest`; take
+    /// care, for example, that moves with other side effects, such as
+    /// widening, are not included.
     fn is_move(&self) -> Option<(Writable<Reg>, Reg)>;
 
     /// Is this a terminator (branch or ret)? If so, return its type
     /// (ret/uncond/cond) and target if applicable.
     fn is_term<'a>(&'a self) -> MachTerminator<'a>;
 
-    /// Returns true if the instruction is an epilogue placeholder.
-    fn is_epilogue_placeholder(&self) -> bool;
+    /// Returns true if the instruction is an args pseudoinst (as
+    /// returned by `ABICallee::emit_args()`).
+    fn is_args(&self) -> bool;
+
+    /// Returns true if the instruction is a return pseudoinst (as
+    /// returned by `ABICallee::emit_ret()`).
+    fn is_ret(&self) -> bool;
+
+    /// Returns true if the instruction is a call.
+    fn is_call(&self) -> bool;
+
+    /// Returns true if the instruction is a safepoint.
+    fn is_safepoint(&self) -> bool;
 
     /// Should this instruction be included in the clobber-set?
     fn is_included_in_clobbers(&self) -> bool {
@@ -147,11 +162,6 @@ pub trait MachInst: Clone + Debug {
         alloc_tmp: F,
     ) -> SmallVec<[Self; 4]>;
 
-    /// Possibly operate on a value directly in a spill-slot rather than a
-    /// register. Useful if the machine has register-memory instruction forms
-    /// (e.g., add directly from or directly to memory), like x86.
-    fn maybe_direct_reload(&self, reg: VirtualReg, slot: SpillSlot) -> Option<Self>;
-
     /// Determine register class(es) to store the given Cranelift type, and the
     /// Cranelift type actually stored in the underlying register(s).  May return
     /// an error if the type isn't supported by this backend.
@@ -166,9 +176,12 @@ pub trait MachInst: Clone + Debug {
     /// generating spills and reloads for individual registers.
     fn rc_for_type(ty: Type) -> CodegenResult<(&'static [RegClass], &'static [Type])>;
 
+    /// Determine the canonical type for an entire register of the given RegClass.
+    fn type_for_rc(rc: RegClass) -> Type;
+
     /// Generate a jump to another target. Used during lowering of
     /// control flow.
-    fn gen_jump(target: MachLabel) -> Self;
+    fn gen_jump(target: MachLabel, args: &[Reg]) -> Self;
 
     /// Generate a NOP. The `preferred_size` parameter allows the caller to
     /// request a NOP of that size, or as close to it as possible. The machine
@@ -177,8 +190,8 @@ pub trait MachInst: Clone + Debug {
     /// the instruction must have a nonzero size if preferred_size is nonzero.
     fn gen_nop(preferred_size: usize) -> Self;
 
-    /// Get the register universe for this backend.
-    fn reg_universe(flags: &Flags) -> RealRegUniverse;
+    /// Get the register-allocator machine environment for this backend.
+    fn reg_env(flags: &Flags) -> MachineEnv;
 
     /// Align a basic block offset (from start of function).  By default, no
     /// alignment occurs.
@@ -304,7 +317,7 @@ pub trait MachInstEmit: MachInst {
     /// Emit the instruction.
     fn emit(&self, code: &mut MachBuffer<Self>, info: &Self::Info, state: &mut Self::State);
     /// Pretty-print the instruction.
-    fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, state: &mut Self::State) -> String;
+    fn pretty_print(&self, state: &mut Self::State) -> String;
 }
 
 /// Constant information used to emit an instruction.
@@ -380,8 +393,8 @@ pub trait MachBackend {
     /// Return name for this backend.
     fn name(&self) -> &'static str;
 
-    /// Return the register universe for this backend.
-    fn reg_universe(&self) -> &RealRegUniverse;
+    /// Return the register-allocator environment for this backend.
+    fn reg_env(&self) -> &MachineEnv;
 
     /// Machine-specific condcode info needed by TargetIsa.
     /// Condition that will be true when an IaddIfcout overflows.

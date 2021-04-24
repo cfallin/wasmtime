@@ -19,11 +19,12 @@
 //!
 //! We do a standard forward dataflow analysis to compute this info.
 
+use super::Reg;
 use crate::ir::ValueLabel;
 use crate::machinst::*;
 use crate::value_label::{LabelValueLoc, ValueLabelsRanges, ValueLocRange};
 use log::trace;
-use regalloc::{Reg, RegUsageCollector};
+use regalloc2::OperandKind;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
@@ -78,12 +79,13 @@ struct AnalysisInfo {
 
 /// Get the registers written (mod'd or def'd) by a machine instruction.
 fn get_inst_writes<M: MachInst>(m: &M) -> Vec<Reg> {
-    // TODO: expose this part of regalloc.rs's interface publicly.
-    let mut vecs = RegUsageCollector::get_empty_reg_vecs_test_framework_only(false);
-    let mut coll = RegUsageCollector::new(&mut vecs);
-    m.get_regs(&mut coll);
-    vecs.defs.extend(vecs.mods.into_iter());
-    vecs.defs
+    let mut ret = vec![];
+    m.visit_regs(|r| {
+        if r.is_def() {
+            ret.push(*r);
+        }
+    });
+    ret
 }
 
 impl AnalysisInfo {

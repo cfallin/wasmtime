@@ -22,7 +22,7 @@ use super::lower_inst;
 
 use crate::data_value::DataValue;
 use log::{debug, trace};
-use regalloc::{Reg, Writable};
+use super::{Reg, Writable};
 use smallvec::SmallVec;
 
 //============================================================================
