@@ -45,21 +45,23 @@ pub trait ABICallee {
     /// function arguments, which it returns in VRegs. Once regalloc
     /// is complete, it will be passed to `emit_prologue` below to
     /// generate a true prologue.
-    fn emit_args<C: LowerCtx<I = Self;;I>>(&self, ctx: &mut C) -> Vec<ValueRegs<Reg>>;
+    ///
+    /// This takes a `&mut self` so that it can record various
+    /// parameters that need to be used later, e.g. StructReturn
+    /// pointers.
+    fn gen_args(&mut self, args: &[ValueRegs<Writable<Reg>>]) -> Self::I;
 
     /// Generate a return pseudo-instruction. The given values will be
     /// used as return values. Once regalloc is complete, this
     /// pseudo-instruction will be passed to `emit_epilogue` below to
     /// generate a true epilogue.
-    fn emit_ret<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C, retvals: &[ValueRegs<Reg>]);
+    ///
+    /// This also handles ABI-inserted return values, such as
+    /// StructReturn pointers that must come from the args.
+    fn gen_ret(&self, retvals: &[ValueRegs<Reg>], is_fallthrough: bool) -> Self::I;
 
     /// Get the address of a stackslot.
-    fn emit_stackslot_addr<C: LowerCtx<I = Self::I>>(
-        &self,
-        ctx: &mut C,
-        slot: StackSlot,
-        offset: u32,
-    ) -> Reg;
+    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Writable<Reg>) -> Self::I;
 
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.

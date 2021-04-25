@@ -127,6 +127,12 @@ pub trait MachInst: Clone + Debug {
     /// (ret/uncond/cond) and target if applicable.
     fn is_term<'a>(&'a self) -> MachTerminator<'a>;
 
+    /// If this is a terminator branch, returns the starting operand
+    /// index for block parameters passed to successor blocks. These
+    /// parameters must appear contiguously, and in the order in which
+    /// the successor blocks are given.
+    fn blockparam_offset(&self) -> usize;
+
     /// Returns true if the instruction is an args pseudoinst (as
     /// returned by `ABICallee::emit_args()`).
     fn is_args(&self) -> bool;
@@ -181,7 +187,7 @@ pub trait MachInst: Clone + Debug {
 
     /// Generate a jump to another target. Used during lowering of
     /// control flow.
-    fn gen_jump(target: MachLabel, args: &[Reg]) -> Self;
+    fn gen_jump(target: MachLabel, args: Vec<Reg>) -> Self;
 
     /// Generate a NOP. The `preferred_size` parameter allows the caller to
     /// request a NOP of that size, or as close to it as possible. The machine

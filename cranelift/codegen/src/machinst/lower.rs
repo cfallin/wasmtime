@@ -327,7 +327,7 @@ fn alloc_vregs<I: VCodeInst>(
     Ok(regs)
 }
 
-enum GenerateReturn {
+enum ReturnFallthrough {
     Yes,
     No,
 }
@@ -438,47 +438,26 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         })
     }
 
-    fn gen_arg_setup(&mut self) {
+    fn gen_prologue(&mut self) {
         if let Some(entry_bb) = self.f.layout.entry_block() {
             debug!(
                 "gen_arg_setup: entry BB {} args are:\n{:?}",
                 entry_bb,
                 self.f.dfg.block_params(entry_bb)
             );
-            for (i, param) in self.f.dfg.block_params(entry_bb).iter().enumerate() {
-                if !self.vcode.abi().arg_is_needed_in_body(i) {
-                    continue;
-                }
-                let regs = writable_value_regs(self.value_regs[*param]);
-                for insn in self.vcode.abi().gen_copy_arg_to_regs(i, regs).into_iter() {
-                    self.emit(insn);
-                }
-                if self.abi().signature().params[i].purpose == ArgumentPurpose::StructReturn {
-                    assert!(regs.len() == 1);
-                    let ty = self.abi().signature().params[i].value_type;
-                    // The ABI implementation must have ensured that a StructReturn
-                    // arg is present in the return values.
-                    let struct_ret_idx = self
-                        .abi()
-                        .signature()
-                        .returns
-                        .iter()
-                        .position(|ret| ret.purpose == ArgumentPurpose::StructReturn)
-                        .expect("StructReturn return value not present!");
-                    self.emit(I::gen_move(
-                        Writable::from_reg(self.retval_regs[struct_ret_idx].regs()[0]),
-                        regs.regs()[0].to_reg(),
-                        ty,
-                    ));
-                }
-            }
-            if let Some(insn) = self.vcode.abi().gen_retval_area_setup() {
-                self.emit(insn);
-            }
+            let arg_regs = self
+                .f
+                .dfg
+                .block_params(entry_bb)
+                .iter()
+                .map(|param| writable_value_regs(self.value_regs[*param]))
+                .collect::<Vec<_>>();
+            let arg_inst = self.vcode.abi().gen_args(&arg_regs[..]);
+            self.emit(arg_inst);
         }
     }
 
-    fn gen_retval_setup(&mut self, gen_ret_inst: GenerateReturn) {
+    fn gen_epilogue(&mut self, inst: Inst, is_fallthrough: bool) {
         // Hack: to keep `vmctx` alive, if it exists, we emit a value label here
         // for it if debug info is requested. This ensures that it exists either
         // in a register or spillslot throughout the entire function body, and
@@ -487,23 +466,17 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
             self.emit_value_label_marks_for_value(vmctx_val);
         }
 
-        let retval_regs = self.retval_regs.clone();
-        for (i, regs) in retval_regs.into_iter().enumerate() {
-            let regs = writable_value_regs(regs);
-            for insn in self
-                .vcode
-                .abi()
-                .gen_copy_regs_to_retval(i, regs)
-                .into_iter()
-            {
-                self.emit(insn);
-            }
+        // Collect return values.
+        let mut retvals: SmallVec<[ValueRegs<Reg>; 4]> = smallvec![];
+        for val in self.f.dfg.inst_args(inst) {
+            let regs = self.put_value_in_regs(val);
+            retvals.push(regs);
         }
-        let inst = match gen_ret_inst {
-            GenerateReturn::Yes => self.vcode.abi().gen_ret(),
-            GenerateReturn::No => self.vcode.abi().gen_epilogue_placeholder(),
-        };
-        self.emit(inst);
+
+        // Call ABI impl to emit a return pseudoinst. This is
+        // converted during post-regalloc updates to a true epilogue.
+        let ret = self.vcode.abi().gen_ret(retvals, is_fallthrough);
+        self.emit(ret);
     }
 
     /// Has this instruction been sunk to a use-site (i.e., away from its
@@ -591,13 +564,13 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
             }
             if data.opcode().is_return() {
                 // Return: handle specially, using ABI-appropriate sequence.
-                let gen_ret = if data.opcode() == Opcode::Return {
-                    GenerateReturn::Yes
+                let is_fallthrough = if data.opcode() == Opcode::Return {
+                    false
                 } else {
                     debug_assert!(data.opcode() == Opcode::FallthroughReturn);
-                    GenerateReturn::No
+                    true
                 };
-                self.gen_retval_setup(gen_ret);
+                self.gen_epilogue(inst, is_fallthrough);
             }
 
             let loc = self.srcloc(inst);
@@ -758,10 +731,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
     }
 
     /// Lower the function.
-    pub fn lower<B: LowerBackend<MInst = I>>(
-        mut self,
-        backend: &B,
-    ) -> CodegenResult<VCode<I>> {
+    pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> CodegenResult<VCode<I>> {
         debug!("about to lower function: {:?}", self.f);
 
         // Initialize the ABI object.
@@ -805,7 +775,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 } else {
                     panic!("Empty lowered block: {}", bindex);
                 };
-                for blockparam in self.f.dfg.block_params(bb) {
+                for blockparam in self.f.dfg.block_params(param_block) {
                     for vreg in self.value_regs[blockparam].regs() {
                         params.push(vreg);
                     }
@@ -835,7 +805,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 // Get the params too.
                 let orig_branch = if let Some((_, br, _)) = lb.in_edge() {
                     br
-                } else if Some((_, br, _)) = lb.out_edge() {
+                } else if let Some((_, br, _)) = lb.out_edge() {
                     br
                 } else {
                     panic!("Empty lowered block: {}", bindex);
@@ -860,7 +830,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
 
             if bindex == 0 {
                 // Set up the function with arg vreg inits.
-                self.gen_arg_setup();
+                self.gen_prologue();
                 self.finish_ir_inst(SourceLoc::default());
             }
 

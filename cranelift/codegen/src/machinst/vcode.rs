@@ -119,7 +119,7 @@ pub struct VCode<I: VCodeInst, A: ABICallee<I = I>> {
     /// Block parameters, stored contiguously.
     block_params: Vec<VReg>,
 
-    /// Index ranges in block-param list.
+    /// Index ranges in block-param list, indexed by BB.
     block_param_range: Vec<(usize, usize)>,
 
     /// Block-order information.
@@ -302,7 +302,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
         let start = self.vcode.block_params.len();
         self.vcode.block_params.extend(params.iter().cloned());
         let end = self.vcode.block_params.len();
-        self.vcode.block_param_ranges.push((start, end));
+        self.vcode.block_param_range.push((start, end));
     }
 
     /// Access the constants.
@@ -375,6 +375,13 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
             block_ranges: vec![],
             block_succ_range: vec![],
             block_succs: vec![],
+            block_pred_range: vec![],
+            block_preds: vec![],
+            block_params: vec![],
+            block_param_range: vec![],
+            branch_args: vec![],
+            branch_arg_range: vec![],
+            branch_arg_offset: vec![],
             block_order,
             emit_info,
             safepoint_insns: vec![],
@@ -533,7 +540,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                     alloc_idx += 1;
                 });
 
-                // If this is an Args pseudoinsn, generate the true prologue now.
+                // If this is an {Args, Rets} pseudoinsn, generate the true {prologue, epilogue} now.
                 if insn.is_args() {
                     for insn in self.abi.gen_prologue(insn) {
                         final_insns.push(insn);
@@ -769,6 +776,10 @@ impl<I: VCodeInst> regalloc2::Function for VCode<I> {
             | MachTerminator::Indirect(..) => true,
             _ => false,
         }
+    }
+
+    fn branch_blockparam_arg_offset(&self, _: regalloc2::Block, inst: regalloc2::Inst) -> usize {
+        self.ints[inst.index()].blockparam_offset()
     }
 
     fn is_safepoint(&self, insn: regalloc2::Inst) -> bool {
