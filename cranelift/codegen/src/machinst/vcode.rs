@@ -77,8 +77,8 @@ pub struct VCode<I: VCodeInst, A: ABICallee<I = I>> {
     /// VReg IR-level types.
     vreg_types: Vec<Type>,
 
-    /// Do we have any ref values among our vregs?
-    have_ref_values: bool,
+    /// Which vregs are ref-typed?
+    reftype_vregs: Vec<VReg>,
 
     /// Lowered machine instructions in order corresponding to the original IR.
     insts: Vec<I>,
@@ -130,7 +130,7 @@ pub struct VCode<I: VCodeInst, A: ABICallee<I = I>> {
     emit_info: I::Info,
 
     /// Safepoint flags for each instruction.
-    safepoint_insns: Vec<regalloc2::BitVec>,
+    safepoint_insns: Vec<regalloc2::bitvec::BitVec>,
 
     /// A list of SpillSlots at instruction indices corresponding to
     /// safepoints that contain references.
@@ -197,7 +197,6 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
 
         VCodeBuilder {
             vcode,
-            stack_map_info,
             block_start: 0,
             succ_start: 0,
             cur_srcloc: SourceLoc::default(),
@@ -210,22 +209,19 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
     }
 
     /// Set the type of a VReg.
-    pub fn set_vreg_type(&mut self, vreg: VirtualReg, ty: Type) {
-        if self.vcode.vreg_types.len() <= vreg.get_index() {
-            self.vcode
-                .vreg_types
-                .resize(vreg.get_index() + 1, ir::types::I8);
+    pub fn set_vreg_type(&mut self, vreg: VReg, ty: Type) {
+        if self.vcode.vreg_types.len() <= vreg.vreg() {
+            self.vcode.vreg_types.resize(vreg.vreg() + 1, ir::types::I8);
         }
-        self.vcode.vreg_types[vreg.get_index()] = ty;
+        self.vcode.vreg_types[vreg.vreg()] = ty;
         if is_reftype(ty) {
-            self.stack_map_info.reftyped_vregs.push(vreg);
-            self.vcode.have_ref_values = true;
+            self.reftype_vregs.push(vreg);
         }
     }
 
     /// Are there any reference-typed values at all among the vregs?
     pub fn have_ref_values(&self) -> bool {
-        self.vcode.have_ref_values()
+        self.reftype_vregs.len() > 0
     }
 
     /// Set the current block as the entry block.
@@ -366,6 +362,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         VCode {
             abi,
             vreg_types: vec![],
+            reftype_vregs: vec![],
             have_ref_values: false,
             insts: vec![],
             operands: vec![],
@@ -805,8 +802,7 @@ impl<I: VCodeInst> regalloc2::Function for VCode<I> {
     }
 
     fn reftype_vregs(&self) -> &[VReg] {
-        // regalloc2-TODO
-        &[]
+        &self.reftype_vregs[..]
     }
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {

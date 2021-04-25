@@ -920,18 +920,15 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
 
         NonRegInput { inst, constant }
     }
+
+    
+    fn abi(&mut self) -> &mut dyn ABICallee<I = I> {
+        self.vcode.abi()
+    }
 }
 
 impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
     type I = I;
-
-    fn abi(&mut self) -> &mut dyn ABICallee<I = I> {
-        self.vcode.abi()
-    }
-
-    fn get_vm_context(&self) -> Option<Reg> {
-        self.vm_context
-    }
 
     fn data(&self, ir_inst: Inst) -> &InstructionData {
         &self.f.dfg[ir_inst]

@@ -10,7 +10,7 @@ use core::convert::From;
 use core::iter::Iterator;
 use core::ops::Bound::*;
 use core::ops::Deref;
-use regalloc::Reg;
+use regalloc2::Reg;
 
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
