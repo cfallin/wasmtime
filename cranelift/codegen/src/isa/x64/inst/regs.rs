@@ -16,12 +16,9 @@
 //! ourselves have to save) and this is balanaced against the RA's pressure in the other direction
 //! at callsites.
 
+use crate::machinst::Reg;
 use crate::settings;
-use alloc::vec::Vec;
-use regalloc::{
-    PrettyPrint, RealReg, RealRegUniverse, Reg, RegClass, RegClassInfo, NUM_REG_CLASSES,
-};
-use std::string::String;
+use regalloc2::{MachineEnv, PReg, RegClass};
 
 // Hardware encodings (note the special rax, rcx, rdx, rbx order).
 
@@ -42,263 +39,254 @@ pub const ENC_R13: u8 = 13;
 pub const ENC_R14: u8 = 14;
 pub const ENC_R15: u8 = 15;
 
-fn gpr(enc: u8, index: u8) -> Reg {
-    Reg::new_real(RegClass::I64, enc, index)
+fn gpr(enc: u8) -> PReg {
+    PReg::new(enc, RegClass::Int)
 }
 
-pub(crate) fn rsi() -> Reg {
-    gpr(ENC_RSI, 16)
+pub(crate) fn rax() -> PReg {
+    gpr(ENC_RAX)
 }
-pub(crate) fn rdi() -> Reg {
-    gpr(ENC_RDI, 17)
+pub(crate) fn rcx() -> PReg {
+    gpr(ENC_RCX)
 }
-pub(crate) fn rax() -> Reg {
-    gpr(ENC_RAX, 18)
+pub(crate) fn rdx() -> PReg {
+    gpr(ENC_RDX)
 }
-pub(crate) fn rcx() -> Reg {
-    gpr(ENC_RCX, 19)
+pub(crate) fn rbx() -> PReg {
+    gpr(ENC_RBX)
 }
-pub(crate) fn rdx() -> Reg {
-    gpr(ENC_RDX, 20)
+pub(crate) fn rsp() -> PReg {
+    gpr(ENC_RSP)
 }
-pub(crate) fn r8() -> Reg {
-    gpr(ENC_R8, 21)
+pub(crate) fn rbp() -> PReg {
+    gpr(ENC_RBP)
 }
-pub(crate) fn r9() -> Reg {
-    gpr(ENC_R9, 22)
+pub(crate) fn rsi() -> PReg {
+    gpr(ENC_RSI)
 }
-pub(crate) fn r10() -> Reg {
-    gpr(ENC_R10, 23)
+pub(crate) fn rdi() -> PReg {
+    gpr(ENC_RDI)
 }
-pub(crate) fn r11() -> Reg {
-    gpr(ENC_R11, 24)
+pub(crate) fn r8() -> PReg {
+    gpr(ENC_R8)
 }
-pub(crate) fn r12() -> Reg {
-    gpr(ENC_R12, 25)
+pub(crate) fn r9() -> PReg {
+    gpr(ENC_R9)
 }
-pub(crate) fn r13() -> Reg {
-    gpr(ENC_R13, 26)
+pub(crate) fn r10() -> PReg {
+    gpr(ENC_R10)
 }
-pub(crate) fn r14() -> Reg {
-    gpr(ENC_R14, 27)
+pub(crate) fn r11() -> PReg {
+    gpr(ENC_R11)
 }
-pub(crate) fn rbx() -> Reg {
-    gpr(ENC_RBX, 28)
+pub(crate) fn r12() -> PReg {
+    gpr(ENC_R12)
 }
-
-pub(crate) fn r15() -> Reg {
-    // r15 is put aside since this is the pinned register.
-    gpr(ENC_R15, 29)
+pub(crate) fn r13() -> PReg {
+    gpr(ENC_R13)
+}
+pub(crate) fn r14() -> PReg {
+    gpr(ENC_R14)
+}
+pub(crate) fn r15() -> PReg {
+    gpr(ENC_R15)
 }
 
 /// The pinned register on this architecture.
 /// It must be the same as Spidermonkey's HeapReg, as found in this file.
 /// https://searchfox.org/mozilla-central/source/js/src/jit/x64/Assembler-x64.h#99
-pub(crate) fn pinned_reg() -> Reg {
+pub(crate) fn pinned_reg() -> PReg {
     r15()
 }
 
-fn fpr(enc: u8, index: u8) -> Reg {
-    Reg::new_real(RegClass::V128, enc, index)
+fn fpr(enc: u8) -> Reg {
+    PReg::new(enc, RegClass::Float)
 }
 
-pub(crate) fn xmm0() -> Reg {
-    fpr(0, 0)
+pub(crate) fn xmm0() -> PReg {
+    fpr(0)
 }
-pub(crate) fn xmm1() -> Reg {
-    fpr(1, 1)
+pub(crate) fn xmm1() -> PReg {
+    fpr(1)
 }
-pub(crate) fn xmm2() -> Reg {
-    fpr(2, 2)
+pub(crate) fn xmm2() -> PReg {
+    fpr(2)
 }
-pub(crate) fn xmm3() -> Reg {
-    fpr(3, 3)
+pub(crate) fn xmm3() -> PReg {
+    fpr(3)
 }
-pub(crate) fn xmm4() -> Reg {
-    fpr(4, 4)
+pub(crate) fn xmm4() -> PReg {
+    fpr(4)
 }
-pub(crate) fn xmm5() -> Reg {
-    fpr(5, 5)
+pub(crate) fn xmm5() -> PReg {
+    fpr(5)
 }
-pub(crate) fn xmm6() -> Reg {
-    fpr(6, 6)
+pub(crate) fn xmm6() -> PReg {
+    fpr(6)
 }
-pub(crate) fn xmm7() -> Reg {
-    fpr(7, 7)
+pub(crate) fn xmm7() -> PReg {
+    fpr(7)
 }
-pub(crate) fn xmm8() -> Reg {
-    fpr(8, 8)
+pub(crate) fn xmm8() -> PReg {
+    fpr(8)
 }
-pub(crate) fn xmm9() -> Reg {
-    fpr(9, 9)
+pub(crate) fn xmm9() -> PReg {
+    fpr(9)
 }
-pub(crate) fn xmm10() -> Reg {
-    fpr(10, 10)
+pub(crate) fn xmm10() -> PReg {
+    fpr(10)
 }
-pub(crate) fn xmm11() -> Reg {
-    fpr(11, 11)
+pub(crate) fn xmm11() -> PReg {
+    fpr(11)
 }
-pub(crate) fn xmm12() -> Reg {
-    fpr(12, 12)
+pub(crate) fn xmm12() -> PReg {
+    fpr(12)
 }
-pub(crate) fn xmm13() -> Reg {
-    fpr(13, 13)
+pub(crate) fn xmm13() -> PReg {
+    fpr(13)
 }
-pub(crate) fn xmm14() -> Reg {
-    fpr(14, 14)
+pub(crate) fn xmm14() -> PReg {
+    fpr(14)
 }
-pub(crate) fn xmm15() -> Reg {
-    fpr(15, 15)
+pub(crate) fn xmm15() -> PReg {
+    fpr(15)
 }
 
-pub(crate) fn rsp() -> Reg {
-    gpr(ENC_RSP, 30)
-}
-pub(crate) fn rbp() -> Reg {
-    gpr(ENC_RBP, 31)
-}
+/// Create the MachineEnv for x64.
+pub(crate) fn create_machine_env(flags: &settings::Flags) -> MachineEnv {}
 
 /// Create the register universe for X64.
 ///
 /// The ordering of registers matters, as commented in the file doc comment: assumes the
 /// calling-convention is SystemV, at the moment.
-pub(crate) fn create_reg_universe_systemv(flags: &settings::Flags) -> RealRegUniverse {
-    let mut regs = Vec::<(RealReg, String)>::new();
-    let mut allocable_by_class = [None; NUM_REG_CLASSES];
+pub(crate) fn create_reg_universe_systemv(flags: &settings::Flags) -> MachineEnv {
+    let mut regs = vec![];
+    let mut regs_by_class = vec![vec![], vec![]];
+    let mut scratch_by_class = vec![];
+
+    // Add all PRegs. Every PReg that appears in VCode (even e.g. as a
+    // constraint) must be here, even those that are not allocatable.
+    regs.push(rax());
+    regs.push(rcx());
+    regs.push(rdx());
+    regs.push(rbx());
+    regs.push(rsp());
+    regs.push(rbp());
+    regs.push(rsi());
+    regs.push(rdi());
+    regs.push(r8());
+    regs.push(r9());
+    regs.push(r10());
+    regs.push(r11());
+    regs.push(r12());
+    regs.push(r13());
+    regs.push(r14());
+    regs.push(r15());
+    regs.push(xmm0());
+    regs.push(xmm1());
+    regs.push(xmm2());
+    regs.push(xmm3());
+    regs.push(xmm4());
+    regs.push(xmm5());
+    regs.push(xmm6());
+    regs.push(xmm7());
+    regs.push(xmm8());
+    regs.push(xmm9());
+    regs.push(xmm10());
+    regs.push(xmm11());
+    regs.push(xmm12());
+    regs.push(xmm13());
+    regs.push(xmm14());
+    regs.push(xmm15());
 
     let use_pinned_reg = flags.enable_pinned_reg();
 
-    // XMM registers
-    let first_fpr = regs.len();
-    regs.push((xmm0().to_real_reg(), "%xmm0".into()));
-    regs.push((xmm1().to_real_reg(), "%xmm1".into()));
-    regs.push((xmm2().to_real_reg(), "%xmm2".into()));
-    regs.push((xmm3().to_real_reg(), "%xmm3".into()));
-    regs.push((xmm4().to_real_reg(), "%xmm4".into()));
-    regs.push((xmm5().to_real_reg(), "%xmm5".into()));
-    regs.push((xmm6().to_real_reg(), "%xmm6".into()));
-    regs.push((xmm7().to_real_reg(), "%xmm7".into()));
-    regs.push((xmm8().to_real_reg(), "%xmm8".into()));
-    regs.push((xmm9().to_real_reg(), "%xmm9".into()));
-    regs.push((xmm10().to_real_reg(), "%xmm10".into()));
-    regs.push((xmm11().to_real_reg(), "%xmm11".into()));
-    regs.push((xmm12().to_real_reg(), "%xmm12".into()));
-    regs.push((xmm13().to_real_reg(), "%xmm13".into()));
-    regs.push((xmm14().to_real_reg(), "%xmm14".into()));
-    regs.push((xmm15().to_real_reg(), "%xmm15".into()));
-    let last_fpr = regs.len() - 1;
-
-    // Integer regs.
-    let first_gpr = regs.len();
-
-    // Caller-saved, in the SystemV x86_64 ABI.
-    regs.push((rsi().to_real_reg(), "%rsi".into()));
-    regs.push((rdi().to_real_reg(), "%rdi".into()));
-    regs.push((rax().to_real_reg(), "%rax".into()));
-    regs.push((rcx().to_real_reg(), "%rcx".into()));
-    regs.push((rdx().to_real_reg(), "%rdx".into()));
-    regs.push((r8().to_real_reg(), "%r8".into()));
-    regs.push((r9().to_real_reg(), "%r9".into()));
-    regs.push((r10().to_real_reg(), "%r10".into()));
-    regs.push((r11().to_real_reg(), "%r11".into()));
-
-    // Callee-saved, in the SystemV x86_64 ABI.
-    regs.push((r12().to_real_reg(), "%r12".into()));
-    regs.push((r13().to_real_reg(), "%r13".into()));
-    regs.push((r14().to_real_reg(), "%r14".into()));
-
-    regs.push((rbx().to_real_reg(), "%rbx".into()));
-
-    // Other regs, not available to the allocator.
-    debug_assert_eq!(r15(), pinned_reg());
-    let allocable = if use_pinned_reg {
-        // The pinned register is not allocatable in this case, so record the length before adding
-        // it.
-        let len = regs.len();
-        regs.push((r15().to_real_reg(), "%r15/pinned".into()));
-        len
-    } else {
-        regs.push((r15().to_real_reg(), "%r15".into()));
-        regs.len()
-    };
-    let last_gpr = allocable - 1;
-
-    regs.push((rsp().to_real_reg(), "%rsp".into()));
-    regs.push((rbp().to_real_reg(), "%rbp".into()));
-
-    allocable_by_class[RegClass::I64.rc_to_usize()] = Some(RegClassInfo {
-        first: first_gpr,
-        last: last_gpr,
-        suggested_scratch: Some(r12().get_index()),
-    });
-    allocable_by_class[RegClass::V128.rc_to_usize()] = Some(RegClassInfo {
-        first: first_fpr,
-        last: last_fpr,
-        suggested_scratch: Some(xmm15().get_index()),
-    });
-
-    // Sanity-check: the index passed to the Reg ctor must match the order in the register list.
-    for (i, reg) in regs.iter().enumerate() {
-        assert_eq!(i, reg.0.get_index());
+    // Add allocatable PRegs by class. TODO: two priorities within
+    // each class -- preferred and non-preferred.
+    regs_by_class[0].push(rax());
+    regs_by_class[0].push(rcx());
+    regs_by_class[0].push(rdx());
+    regs_by_class[0].push(rbx());
+    regs_by_class[0].push(rsi());
+    regs_by_class[0].push(rdi());
+    regs_by_class[0].push(r8());
+    regs_by_class[0].push(r9());
+    regs_by_class[0].push(r10());
+    regs_by_class[0].push(r11());
+    regs_by_class[0].push(r12());
+    regs_by_class[0].push(r13());
+    if !use_pinned_reg {
+        regs_by_class[0].push(r15());
     }
+    scratch_by_class.push(r14());
 
-    RealRegUniverse {
+    regs_by_class[1].push(xmm0());
+    regs_by_class[1].push(xmm1());
+    regs_by_class[1].push(xmm2());
+    regs_by_class[1].push(xmm3());
+    regs_by_class[1].push(xmm4());
+    regs_by_class[1].push(xmm5());
+    regs_by_class[1].push(xmm6());
+    regs_by_class[1].push(xmm7());
+    regs_by_class[1].push(xmm8());
+    regs_by_class[1].push(xmm9());
+    regs_by_class[1].push(xmm10());
+    regs_by_class[1].push(xmm11());
+    regs_by_class[1].push(xmm12());
+    regs_by_class[1].push(xmm13());
+    regs_by_class[1].push(xmm14());
+    scratch_by_class.push(xmm15());
+
+    MachineEnv {
         regs,
-        allocable,
-        allocable_by_class,
+        regs_by_class,
+        scratch_by_class,
     }
 }
 
-/// If `ireg` denotes an I64-classed reg, make a best-effort attempt to show its name at some
-/// smaller size (4, 2 or 1 bytes).
-pub fn show_ireg_sized(reg: Reg, mb_rru: Option<&RealRegUniverse>, size: u8) -> String {
-    let mut s = reg.show_rru(mb_rru);
+/// If `ireg` denotes a PReg, make a best-effort attempt to show its
+/// name with the appropriate size-based declension.
+pub fn show_ireg_sized(reg: PReg, size: u8) -> &'static str {
+    let sizes = match (reg.class(), reg.hw_enc()) {
+        (RegClass::Int, 0) => ["%rax", "%eax", "%ax", "%al"],
+        (RegClass::Int, 1) => ["%rcx", "%ecx", "%cx", "%cl"],
+        (RegClass::Int, 2) => ["%rdx", "%edx", "%dx", "%dl"],
+        (RegClass::Int, 3) => ["%rbx", "%ebx", "%bx", "%bl"],
+        (RegClass::Int, 4) => ["%rsp", "%esp", "%sp", "%spl"],
+        (RegClass::Int, 5) => ["%rbp", "%ebp", "%bp", "%bpl"],
+        (RegClass::Int, 6) => ["%rsi", "%esi", "%si", "%sil"],
+        (RegClass::Int, 7) => ["%rdi", "%edi", "%di", "%dil"],
+        (RegClass::Int, 8) => ["%r8", "%r8d", "%r8w", "%r8b"],
+        (RegClass::Int, 9) => ["%r9", "%r9d", "%r9w", "%r9b"],
+        (RegClass::Int, 10) => ["%r10", "%r10d", "%r10w", "%r10b"],
+        (RegClass::Int, 11) => ["%r11", "%r11d", "%r11w", "%r11b"],
+        (RegClass::Int, 12) => ["%r12", "%r12d", "%r12w", "%r12b"],
+        (RegClass::Int, 13) => ["%r13", "%r13d", "%r13w", "%r13b"],
+        (RegClass::Int, 14) => ["%r14", "%r14d", "%r14w", "%r14b"],
+        (RegClass::Int, 15) => ["%r15", "%r15d", "%r15w", "%r15b"],
 
-    if reg.get_class() != RegClass::I64 || size == 8 {
-        // We can't do any better.
-        return s;
+        (RegClass::Float, 0) => ["%xmm0", "%xmm0", "%xmm0", "%xmm0"],
+        (RegClass::Float, 1) => ["%xmm1", "%xmm1", "%xmm1", "%xmm1"],
+        (RegClass::Float, 2) => ["%xmm2", "%xmm2", "%xmm2", "%xmm2"],
+        (RegClass::Float, 3) => ["%xmm3", "%xmm3", "%xmm3", "%xmm3"],
+        (RegClass::Float, 4) => ["%xmm4", "%xmm4", "%xmm4", "%xmm4"],
+        (RegClass::Float, 5) => ["%xmm5", "%xmm5", "%xmm5", "%xmm5"],
+        (RegClass::Float, 6) => ["%xmm6", "%xmm6", "%xmm6", "%xmm6"],
+        (RegClass::Float, 7) => ["%xmm7", "%xmm7", "%xmm7", "%xmm7"],
+        (RegClass::Float, 8) => ["%xmm8", "%xmm8", "%xmm8", "%xmm8"],
+        (RegClass::Float, 9) => ["%xmm9", "%xmm9", "%xmm9", "%xmm9"],
+        (RegClass::Float, 10) => ["%xmm10", "%xmm10", "%xmm10", "%xmm10"],
+        (RegClass::Float, 11) => ["%xmm11", "%xmm11", "%xmm11", "%xmm11"],
+        (RegClass::Float, 12) => ["%xmm12", "%xmm12", "%xmm12", "%xmm12"],
+        (RegClass::Float, 13) => ["%xmm13", "%xmm13", "%xmm13", "%xmm13"],
+        (RegClass::Float, 14) => ["%xmm14", "%xmm14", "%xmm14", "%xmm14"],
+        (RegClass::Float, 15) => ["%xmm15", "%xmm15", "%xmm15", "%xmm15"],
+    };
+
+    match size {
+        1 => sizes[3],
+        2 => sizes[2],
+        4 => sizes[1],
+        _ => sizes[0],
     }
-
-    if reg.is_real() {
-        // Change (eg) "rax" into "eax", "ax" or "al" as appropriate.  This is something one could
-        // describe diplomatically as "a kludge", but it's only debug code.
-        let remapper = match s.as_str() {
-            "%rax" => Some(["%eax", "%ax", "%al"]),
-            "%rbx" => Some(["%ebx", "%bx", "%bl"]),
-            "%rcx" => Some(["%ecx", "%cx", "%cl"]),
-            "%rdx" => Some(["%edx", "%dx", "%dl"]),
-            "%rsi" => Some(["%esi", "%si", "%sil"]),
-            "%rdi" => Some(["%edi", "%di", "%dil"]),
-            "%rbp" => Some(["%ebp", "%bp", "%bpl"]),
-            "%rsp" => Some(["%esp", "%sp", "%spl"]),
-            "%r8" => Some(["%r8d", "%r8w", "%r8b"]),
-            "%r9" => Some(["%r9d", "%r9w", "%r9b"]),
-            "%r10" => Some(["%r10d", "%r10w", "%r10b"]),
-            "%r11" => Some(["%r11d", "%r11w", "%r11b"]),
-            "%r12" => Some(["%r12d", "%r12w", "%r12b"]),
-            "%r13" => Some(["%r13d", "%r13w", "%r13b"]),
-            "%r14" => Some(["%r14d", "%r14w", "%r14b"]),
-            "%r15" => Some(["%r15d", "%r15w", "%r15b"]),
-            _ => None,
-        };
-        if let Some(smaller_names) = remapper {
-            match size {
-                4 => s = smaller_names[0].into(),
-                2 => s = smaller_names[1].into(),
-                1 => s = smaller_names[2].into(),
-                _ => panic!("show_ireg_sized: real"),
-            }
-        }
-    } else {
-        // Add a "l", "w" or "b" suffix to RegClass::I64 vregs used at narrower widths.
-        let suffix = match size {
-            4 => "l",
-            2 => "w",
-            1 => "b",
-            _ => panic!("show_ireg_sized: virtual"),
-        };
-        s = s + suffix;
-    }
-
-    s
 }

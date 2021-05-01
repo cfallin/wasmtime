@@ -6,12 +6,12 @@ use super::TargetIsa;
 use crate::ir::{condcodes::IntCC, Function};
 use crate::isa::x64::{inst::regs::create_reg_universe_systemv, settings as x64_settings};
 use crate::isa::Builder as IsaBuilder;
-use crate::machinst::{compile, MachBackend, MachCompileResult, TargetIsaAdapter, VCode};
+use crate::machinst::{compile, MachBackend, MachCompileResult, Reg, TargetIsaAdapter, VCode};
 use crate::result::CodegenResult;
 use crate::settings::{self as shared_settings, Flags};
 use alloc::{boxed::Box, vec::Vec};
 use core::hash::{Hash, Hasher};
-use regalloc::{PrettyPrint, RealRegUniverse, Reg};
+use regalloc2::MachineEnv;
 use target_lexicon::Triple;
 
 #[cfg(feature = "unwind")]
@@ -27,18 +27,18 @@ pub(crate) struct X64Backend {
     triple: Triple,
     flags: Flags,
     x64_flags: x64_settings::Flags,
-    reg_universe: RealRegUniverse,
+    machine_env: MachineEnv,
 }
 
 impl X64Backend {
     /// Create a new X64 backend with the given (shared) flags.
     fn new_with_flags(triple: Triple, flags: Flags, x64_flags: x64_settings::Flags) -> Self {
-        let reg_universe = create_reg_universe_systemv(&flags);
+        let machine_env = create_reg_universe_systemv(&flags);
         Self {
             triple,
             flags,
             x64_flags,
-            reg_universe,
+            machine_env,
         }
     }
 
@@ -46,7 +46,7 @@ impl X64Backend {
         // This performs lowering to VCode, register-allocates the code, computes
         // block layout and finalizes branches. The result is ready for binary emission.
         let emit_info = EmitInfo::new(flags.clone(), self.x64_flags.clone());
-        compile::compile::<Self, X64ABICallee>(&func, self, emit_info)
+        compile::compile::<Self, abi::X64ABICallee>(&func, self, emit_info)
     }
 }
 
@@ -101,8 +101,8 @@ impl MachBackend for X64Backend {
         self.triple.clone()
     }
 
-    fn reg_universe(&self) -> &RealRegUniverse {
-        &self.reg_universe
+    fn reg_env(&self) -> &MachineEnv {
+        &self.machine_env
     }
 
     fn unsigned_add_overflow_condition(&self) -> IntCC {

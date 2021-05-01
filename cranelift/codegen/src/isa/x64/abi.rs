@@ -11,7 +11,7 @@ use crate::{CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use args::*;
-use regalloc::{RealReg, Reg, RegClass, Set, Writable};
+use regalloc2::{Operand, PReg};
 use smallvec::{smallvec, SmallVec};
 use std::convert::TryFrom;
 
