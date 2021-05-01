@@ -13,12 +13,6 @@ pub trait ABICallee {
     /// The instruction type for the ISA associated with this ABI.
     type I: VCodeInst;
 
-    /// Creeate a new callee-side ABI object.
-    fn create() -> Self;
-
-    /// Initialize, allocating any temps that will be necessary.
-    fn init<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) -> Self;
-
     /// Access the (possibly legalized) signature.
     fn signature(&self) -> &Signature;
 
@@ -40,25 +34,40 @@ pub trait ABICallee {
     /// The offsets of all stack slots (not spill slots) for debuginfo purposes.
     fn stackslot_offsets(&self) -> &PrimaryMap<StackSlot, u32>;
 
-    /// Generate an args pseudo-instruction. This instruction is meant
-    /// to come first in the function body and capture the values of
-    /// function arguments, which it returns in VRegs. Once regalloc
-    /// is complete, it will be passed to `emit_prologue` below to
-    /// generate a true prologue.
+    /// Generate an args instruction sequence: the given vregs will be
+    /// assigned values from function arguments, either via
+    /// constraining their locations with a constraint pseudo-inst or
+    /// via explicit copying. This is meant to be the first
+    /// instruction in the function body after the prologue (which is
+    /// generated later).
     ///
     /// This takes a `&mut self` so that it can record various
     /// parameters that need to be used later, e.g. StructReturn
     /// pointers.
-    fn gen_args(&mut self, args: &[ValueRegs<Writable<Reg>>]) -> Self::I;
+    ///
+    /// This also takes the lowering context so that it can allocate
+    /// any temps that are necessary.
+    fn gen_arg_seq<C: LowerCtx<I = Self::I>>(
+        &self,
+        ctx: &mut C,
+        args: Vec<ValueRegs<Writable<VReg>>>,
+    ) -> Vec<Self::I>;
 
-    /// Generate a return pseudo-instruction. The given values will be
-    /// used as return values. Once regalloc is complete, this
-    /// pseudo-instruction will be passed to `emit_epilogue` below to
-    /// generate a true epilogue.
+    /// Generate a return-value instruction sequence: the given vregs
+    /// will be used as return values and copied or constrained to end
+    /// up in the proper locations. This sequence should not, however,
+    /// include the actual return instruction.
     ///
     /// This also handles ABI-inserted return values, such as
     /// StructReturn pointers that must come from the args.
-    fn gen_ret(&self, retvals: &[ValueRegs<Reg>], is_fallthrough: bool) -> Self::I;
+    ///
+    /// This also takes the lowering context so that it can allocate
+    /// any temps that are necessary.
+    fn gen_ret_seq<C: LowerCtx<I = Self::I>>(
+        &self,
+        ctx: &mut C,
+        retvals: Vec<ValueRegs<VReg>>,
+    ) -> Vec<Self::I>;
 
     /// Get the address of a stackslot.
     fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Writable<Reg>) -> Self::I;
@@ -85,18 +94,16 @@ pub trait ABICallee {
         state: &<Self::I as MachInstEmit>::State,
     ) -> StackMap;
 
-    /// Generate a prologue, post-regalloc, given the args
-    /// pseudo-instruction as input. This should include any stack
+    /// Generate a prologue, post-regalloc. This should include any stack
     /// frame or other setup necessary to load the arguments, and
     /// should save the clobbers that were provided to
     /// `set_clobbered()`.  `self` is mutable so that we can store
     /// information in it which will be useful when creating the
     /// epilogue.
-    fn gen_prologue(&mut self, arginst: Self::I) -> Vec<Self::I>;
+    fn gen_prologue(&mut self) -> Vec<Self::I>;
 
-    /// Generate an epilogue, post-regalloc. This is provided the
-    /// return pseudo-instruction as input.
-    fn gen_epilogue(&self, retinst: Self::I) -> Vec<Self::I>;
+    /// Generate an epilogue, post-regalloc.
+    fn gen_epilogue(&self) -> Vec<Self::I>;
 
     /// Returns the full frame size for the given function, after prologue
     /// emission has run. This comprises the spill slots and stack-storage slots
@@ -120,7 +127,7 @@ pub trait ABICallee {
     /// This returns the instruction (rather than emitting to the
     /// context) because it is used post-regalloc to implement edits,
     /// rather than during lowering itself.
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg, ty: Option<Type>) -> Self::I;
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg) -> Vec<Self::I>;
 
     /// Generate a reload (fill). As for spills, the type may be given to allow
     /// a more optimized load instruction to be generated.
@@ -128,13 +135,13 @@ pub trait ABICallee {
     /// This returns the instruction (rather than emitting to the
     /// context) because it is used post-regalloc to implement edits,
     /// rather than during lowering itself.
-    fn gen_reload(&self, to_reg: Writable<Reg>, from_slot: SpillSlot, ty: Option<Type>) -> Self::I;
+    fn gen_reload(&self, to_reg: PReg, from_slot: SpillSlot) -> Vec<Self::I>;
 
     /// Generate a stack-to-stack move. Some architectures may be able
     /// to do this without requiring a scratch register; on others, a
     /// scratch register should be reserved as needed (and not
     /// provided to the allocator).
-    fn gen_stack_move(&self, to_slot: SpillSlot, from_slot: SpillSlot, ty: Type) -> Self::I;
+    fn gen_stack_move(&self, to_slot: SpillSlot, from_slot: SpillSlot, ty: Type) -> Vec<Self::I>;
 }
 
 /// Trait implemented by an object that tracks ABI-related state and can
@@ -165,12 +172,8 @@ pub trait ABICaller {
     fn add_argument(&mut self, regs: ValueRegs<VReg>);
 
     /// Specify return-value output vregs for one return val.
-    fn add_retval(&mut self, regs: ValueRegs<Writable<VReg>>);
+    fn add_retval(&mut self, regs: ValueRegs<VReg>);
 
     /// Emit the call itself.
     fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C);
-
-    /// Return a static list of clobbers for a call with this calling
-    /// convention and possibly return-value configuration.
-    fn clobbers(&self) -> &'static [PReg];
 }

@@ -124,6 +124,7 @@
 //!   - Return v0 in memory at `[P+16]`.
 
 use super::abi::*;
+use super::{Reg, Writable};
 use crate::binemit::StackMap;
 use crate::ir::types::*;
 use crate::ir::{ArgumentExtension, ArgumentPurpose, StackSlot};
@@ -133,7 +134,7 @@ use crate::CodegenResult;
 use crate::{ir, isa};
 use alloc::vec::Vec;
 use log::{debug, trace};
-use regalloc::{RealReg, Reg, RegClass, Set, SpillSlot, Writable};
+use regalloc2::{Operand, PReg, RegClass, SpillSlot, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
@@ -146,7 +147,7 @@ pub enum ABIArgSlot {
     /// In a real register.
     Reg {
         /// Register that holds this arg.
-        reg: RealReg,
+        reg: PReg,
         /// Value type of this arg.
         ty: ir::Type,
         /// Should this arg be zero- or sign-extended?
@@ -218,7 +219,7 @@ impl ABIArg {
 
     /// Create an ABIArg from one register.
     pub fn reg(
-        reg: RealReg,
+        reg: PReg,
         ty: ir::Type,
         extension: ir::ArgumentExtension,
         purpose: ir::ArgumentPurpose,
@@ -354,8 +355,10 @@ pub trait ABIMachineSpec {
     /// Generate a store to the stack.
     fn gen_store_stack(mem: StackAMode, from_reg: Reg, ty: Type) -> Self::I;
 
-    /// Generate a move.
-    fn gen_move(to_reg: Writable<Reg>, from_reg: Reg, ty: Type) -> Self::I;
+    /// Generate a move from one stack location to another. May use a
+    /// scratch register that is not provided to the regalloc for use;
+    /// the sequence must work post-regalloc.
+    fn gen_stack_move(to_mem: StackAMode, from_mem: StackAMode, ty: Type) -> Vec<Self::I>;
 
     /// Generate an integer-extend operation.
     fn gen_extend(
@@ -365,13 +368,6 @@ pub trait ABIMachineSpec {
         from_bits: u8,
         to_bits: u8,
     ) -> Self::I;
-
-    /// Generate a return instruction.
-    fn gen_ret() -> Self::I;
-
-    /// Generate an "epilogue placeholder" instruction, recognized by lowering
-    /// when using the Baldrdash ABI.
-    fn gen_epilogue_placeholder() -> Self::I;
 
     /// Generate an add-with-immediate. Note that even if this uses a scratch
     /// register, it must satisfy two requirements:
@@ -461,12 +457,12 @@ pub trait ABIMachineSpec {
     /// temporary register to use to synthesize the called address, if needed.
     fn gen_call(
         dest: &CallDest,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
         opcode: ir::Opcode,
         tmp: Writable<Reg>,
         callee_conv: isa::CallConv,
         callee_conv: isa::CallConv,
+        operands: Vec<Operand>,
+        clobbers: Vec<PReg>,
     ) -> SmallVec<[(InstIsSafepoint, Self::I); 2]>;
 
     /// Generate a memcpy invocation. Used to set up struct args. May clobber
@@ -489,9 +485,12 @@ pub trait ABIMachineSpec {
     /// Get the "nominal SP to FP" offset from an instruction-emission state.
     fn get_nominal_sp_to_fp(s: &<Self::I as MachInstEmit>::State) -> i64;
 
-    /// Get all caller-save registers, that is, registers that we expect
-    /// not to be saved across a call to a callee with the given ABI.
-    fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> Vec<Writable<Reg>>;
+    /// Get all caller-save registers, that is, registers that we
+    /// expect not to be saved across a call to a callee with the
+    /// given ABI. This should be a static slice of PRegs for a given
+    /// calling convention, i.e., should not have to be computed
+    /// dynamically.
+    fn get_clobbers(call_conv_of_callee: isa::CallConv) -> &'static [PReg];
 
     /// Get the needed extension mode, given the mode attached to the argument
     /// in the signature and the calling convention. The input (the attribute in
@@ -590,7 +589,7 @@ pub struct ABICalleeImpl<M: ABIMachineSpec> {
     /// frame/allocation size needed for stackslots and spillslots.
     total_frame_size: Option<u32>,
     /// The register holding the return-area pointer, if needed.
-    ret_area_ptr: Option<Writable<Reg>>,
+    ret_area_ptr: Option<Writable<VReg>>,
     /// Calling convention this function expects.
     call_conv: isa::CallConv,
     /// The settings controlling this function's compilation.
@@ -628,6 +627,39 @@ fn get_special_purpose_param_register(
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
+    call_conv: isa::CallConv,
+    args: &[ABIArg],
+    vals: &mut [ValueRegs<VReg>],
+    ctx: &mut C,
+    insts: &mut Vec<M::I>,
+) {
+    for (arg, val) in args.iter().zip(vals.iter_mut()) {
+        if let &ABIArg::Slots { ref slots, .. } = arg {
+            match &slots[0] {
+                &ABIArgSlot::Reg {
+                    reg, ty, extension, ..
+                } if extension != ArgumentExtension::None => {
+                    let from_reg = val.only_reg().unwrap();
+                    let new_vreg = ctx.alloc_tmp(ty).only_reg().unwrap().vreg();
+                    let from_bits = ty_bits(ty) as u8;
+                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    let signed = ext == ArgumentExtension::Sext;
+                    insts.push(M::gen_extend(
+                        Writable::from_reg(Reg::reg_def(new_vreg)),
+                        Reg::reg_use(from_reg),
+                        signed,
+                        from_bits,
+                        /* to_bits = */ word_bits,
+                    ));
+                    *val = ValueRegs::one(new_vreg);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -902,55 +934,12 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         &self.ir_sig
     }
 
-    fn temp_needed(&self) -> Option<Type> {
-        if self.sig.stack_ret_arg.is_some() {
-            Some(M::word_type())
-        } else {
-            None
-        }
-    }
-
-    fn init(&mut self, maybe_tmp: Option<Writable<Reg>>) {
-        if self.sig.stack_ret_arg.is_some() {
-            assert!(maybe_tmp.is_some());
-            self.ret_area_ptr = maybe_tmp;
-        }
-    }
-
     fn flags(&self) -> &settings::Flags {
         &self.flags
     }
 
     fn call_conv(&self) -> isa::CallConv {
         self.sig.call_conv
-    }
-
-    fn liveins(&self) -> Set<RealReg> {
-        let mut set: Set<RealReg> = Set::empty();
-        for arg in &self.sig.args {
-            if let &ABIArg::Slots { ref slots, .. } = arg {
-                for slot in slots {
-                    if let ABIArgSlot::Reg { reg, .. } = slot {
-                        set.insert(*reg);
-                    }
-                }
-            }
-        }
-        set
-    }
-
-    fn liveouts(&self) -> Set<RealReg> {
-        let mut set: Set<RealReg> = Set::empty();
-        for ret in &self.sig.rets {
-            if let &ABIArg::Slots { ref slots, .. } = ret {
-                for slot in slots {
-                    if let ABIArgSlot::Reg { reg, .. } = slot {
-                        set.insert(*reg);
-                    }
-                }
-            }
-        }
-        set
     }
 
     fn num_args(&self) -> usize {
@@ -969,172 +958,142 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         &self.stackslots
     }
 
-    fn gen_copy_arg_to_regs(
+    fn gen_arg_seq<C: LowerCtx<I = Self::I>>(
         &self,
-        idx: usize,
-        into_regs: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I> {
-        let mut insts = smallvec![];
-        match &self.sig.args[idx] {
-            &ABIArg::Slots { ref slots, .. } => {
-                assert_eq!(into_regs.len(), slots.len());
-                for (slot, into_reg) in slots.iter().zip(into_regs.regs().iter()) {
-                    match slot {
-                        // Extension mode doesn't matter (we're copying out, not in; we
-                        // ignore high bits by convention).
-                        &ABIArgSlot::Reg { reg, ty, .. } => {
-                            insts.push(M::gen_move(*into_reg, reg.to_reg(), ty));
-                        }
-                        &ABIArgSlot::Stack { offset, ty, .. } => {
-                            insts.push(M::gen_load_stack(
-                                StackAMode::FPOffset(
-                                    M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                                    ty,
-                                ),
-                                *into_reg,
-                                ty,
-                            ));
-                        }
-                    }
-                }
-            }
-            &ABIArg::StructArg { offset, .. } => {
-                let into_reg = into_regs.only_reg().unwrap();
-                insts.push(M::gen_get_stack_addr(
-                    StackAMode::FPOffset(
-                        M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
-                        I8,
-                    ),
-                    into_reg,
-                    I8,
-                ));
-            }
+        ctx: &mut C,
+        mut args: Vec<ValueRegs<Writable<VReg>>>,
+    ) -> Vec<Self::I> {
+        if let Some(idx) = self.sig.stack_ret_arg {
+            // Allocate the extra return-area-ptr arg a vreg, if needed.
+            let tmp = ctx.alloc_tmp(M::word_type()).only_reg().unwrap().vreg();
+            self.ret_area_ptr = Some(tmp);
+            args.insert(idx, ValueRegs::one(tmp));
         }
-        insts
-    }
+        assert_eq!(args.len(), self.sig.args.len());
 
-    fn arg_is_needed_in_body(&self, idx: usize) -> bool {
-        match self.sig.args[idx].get_purpose() {
-            // Special Baldrdash-specific pseudo-args that are present only to
-            // fill stack slots.  Won't ever be used as ordinary values in the
-            // body.
-            ir::ArgumentPurpose::CalleeTLS | ir::ArgumentPurpose::CallerTLS => false,
-            _ => true,
-        }
-    }
-
-    fn gen_copy_regs_to_retval(
-        &self,
-        idx: usize,
-        from_regs: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I> {
-        let mut ret = smallvec![];
-        let word_bits = M::word_bits() as u8;
-        match &self.sig.rets[idx] {
-            &ABIArg::Slots { ref slots, .. } => {
-                assert_eq!(from_regs.len(), slots.len());
-                for (slot, from_reg) in slots.iter().zip(from_regs.regs().iter()) {
-                    match slot {
-                        &ABIArgSlot::Reg {
-                            reg, ty, extension, ..
-                        } => {
-                            let from_bits = ty_bits(ty) as u8;
-                            let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                            match (ext, from_bits) {
-                                (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                                    if n < word_bits =>
-                                {
-                                    let signed = ext == ArgumentExtension::Sext;
-                                    ret.push(M::gen_extend(
-                                        Writable::from_reg(reg.to_reg()),
-                                        from_reg.to_reg(),
-                                        signed,
-                                        from_bits,
-                                        /* to_bits = */ word_bits,
-                                    ));
-                                }
-                                _ => {
-                                    ret.push(M::gen_move(
-                                        Writable::from_reg(reg.to_reg()),
-                                        from_reg.to_reg(),
+        // Create a constraint inst that defines all register-based
+        // insts at once, and generate a separate list of loads to
+        // load stack-based args into vregs. Note that eventually, we
+        // should use rematerialization support to tell the regalloc
+        // that stack args can be loaded directly from arg slots, or
+        // else give them explicit stack-offset slots; but for now,
+        // `Stack` operand constraints can refer to only spillslots,
+        // not arbitrary stack offsets.
+        let mut constraint_ops = vec![];
+        let mut load_insts = vec![];
+        for (arg, vregs) in self.sig.args.iter().zip(args.iter()) {
+            match arg {
+                &ABIArg::Slots { ref slots, .. } => {
+                    assert_eq!(slots.len(), vregs.len());
+                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                        match slot {
+                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                                insts.push(M::gen_load_stack(
+                                    StackAMode::FPOffset(
+                                        M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                                         ty,
-                                    ));
-                                }
-                            };
-                        }
-                        &ABIArgSlot::Stack {
-                            offset,
-                            ty,
-                            extension,
-                            ..
-                        } => {
-                            let mut ty = ty;
-                            let from_bits = ty_bits(ty) as u8;
-                            // A machine ABI implementation should ensure that stack frames
-                            // have "reasonable" size. All current ABIs for machinst
-                            // backends (aarch64 and x64) enforce a 128MB limit.
-                            let off = i32::try_from(offset).expect(
-                                "Argument stack offset greater than 2GB; should hit impl limit first",
-                                );
-                            let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                            // Trash the from_reg; it should be its last use.
-                            match (ext, from_bits) {
-                                (ArgumentExtension::Uext, n) | (ArgumentExtension::Sext, n)
-                                    if n < word_bits =>
-                                {
-                                    assert_eq!(M::word_reg_class(), from_reg.to_reg().get_class());
-                                    let signed = ext == ArgumentExtension::Sext;
-                                    ret.push(M::gen_extend(
-                                        Writable::from_reg(from_reg.to_reg()),
-                                        from_reg.to_reg(),
-                                        signed,
-                                        from_bits,
-                                        /* to_bits = */ word_bits,
-                                    ));
-                                    // Store the extended version.
-                                    ty = M::word_type();
-                                }
-                                _ => {}
-                            };
-                            ret.push(M::gen_store_base_offset(
-                                self.ret_area_ptr.unwrap().to_reg(),
-                                off,
-                                from_reg.to_reg(),
-                                ty,
-                            ));
+                                    ),
+                                    Writable::from_reg(Reg::reg_def(vreg)),
+                                    ty,
+                                ));
+                            }
+                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                                constraint_ops.push(Operand::reg_fixed_def(vreg, reg));
+                            }
                         }
                     }
                 }
+                &ABIArg::StructArg { offset, .. } => {
+                    // Load the pointer directly into the vreg.
+                    let into_reg = vregs.only_reg().unwrap();
+                    insts.push(M::gen_get_stack_addr(
+                        StackAMode::FPOffset(
+                            M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
+                            I8,
+                        ),
+                        Reg::ref_def(into_reg),
+                        I8,
+                    ));
+                }
             }
-            &ABIArg::StructArg { .. } => {
-                panic!("StructArg in return position is unsupported");
-            }
+        }
+
+        // Generate one constraint instruction (if any constraints),
+        // then all of the necessary loads.
+        let mut ret = vec![];
+        if constraint_ops.len() > 0 {
+            ret.push(Self::I::gen_reg_constraint_inst(constraint_ops));
+        }
+        if load_insts.len() > 0 {
+            ret.extend(load_insts.into_iter());
         }
         ret
     }
 
-    fn gen_retval_area_setup(&self) -> Option<Self::I> {
-        if let Some(i) = self.sig.stack_ret_arg {
-            let insts = self.gen_copy_arg_to_regs(i, ValueRegs::one(self.ret_area_ptr.unwrap()));
-            let inst = insts.into_iter().next().unwrap();
-            trace!(
-                "gen_retval_area_setup: inst {:?}; ptr reg is {:?}",
-                inst,
-                self.ret_area_ptr.unwrap().to_reg()
-            );
-            Some(inst)
-        } else {
-            trace!("gen_retval_area_setup: not needed");
-            None
+    fn gen_ret_seq<C: LowerCtx<I = Self::I>>(
+        &self,
+        ctx: &mut C,
+        mut retvals: Vec<ValueRegs<VReg>>,
+    ) -> Vec<Self::I> {
+        // Extend any values as necessary, allocating new vregs.
+        let mut ret = vec![];
+        do_value_extensions(&self.sig.rets[..], &mut retvals[..], ctx, &mut ret);
+
+        // Create a constraint inst that constrains certain return
+        // values to registers, and stores that place other values in
+        // the return area as appropraite.
+        assert_eq!(retvals.len(), self.sig.rets.len());
+        let mut constraint_ops = vec![];
+        for (ret, vregs) in self.sig.rets.iter().zip(retvals.iter()) {
+            match ret {
+                &ABIArg::Slots { ref slots, .. } => {
+                    assert_eq!(vregs.len(), slots.len());
+                    for (slot, from_reg) in slots.iter().zip(vregs.regs().iter()) {
+                        match slot {
+                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                                constraint_ops.push(Operand::reg_fixed_use(from_reg, reg));
+                            }
+                            &ABIArgSlot::Stack {
+                                offset,
+                                ty,
+                                extension,
+                                ..
+                            } => {
+                                // A machine ABI implementation should ensure that stack frames
+                                // have "reasonable" size. All current ABIs for machinst
+                                // backends (aarch64 and x64) enforce a 128MB limit.
+                                let off = i32::try_from(offset).expect(
+                                    "Argument stack offset greater than 2GB; should hit impl limit first",
+                                );
+                                ret.push(M::gen_store_base_offset(
+                                    Reg::reg_use(self.ret_area_ptr.unwrap().to_reg()),
+                                    off,
+                                    Reg::reg_use(from_reg),
+                                    ty,
+                                ));
+                            }
+                        }
+                    }
+                }
+                &ABIArg::StructArg { .. } => {
+                    panic!("StructArg in return position is unsupported");
+                }
+            }
         }
+
+        if constraint_ops.len() > 0 {
+            ret.push(Self::I::gen_reg_constraint_inst(constraint_ops));
+        }
+        ret
     }
 
-    fn gen_ret(&self) -> Self::I {
-        M::gen_ret()
-    }
-
-    fn gen_epilogue_placeholder(&self) -> Self::I {
-        M::gen_epilogue_placeholder()
+    /// Produce an instruction that computes a stackslot address.
+    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into_reg: Writable<Reg>) -> Self::I {
+        // Offset from beginning of stackslot area, which is at nominal SP (see
+        // [MemArg::NominalSPOffset] for more details on nominal SP tracking).
+        let stack_off = self.stackslots[slot] as i64;
+        let sp_off: i64 = stack_off + (offset as i64);
+        M::gen_get_stack_addr(StackAMode::NominalSPOffset(sp_off, I8), into_reg, I8)
     }
 
     fn set_num_spillslots(&mut self, slots: usize) {
@@ -1143,77 +1102,6 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
 
     fn set_clobbered(&mut self, clobbered: Set<Writable<RealReg>>) {
         self.clobbered = clobbered;
-    }
-
-    /// Load from a stackslot.
-    fn load_stackslot(
-        &self,
-        slot: StackSlot,
-        offset: u32,
-        ty: Type,
-        into_regs: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I> {
-        // Offset from beginning of stackslot area, which is at nominal SP (see
-        // [MemArg::NominalSPOffset] for more details on nominal SP tracking).
-        let stack_off = self.stackslots[slot] as i64;
-        let sp_off: i64 = stack_off + (offset as i64);
-        trace!("load_stackslot: slot {} -> sp_off {}", slot, sp_off);
-        gen_load_stack_multi::<M>(StackAMode::NominalSPOffset(sp_off, ty), into_regs, ty)
-    }
-
-    /// Store to a stackslot.
-    fn store_stackslot(
-        &self,
-        slot: StackSlot,
-        offset: u32,
-        ty: Type,
-        from_regs: ValueRegs<Reg>,
-    ) -> SmallInstVec<Self::I> {
-        // Offset from beginning of stackslot area, which is at nominal SP (see
-        // [MemArg::NominalSPOffset] for more details on nominal SP tracking).
-        let stack_off = self.stackslots[slot] as i64;
-        let sp_off: i64 = stack_off + (offset as i64);
-        trace!("store_stackslot: slot {} -> sp_off {}", slot, sp_off);
-        gen_store_stack_multi::<M>(StackAMode::NominalSPOffset(sp_off, ty), from_regs, ty)
-    }
-
-    /// Produce an instruction that computes a stackslot address.
-    fn stackslot_addr(&self, slot: StackSlot, offset: u32, into_reg: Writable<Reg>) -> Self::I {
-        // Offset from beginning of stackslot area, which is at nominal SP (see
-        // [MemArg::NominalSPOffset] for more details on nominal SP tracking).
-        let stack_off = self.stackslots[slot] as i64;
-        let sp_off: i64 = stack_off + (offset as i64);
-        M::gen_get_stack_addr(StackAMode::NominalSPOffset(sp_off, I8), into_reg, I8)
-    }
-
-    /// Load from a spillslot.
-    fn load_spillslot(
-        &self,
-        slot: SpillSlot,
-        ty: Type,
-        into_regs: ValueRegs<Writable<Reg>>,
-    ) -> SmallInstVec<Self::I> {
-        // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
-        let islot = slot.get() as i64;
-        let spill_off = islot * M::word_bytes() as i64;
-        let sp_off = self.stackslots_size as i64 + spill_off;
-        trace!("load_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
-        gen_load_stack_multi::<M>(StackAMode::NominalSPOffset(sp_off, ty), into_regs, ty)
-    }
-
-    /// Store to a spillslot.
-    fn store_spillslot(
-        &self,
-        slot: SpillSlot,
-        ty: Type,
-        from_regs: ValueRegs<Reg>,
-    ) -> SmallInstVec<Self::I> {
-        // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
-        let islot = slot.get() as i64;
-        let spill_off = islot * M::word_bytes() as i64;
-        let sp_off = self.stackslots_size as i64 + spill_off;
-        trace!("store_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
-        gen_store_stack_multi::<M>(StackAMode::NominalSPOffset(sp_off, ty), from_regs, ty)
     }
 
     fn spillslots_to_stack_map(
@@ -1246,8 +1134,8 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         StackMap::from_slice(&bits[..])
     }
 
-    fn gen_prologue(&mut self) -> SmallInstVec<Self::I> {
-        let mut insts = smallvec![];
+    fn gen_prologue(&mut self) -> Vec<Self::I> {
+        let mut insts = vec![];
         if !self.call_conv.extends_baldrdash() {
             // set up frame
             insts.extend(M::gen_prologue_frame_setup(&self.flags).into_iter());
@@ -1308,8 +1196,8 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         insts
     }
 
-    fn gen_epilogue(&self) -> SmallInstVec<M::I> {
-        let mut insts = smallvec![];
+    fn gen_epilogue(&self, retinst: Self::I) -> Vec<Self::I> {
+        let mut insts = vec![];
 
         // Restore clobbered registers.
         insts.extend(M::gen_clobber_restore(
@@ -1347,64 +1235,45 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         M::get_number_of_spillslots_for_value(rc, ty)
     }
 
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg, ty: Option<Type>) -> Self::I {
-        let ty = ty_from_ty_hint_or_reg_class::<M>(from_reg.to_reg(), ty);
-        self.store_spillslot(to_slot, ty, ValueRegs::one(from_reg.to_reg()))
-            .into_iter()
-            .next()
-            .unwrap()
-    }
-
-    fn gen_reload(
-        &self,
-        to_reg: Writable<RealReg>,
-        from_slot: SpillSlot,
-        ty: Option<Type>,
-    ) -> Self::I {
-        let ty = ty_from_ty_hint_or_reg_class::<M>(to_reg.to_reg().to_reg(), ty);
-        self.load_spillslot(
-            from_slot,
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: PReg) -> Vec<Self::I> {
+        let ty = Self::I::type_for_rc(to_reg.class());
+        // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
+        let islot = slot.index() as i64;
+        let spill_off = islot * M::word_bytes() as i64;
+        let sp_off = self.stackslots_size as i64 + spill_off;
+        trace!("store_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
+        vec![cM::gen_store_stack(
+            StackAMode::NominalSPOffset(sp_off, ty),
+            Reg::preg_use(from_reg),
             ty,
-            writable_value_regs(ValueRegs::one(to_reg.to_reg().to_reg())),
+        )]
+    }
+
+    fn gen_reload(&self, to_reg: PReg, from_slot: SpillSlot) -> Vec<Self::I> {
+        let ty = Self::I::type_for_rc(to_reg.class());
+        // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
+        let islot = slot.index() as i64;
+        let spill_off = islot * M::word_bytes() as i64;
+        let sp_off = self.stackslots_size as i64 + spill_off;
+        trace!("load_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
+        vec![M::gen_load_stack(
+            StackAMode::NominalSPOffset(sp_off, ty),
+            Writable::from_reg(Reg::preg_def(to_reg)),
+            ty,
+        )]
+    }
+
+    fn gen_stack_move(&self, to_slot: SpillSlot, from_slot: SpillSlot, ty: Type) -> Vec<Self::I> {
+        let to_spill_off = (to_slot.index() as i64) * (M::word_bytes() as i64);
+        let to_sp_off = self.stackslots_size as i64 + to_spill_off;
+        let from_spill_off = (to_slot.index() as i64) * (M::word_bytes() as i64);
+        let from_sp_off = self.stackslots_size as i64 + from_spill_off;
+        M::gen_stack_move(
+            StackAMode::NominalSPOffset(to_sp_off, ty),
+            StaackAMode::NominalSPOffset(from_sp_off, ty),
+            ty,
         )
-        .into_iter()
-        .next()
-        .unwrap()
     }
-}
-
-fn abisig_to_uses_and_defs<M: ABIMachineSpec>(sig: &ABISig) -> (Vec<Reg>, Vec<Writable<Reg>>) {
-    // Compute uses: all arg regs.
-    let mut uses = Vec::new();
-    for arg in &sig.args {
-        if let &ABIArg::Slots { ref slots, .. } = arg {
-            for slot in slots {
-                match slot {
-                    &ABIArgSlot::Reg { reg, .. } => {
-                        uses.push(reg.to_reg());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // Compute defs: all retval regs, and all caller-save (clobbered) regs.
-    let mut defs = M::get_regs_clobbered_by_call(sig.call_conv);
-    for ret in &sig.rets {
-        if let &ABIArg::Slots { ref slots, .. } = ret {
-            for slot in slots {
-                match slot {
-                    &ABIArgSlot::Reg { reg, .. } => {
-                        defs.push(Writable::from_reg(reg.to_reg()));
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    (uses, defs)
 }
 
 /// ABI object for a callsite.
@@ -1413,10 +1282,6 @@ pub struct ABICallerImpl<M: ABIMachineSpec> {
     ir_sig: ir::Signature,
     /// The called function's signature.
     sig: ABISig,
-    /// All uses for the callsite, i.e., function args.
-    uses: Vec<Reg>,
-    /// All defs for the callsite, i.e., return values and caller-saves.
-    defs: Vec<Writable<Reg>>,
     /// Call destination.
     dest: CallDest,
     /// Actual call opcode; used to distinguish various types of calls.
@@ -1425,6 +1290,10 @@ pub struct ABICallerImpl<M: ABIMachineSpec> {
     caller_conv: isa::CallConv,
     /// The settings controlling this compilation.
     flags: settings::Flags,
+    /// The argument vregs.
+    args: Vec<ValueRegs<VReg>>,
+    /// The return-value vregs.
+    rets: Vec<ValueRegs<VReg>>,
 
     _mach: PhantomData<M>,
 }
@@ -1435,7 +1304,7 @@ pub enum CallDest {
     /// Call to an ExtName (named function symbol).
     ExtName(ir::ExternalName, RelocDistance),
     /// Indirect call to a function pointer in a register.
-    Reg(Reg),
+    Reg(VReg),
 }
 
 impl<M: ABIMachineSpec> ABICallerImpl<M> {
@@ -1449,16 +1318,15 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
     ) -> CodegenResult<ABICallerImpl<M>> {
         let ir_sig = ensure_struct_return_ptr_is_returned(sig);
         let sig = ABISig::from_func_sig::<M>(&ir_sig, flags)?;
-        let (uses, defs) = abisig_to_uses_and_defs::<M>(&sig);
         Ok(ABICallerImpl {
             ir_sig,
             sig,
-            uses,
-            defs,
             dest: CallDest::ExtName(extname.clone(), dist),
             opcode: ir::Opcode::Call,
             caller_conv,
             flags: flags.clone(),
+            args: vec![],
+            rets: vec![],
             _mach: PhantomData,
         })
     }
@@ -1467,23 +1335,22 @@ impl<M: ABIMachineSpec> ABICallerImpl<M> {
     /// given signature.
     pub fn from_ptr(
         sig: &ir::Signature,
-        ptr: Reg,
+        ptr: VReg,
         opcode: ir::Opcode,
         caller_conv: isa::CallConv,
         flags: &settings::Flags,
     ) -> CodegenResult<ABICallerImpl<M>> {
         let ir_sig = ensure_struct_return_ptr_is_returned(sig);
         let sig = ABISig::from_func_sig::<M>(&ir_sig, flags)?;
-        let (uses, defs) = abisig_to_uses_and_defs::<M>(&sig);
         Ok(ABICallerImpl {
             ir_sig,
             sig,
-            uses,
-            defs,
             dest: CallDest::Reg(ptr),
             opcode,
             caller_conv,
             flags: flags.clone(),
+            args: vec![],
+            rets: vec![],
             _mach: PhantomData,
         })
     }
@@ -1519,191 +1386,134 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         }
     }
 
-    fn emit_stack_pre_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C) {
-        let off = self.sig.stack_arg_space + self.sig.stack_ret_space;
-        adjust_stack_and_nominal_sp::<M, C>(ctx, off as i32, /* is_sub = */ true)
+    fn add_argument(&mut self, regs: ValueRegs<VReg>) {
+        self.args.push(regs);
     }
 
-    fn emit_stack_post_adjust<C: LowerCtx<I = Self::I>>(&self, ctx: &mut C) {
-        let off = self.sig.stack_arg_space + self.sig.stack_ret_space;
-        adjust_stack_and_nominal_sp::<M, C>(ctx, off as i32, /* is_sub = */ false)
+    fn add_retval(&mut self, regs: ValueRegs<VReg>) {
+        self.rets.push(regs);
     }
 
-    fn emit_copy_regs_to_arg<C: LowerCtx<I = Self::I>>(
-        &self,
-        ctx: &mut C,
-        idx: usize,
-        from_regs: ValueRegs<Reg>,
-    ) {
-        let word_rc = M::word_reg_class();
-        let word_bits = M::word_bits() as usize;
-        match &self.sig.args[idx] {
-            &ABIArg::Slots { ref slots, .. } => {
-                assert_eq!(from_regs.len(), slots.len());
-                for (slot, from_reg) in slots.iter().zip(from_regs.regs().iter()) {
-                    match slot {
-                        &ABIArgSlot::Reg {
-                            reg, ty, extension, ..
-                        } => {
-                            let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                            if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                                assert_eq!(word_rc, reg.get_class());
-                                let signed = match ext {
-                                    ir::ArgumentExtension::Uext => false,
-                                    ir::ArgumentExtension::Sext => true,
-                                    _ => unreachable!(),
-                                };
-                                ctx.emit(M::gen_extend(
-                                    Writable::from_reg(reg.to_reg()),
-                                    *from_reg,
-                                    signed,
-                                    ty_bits(ty) as u8,
-                                    word_bits as u8,
-                                ));
-                            } else {
-                                ctx.emit(M::gen_move(
-                                    Writable::from_reg(reg.to_reg()),
-                                    *from_reg,
+    fn clobbers(&self) -> &'static [PReg] {
+        M::get_clobbers(self.sig.call_conv)
+    }
+
+    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) {
+        // Adjust the stack downward to allocate any needed arg and return-value space.
+        let stack_size = self.sig.stack_arg_space + self.sig.stack_ret_space;
+        adjust_stack_and_nominal_sp::<M, C>(ctx, stack_size as i32, /* is_sub = */ true);
+
+        // Create the ret-area pointer if needed, and add to args.
+        if let Some(i) = self.sig.stack_ret_arg {
+            let rd = ctx.alloc_tmp(word_type).only_reg().unwrap().vreg();
+            let ret_area_base = self.sig.stack_arg_space;
+            ctx.emit(M::gen_get_stack_addr(
+                StackAMode::SPOffset(ret_area_base, I8),
+                Reg::reg_def(rd),
+                I8,
+            ));
+            self.args.insert(i, ValueRegs::one(rd));
+        }
+
+        // Extend any values that need to be extended.
+        let mut exts = vec![];
+        do_value_extensions(
+            self.sig.call_conv,
+            &self.sig.args[..],
+            &mut self.args[..],
+            ctx,
+            &mut exts,
+        );
+        for inst in exts {
+            ctx.emit(inst);
+        }
+
+        // memcpy any structargs that need to be memcpy'd, and store
+        // any args that need to be stored to the stack.
+        let mut operands = vec![];
+        assert_eq!(self.args.len(), self.sig.args.len());
+        for (arg, vregs) in self.sig.args.iter().zip(self.args.iter()) {
+            match arg {
+                &ABIArg::Slots { ref slots, .. } => {
+                    assert_eq!(vregs.len(), slots.len());
+                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                        match slot {
+                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                                operands.push(Operand::reg_fixed_use(vreg, reg));
+                            }
+                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                                ctx.emit(M::gen_store_stack(
+                                    StackAMode::SPOffset(offset, ty),
+                                    Reg::reg_use(vreg),
                                     ty,
                                 ));
                             }
                         }
-                        &ABIArgSlot::Stack {
-                            offset,
-                            ty,
-                            extension,
-                            ..
-                        } => {
-                            let mut ty = ty;
-                            let ext = M::get_ext_mode(self.sig.call_conv, extension);
-                            if ext != ir::ArgumentExtension::None && ty_bits(ty) < word_bits {
-                                assert_eq!(word_rc, from_reg.get_class());
-                                let signed = match ext {
-                                    ir::ArgumentExtension::Uext => false,
-                                    ir::ArgumentExtension::Sext => true,
-                                    _ => unreachable!(),
-                                };
-                                // Extend in place in the source register. Our convention is to
-                                // treat high bits as undefined for values in registers, so this
-                                // is safe, even for an argument that is nominally read-only.
-                                ctx.emit(M::gen_extend(
-                                    Writable::from_reg(*from_reg),
-                                    *from_reg,
-                                    signed,
-                                    ty_bits(ty) as u8,
-                                    word_bits as u8,
-                                ));
-                                // Store the extended version.
-                                ty = M::word_type();
+                    }
+                }
+                &ABIArg::StructArg { offset, size, .. } => {
+                    let src_ptr = vregs.only_reg().unwrap();
+                    let dst_ptr = ctx
+                        .alloc_tmp(M::word_type())
+                        .only_reg()
+                        .unwrap()
+                        .to_reg()
+                        .vreg();
+                    ctx.emit(M::gen_get_stack_addr(
+                        StackAMode::SPOffset(offset, I8),
+                        Reg::reg_def(dst_ptr),
+                        I8,
+                    ));
+                    // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
+                    // N.B.: because we process StructArg params *first*, this is
+                    // safe w.r.t. clobbers: we have not yet filled in any other
+                    // arg regs.
+                    let memcpy_call_conv =
+                        isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
+                    for insn in M::gen_memcpy(
+                        memcpy_call_conv,
+                        Reg::reg_use(dst_ptr),
+                        Reg::reg_use(src_ptr),
+                        size as usize,
+                    )
+                    .into_iter()
+                    {
+                        ctx.emit(insn);
+                    }
+                }
+            }
+        }
+
+        // Add `Operand`s for retval regs.
+        for (ret, vregs) in self.sig.rets.iter().zip(self.rets.iter()) {
+            match ret {
+                &ABIArg::Slots { ref slots, .. } => {
+                    assert_eq!(slots.len(), vregs.len());
+                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                        match slot {
+                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                                operands.push(Operand::reg_fixed_def(vreg, reg));
                             }
-                            ctx.emit(M::gen_store_stack(
-                                StackAMode::SPOffset(offset, ty),
-                                *from_reg,
-                                ty,
-                            ));
+                            _ => {}
                         }
                     }
                 }
-            }
-            &ABIArg::StructArg { offset, size, .. } => {
-                let src_ptr = from_regs.only_reg().unwrap();
-                let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
-                ctx.emit(M::gen_get_stack_addr(
-                    StackAMode::SPOffset(offset, I8),
-                    dst_ptr,
-                    I8,
-                ));
-                // Emit a memcpy from `src_ptr` to `dst_ptr` of `size` bytes.
-                // N.B.: because we process StructArg params *first*, this is
-                // safe w.r.t. clobbers: we have not yet filled in any other
-                // arg regs.
-                let memcpy_call_conv = isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
-                for insn in
-                    M::gen_memcpy(memcpy_call_conv, dst_ptr.to_reg(), src_ptr, size as usize)
-                        .into_iter()
-                {
-                    ctx.emit(insn);
-                }
+                _ => {}
             }
         }
-    }
 
-    fn get_copy_to_arg_order(&self) -> SmallVec<[usize; 8]> {
-        let mut ret = SmallVec::new();
-        for (i, arg) in self.sig.args.iter().enumerate() {
-            // Struct args.
-            if arg.is_struct_arg() {
-                ret.push(i);
-            }
-        }
-        for (i, arg) in self.sig.args.iter().enumerate() {
-            // Non-struct args. Skip an appended return-area arg for multivalue
-            // returns, if any.
-            if !arg.is_struct_arg() && i < self.ir_sig.params.len() {
-                ret.push(i);
-            }
-        }
-        ret
-    }
-
-    fn emit_copy_retval_to_regs<C: LowerCtx<I = Self::I>>(
-        &self,
-        ctx: &mut C,
-        idx: usize,
-        into_regs: ValueRegs<Writable<Reg>>,
-    ) {
-        match &self.sig.rets[idx] {
-            &ABIArg::Slots { ref slots, .. } => {
-                assert_eq!(into_regs.len(), slots.len());
-                for (slot, into_reg) in slots.iter().zip(into_regs.regs().iter()) {
-                    match slot {
-                        // Extension mode doesn't matter because we're copying out, not in,
-                        // and we ignore high bits in our own registers by convention.
-                        &ABIArgSlot::Reg { reg, ty, .. } => {
-                            ctx.emit(M::gen_move(*into_reg, reg.to_reg(), ty));
-                        }
-                        &ABIArgSlot::Stack { offset, ty, .. } => {
-                            let ret_area_base = self.sig.stack_arg_space;
-                            ctx.emit(M::gen_load_stack(
-                                StackAMode::SPOffset(offset + ret_area_base, ty),
-                                *into_reg,
-                                ty,
-                            ));
-                        }
-                    }
-                }
-            }
-            &ABIArg::StructArg { .. } => {
-                panic!("StructArg not supported in return position");
-            }
-        }
-    }
-
-    fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) {
-        let (uses, defs) = (
-            mem::replace(&mut self.uses, Default::default()),
-            mem::replace(&mut self.defs, Default::default()),
-        );
+        // Generate the call itself, adding constraint operands.
         let word_type = M::word_type();
-        if let Some(i) = self.sig.stack_ret_arg {
-            let rd = ctx.alloc_tmp(word_type).only_reg().unwrap();
-            let ret_area_base = self.sig.stack_arg_space;
-            ctx.emit(M::gen_get_stack_addr(
-                StackAMode::SPOffset(ret_area_base, I8),
-                rd,
-                I8,
-            ));
-            self.emit_copy_regs_to_arg(ctx, i, ValueRegs::one(rd.to_reg()));
-        }
         let tmp = ctx.alloc_tmp(word_type).only_reg().unwrap();
+        let clobbers = M::get_clobbers(self.sig.call_conv);
         for (is_safepoint, inst) in M::gen_call(
             &self.dest,
-            uses,
-            defs,
             self.opcode,
             tmp,
             self.sig.call_conv,
             self.caller_conv,
+            operands,
+            clobbers,
         )
         .into_iter()
         {
@@ -1712,5 +1522,30 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
                 InstIsSafepoint::No => ctx.emit(inst),
             }
         }
+
+        // Load any stack-passed return values from the stack return area.
+        for (ret, vregs) in self.sig.rets.iter().zip(self.rets.iter()) {
+            match ret {
+                &ABIArg::Slots { ref slots, .. } => {
+                    assert_eq!(slots.len(), vregs.len());
+                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                        match slot {
+                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                                let ret_area_base = self.sig.stack_arg_space;
+                                ctx.emit(M::gen_load_stack(
+                                    StackAMode::SPOffset(offset + ret_area_base, ty),
+                                    Reg::reg_def(vreg),
+                                    ty,
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Free the stack space allocated abmove.
+        adjust_stack_and_nominal_sp::<M, C>(ctx, stack_size as i32, /* is_sub = */ false);
     }
 }

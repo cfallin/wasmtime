@@ -445,19 +445,22 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 entry_bb,
                 self.f.dfg.block_params(entry_bb)
             );
-            let arg_regs = self
+            // Collect arg vregs.
+            let arg_regs: Vec<Writable<VReg>> = self
                 .f
                 .dfg
                 .block_params(entry_bb)
                 .iter()
                 .map(|param| writable_value_regs(self.value_regs[*param]))
-                .collect::<Vec<_>>();
-            let arg_inst = self.vcode.abi().gen_args(&arg_regs[..]);
-            self.emit(arg_inst);
+                .collect();
+            // Generate whatever sequence is necessary to
+            for inst in self.vcode.abi().gen_arg_seq(arg_regs) {
+                self.emit(inst);
+            }
         }
     }
 
-    fn gen_epilogue(&mut self, inst: Inst, is_fallthrough: bool) {
+    fn gen_epilogue(&mut self, inst: Inst) {
         // Hack: to keep `vmctx` alive, if it exists, we emit a value label here
         // for it if debug info is requested. This ensures that it exists either
         // in a register or spillslot throughout the entire function body, and
@@ -473,9 +476,15 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
             retvals.push(regs);
         }
 
-        // Call ABI impl to emit a return pseudoinst. This is
-        // converted during post-regalloc updates to a true epilogue.
-        let ret = self.vcode.abi().gen_ret(retvals, is_fallthrough);
+        // Call ABI impl to emit a return-value sequence; this copies
+        // values and/or adds constraint pseudoinsts as needed.
+        for inst in self.vcode.abi().gen_ret_seq(retvals) {
+            self.emit(inst);
+        }
+
+        // Add a return instruction; this is converted to a true
+        // epilogue post-regalloc.
+        let ret = I::gen_ret();
         self.emit(ret);
     }
 
@@ -564,13 +573,12 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
             }
             if data.opcode().is_return() {
                 // Return: handle specially, using ABI-appropriate sequence.
-                let is_fallthrough = if data.opcode() == Opcode::Return {
+                let _is_fallthrough = if data.opcode() == Opcode::Return {
                     false
                 } else {
-                    debug_assert!(data.opcode() == Opcode::FallthroughReturn);
-                    true
+                    panic!("FallthroughReturn not yet implemented with new-regalloc integration");
                 };
-                self.gen_epilogue(inst, is_fallthrough);
+                self.gen_epilogue(inst);
             }
 
             let loc = self.srcloc(inst);
@@ -921,7 +929,6 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         NonRegInput { inst, constant }
     }
 
-    
     fn abi(&mut self) -> &mut dyn ABICallee<I = I> {
         self.vcode.abi()
     }

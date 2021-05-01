@@ -71,6 +71,7 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::hash::Hasher;
 use cranelift_entity::PrimaryMap;
+use regalloc2::Operand;
 use smallvec::{smallvec, SmallVec};
 use std::string::String;
 use target_lexicon::Triple;
@@ -106,7 +107,7 @@ pub use regs::*;
 
 /// A machine instruction.
 pub trait MachInst: Clone + Debug {
-    /// Return the registers referenced by this machine instruction. 
+    /// Return the registers referenced by this machine instruction.
     ///
     /// TODO vcode refactor: store regs out-of-band, centrally in
     /// VCode; store only per-inst indices (u8) inside `Insts`; pass
@@ -133,12 +134,7 @@ pub trait MachInst: Clone + Debug {
     /// the successor blocks are given.
     fn blockparam_offset(&self) -> usize;
 
-    /// Returns true if the instruction is an args pseudoinst (as
-    /// returned by `ABICallee::emit_args()`).
-    fn is_args(&self) -> bool;
-
-    /// Returns true if the instruction is a return pseudoinst (as
-    /// returned by `ABICallee::emit_ret()`).
+    /// Returns true if the instruction is a return pseudoinst.
     fn is_ret(&self) -> bool;
 
     /// Returns true if the instruction is a call.
@@ -159,6 +155,12 @@ pub trait MachInst: Clone + Debug {
 
     /// Generate a move.
     fn gen_move(to_reg: Writable<Reg>, from_reg: Reg, ty: Type) -> Self;
+
+    /// Generate a register-constraint pseudoinst. This pseudoinst can
+    /// be used to constrain certain vregs to certain locations (e.g.,
+    /// PRegs) at certain locations (e.g. function entry or exit), but
+    /// should otherwise generate no machine code.
+    fn gen_reg_constraint_inst(args: Vec<Operand>) -> Self;
 
     /// Generate a constant into a reg.
     fn gen_constant<F: FnMut(Type) -> Writable<Reg>>(

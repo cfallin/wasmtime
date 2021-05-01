@@ -115,13 +115,23 @@ impl Reg {
     }
 
     /// Create a `Reg` that wraps an allocated `PReg`.
-    pub fn preg(preg: PReg) -> Self {
-        Reg::alloc(Allocation::reg(preg))
+    pub fn preg_use(preg: PReg) -> Self {
+        Reg::alloc(Allocation::reg(preg), OperandKind::Use)
+    }
+
+    /// Create a `Reg` that wraps an allocated `PReg`.
+    pub fn preg_def(preg: PReg) -> Self {
+        Reg::alloc(Allocation::reg(preg), OperandKind::Def)
     }
 
     /// Create a `Reg` that wraps an allocated `SpillSlot`.
-    pub fn spillslot(slot: SpillSlot) -> Self {
-        Reg::alloc(Allocation::stack(slot))
+    pub fn spillslot_use(slot: SpillSlot) -> Self {
+        Reg::alloc(Allocation::stack(slot), OperandKind::Use)
+    }
+
+    /// Create a `Reg` that wraps an allocated `SpillSlot`.
+    pub fn spillslot_def(slot: SpillSlot) -> Self {
+        Reg::alloc(Allocation::stack(slot), OperandKind::Def)
     }
 
     /// Is this an Operand (an unallocated register-mention specification)?

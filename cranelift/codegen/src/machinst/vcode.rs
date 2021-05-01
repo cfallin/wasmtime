@@ -439,39 +439,30 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         &self.block_params[start..end]
     }
 
-    fn insn_for_edit(&self, edit: &regalloc2::Edit) -> Option<I> {
+    fn insns_for_edit(&self, edit: &regalloc2::Edit) -> Vec<I> {
         match edit {
             regalloc2::Edit::Move { from, to } => {
                 let class = from.class();
                 let ty = I::type_for_rc(class);
                 if from.is_reg() && to.is_reg() {
-                    Some(I::gen_move(
-                        Writable::from_reg(to.as_reg().unwrap()),
-                        from.as_reg().unwrap(),
+                    vec![I::gen_move(
+                        Writable::from_reg(Reg::preg_def(to.as_reg().unwrap())),
+                        Reg::preg_use(from.as_reg().unwrap()),
                         ty,
-                    ))
+                    )]
                 } else if from.is_reg() && to.is_stack() {
-                    Some(self.abi.gen_spill(
-                        to.as_stack().unwrap(),
-                        from.as_reg().unwrap(),
-                        Some(ty),
-                    ))
+                    self.abi
+                        .gen_spill(to.as_stack().unwrap(), from.as_reg().unwrap(), Some(ty))
                 } else if from.is_stack() && to.is_reg() {
-                    Some(self.abi.gen_reload(
-                        Writable::from_reg(to.as_reg().unwrap()),
-                        from.as_stack().unwrap(),
-                        Some(ty),
-                    ))
+                    self.abi
+                        .gen_reload(to.as_reg().unwrap(), from.as_stack().unwrap(), Some(ty))
                 } else {
                     assert!(from.is_stack() && to.is_stack());
-                    Some(self.abi.gen_stack_move(
-                        to.as_stack().unwrap(),
-                        from.as_stack().unwrap(),
-                        ty,
-                    ))
+                    self.abi
+                        .gen_stack_move(to.as_stack().unwrap(), from.as_stack().unwrap(), ty)
                 }
             }
-            regalloc2::Edit::BlockParams { .. } => None,
+            regalloc2::Edit::BlockParams { .. } => vec![],
         }
     }
 
@@ -509,7 +500,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
             let (orig_start, orig_end) = self.block_ranges[block];
             // Make sure we stream through instructions in
             // order. Lowering should have ensured this.
-            assert_eq!(orig_start, last_last);
+            assert_eq!(orig_start, last_inst);
             last_inst = orig_end;
 
             let block_start = final_insns.len() as InsnIndex;
@@ -519,11 +510,11 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let before_pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i));
                 assert!(edit_idx >= out.edits.len() || out.edits[edit_idx].0 >= before_pos);
                 while edit_idx < out.edits.len() && out.edits[edit_idx].0 == before_pos {
-                    if let Some(edit_insn) = self.insn_for_edit(&out.edits[edit_idx]) {
+                    for edit_insn in self.insn_for_edit(&out.edits[edit_idx]) {
                         final_insns.push(edit_insn);
                         final_srclocs.push(SourceLoc::default());
-                        edit_idx += 1;
                     }
+                    edit_idx += 1;
                 }
 
                 // Take the instruction; we won't be using `insns` again.

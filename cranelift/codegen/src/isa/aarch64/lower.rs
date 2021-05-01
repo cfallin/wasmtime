@@ -20,9 +20,9 @@ use crate::isa::aarch64::AArch64Backend;
 
 use super::lower_inst;
 
+use super::{Reg, Writable};
 use crate::data_value::DataValue;
 use log::{debug, trace};
-use super::{Reg, Writable};
 use smallvec::SmallVec;
 
 //============================================================================
