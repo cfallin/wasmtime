@@ -1,6 +1,6 @@
 //! Represents information relating to function unwinding.
 
-use regalloc::RealReg;
+use regalloc2::PReg;
 
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
@@ -237,7 +237,7 @@ pub enum UnwindInst {
         /// stack location.
         clobber_offset: u32,
         /// The saved register.
-        reg: RealReg,
+        reg: PReg,
     },
     /// Defines if the aarch64-specific pointer authentication available for ARM v8.3+ devices
     /// is enabled for certain pointers or not.

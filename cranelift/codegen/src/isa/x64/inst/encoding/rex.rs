@@ -8,6 +8,7 @@
 //! operand ("G" in Intelese), the order is always G first, then E. The term "enc" in the following
 //! means "hardware register encoding number".
 
+use crate::machinst::{Reg, RegClass};
 use crate::{
     ir::TrapCode,
     isa::x64::inst::{
@@ -16,7 +17,6 @@ use crate::{
     },
     machinst::{MachBuffer, MachInstEmitInfo},
 };
-use regalloc::{Reg, RegClass};
 
 pub(crate) fn low8_will_sign_extend_to_64(x: u32) -> bool {
     let xs = (x as i32) as i64;

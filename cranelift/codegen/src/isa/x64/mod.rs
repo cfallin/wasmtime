@@ -4,8 +4,9 @@ use self::inst::EmitInfo;
 
 use super::TargetIsa;
 use crate::ir::{condcodes::IntCC, Function};
-use crate::isa::x64::{inst::regs::create_reg_universe_systemv, settings as x64_settings};
+use crate::isa::x64::{inst::regs::create_machine_env, settings as x64_settings};
 use crate::isa::Builder as IsaBuilder;
+use crate::isa::CallConv;
 use crate::machinst::{compile, MachBackend, MachCompileResult, Reg, TargetIsaAdapter, VCode};
 use crate::result::CodegenResult;
 use crate::settings::{self as shared_settings, Flags};
@@ -33,7 +34,8 @@ pub(crate) struct X64Backend {
 impl X64Backend {
     /// Create a new X64 backend with the given (shared) flags.
     fn new_with_flags(triple: Triple, flags: Flags, x64_flags: x64_settings::Flags) -> Self {
-        let machine_env = create_reg_universe_systemv(&flags);
+        // TODO: build an env per calling convention.
+        let machine_env = create_machine_env(&flags, CallConv::SystemV);
         Self {
             triple,
             flags,
@@ -66,7 +68,7 @@ impl MachBackend for X64Backend {
         let stackslot_offsets = vcode.stackslot_offsets().clone();
 
         let disasm = if want_disasm {
-            Some(vcode.show_rru(Some(&create_reg_universe_systemv(flags))))
+            Some(format!("{:?}", vcode))
         } else {
             None
         };

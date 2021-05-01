@@ -198,9 +198,6 @@ pub trait MachInst: Clone + Debug {
     /// the instruction must have a nonzero size if preferred_size is nonzero.
     fn gen_nop(preferred_size: usize) -> Self;
 
-    /// Get the register-allocator machine environment for this backend.
-    fn reg_env(flags: &Flags) -> MachineEnv;
-
     /// Align a basic block offset (from start of function).  By default, no
     /// alignment occurs.
     fn align_basic_block(offset: CodeOffset) -> CodeOffset {
@@ -326,6 +323,9 @@ pub trait MachInstEmit: MachInst {
     fn emit(&self, code: &mut MachBuffer<Self>, info: &Self::Info, state: &mut Self::State);
     /// Pretty-print the instruction.
     fn pretty_print(&self, state: &mut Self::State) -> String;
+    /// Get a register name, possibly in a form specific to an operand
+    /// size (in bytes).
+    fn reg_name(preg: PReg, size: u8) -> &'static str;
 }
 
 /// Constant information used to emit an instruction.

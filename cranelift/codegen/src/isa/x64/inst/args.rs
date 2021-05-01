@@ -1,15 +1,13 @@
 //! Instruction operand sub-components (aka "parts"): definitions and printing.
 
-use super::regs::{self, show_ireg_sized};
+use super::regs;
 use super::EmitState;
 use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::{MemFlags, Type};
 use crate::isa::x64::inst::Inst;
 use crate::machinst::*;
-use regalloc::{
-    PrettyPrint, PrettyPrintSized, RealRegUniverse, Reg, RegClass, RegUsageCollector,
-    RegUsageMapper, Writable,
-};
+use crate::machinst::{Reg, Writable};
+use regalloc2::RegClass;
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::string::String;
@@ -119,11 +117,11 @@ impl Amode {
     }
 }
 
-impl PrettyPrint for Amode {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
+impl std::fmt::Debug for Amode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Amode::ImmReg { simm32, base, .. } => {
-                format!("{}({})", *simm32 as i32, base.show_rru(mb_rru))
+                write!(f, "{}({:?})", *simm32 as i32, base)
             }
             Amode::ImmRegRegShift {
                 simm32,
@@ -131,14 +129,15 @@ impl PrettyPrint for Amode {
                 index,
                 shift,
                 ..
-            } => format!(
-                "{}({},{},{})",
+            } => write!(
+                f,
+                "{}({},{:?},{:?})",
                 *simm32 as i32,
-                base.show_rru(mb_rru),
-                index.show_rru(mb_rru),
+                base,
+                index,
                 1 << shift
             ),
-            Amode::RipRelative { ref target } => format!("label{}(%rip)", target.get()),
+            Amode::RipRelative { ref target } => write!(f, "label{}(%rip)", target.get()),
         }
     }
 }
@@ -210,14 +209,14 @@ impl Into<SyntheticAmode> for Amode {
     }
 }
 
-impl PrettyPrint for SyntheticAmode {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
+impl std::fmt::Debug for SyntheticAmode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            SyntheticAmode::Real(addr) => addr.show_rru(mb_rru),
+            SyntheticAmode::Real(addr) => write!(f, "{:?}", addr),
             SyntheticAmode::NominalSPOffset { simm32 } => {
-                format!("rsp({} + virtual offset)", *simm32 as i32)
+                write!(f, "rsp({} + virtual offset)", *simm32 as i32)
             }
-            SyntheticAmode::ConstantOffset(c) => format!("const({:?})", c),
+            SyntheticAmode::ConstantOffset(c) => write!(f, "const({:?})", c),
         }
     }
 }
@@ -269,18 +268,12 @@ impl RegMemImm {
     }
 }
 
-impl PrettyPrint for RegMemImm {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
-        self.show_rru_sized(mb_rru, 8)
-    }
-}
-
-impl PrettyPrintSized for RegMemImm {
-    fn show_rru_sized(&self, mb_rru: Option<&RealRegUniverse>, size: u8) -> String {
+impl std::fmt::Debug for RegMemImm {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Reg { reg } => show_ireg_sized(*reg, mb_rru, size),
-            Self::Mem { addr } => addr.show_rru(mb_rru),
-            Self::Imm { simm32 } => format!("${}", *simm32 as i32),
+            Self::Reg { reg } => write!(f, "{}", Inst::reg_name(*reg, size)),
+            Self::Mem { addr } => write!(f, "{:?}", addr),
+            Self::Imm { simm32 } => write!(f, "${}", *simm32 as i32),
         }
     }
 }
@@ -328,17 +321,11 @@ impl From<Writable<Reg>> for RegMem {
     }
 }
 
-impl PrettyPrint for RegMem {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
-        self.show_rru_sized(mb_rru, 8)
-    }
-}
-
-impl PrettyPrintSized for RegMem {
-    fn show_rru_sized(&self, mb_rru: Option<&RealRegUniverse>, size: u8) -> String {
+impl std::fmt::Debug for RegMem {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            RegMem::Reg { reg } => show_ireg_sized(*reg, mb_rru, size),
-            RegMem::Mem { addr, .. } => addr.show_rru(mb_rru),
+            RegMem::Reg { reg } => write!(f, "{:?}", reg),
+            RegMem::Mem { addr, .. } => write!(f, "{:?}", addr),
         }
     }
 }

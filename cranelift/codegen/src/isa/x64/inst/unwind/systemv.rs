@@ -1,8 +1,8 @@
 //! Unwind information for System V ABI (x86-64).
 
 use crate::isa::unwind::systemv::RegisterMappingError;
+use crate::machinst::{Reg, RegClass};
 use gimli::{write::CommonInformationEntry, Encoding, Format, Register, X86_64};
-use regalloc::{Reg, RegClass};
 
 /// Creates a new x86-64 common information entry (CIE).
 pub fn create_cie() -> CommonInformationEntry {

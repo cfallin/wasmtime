@@ -1,6 +1,6 @@
 use crate::ir::{Function, SourceLoc, Value, ValueLabel, ValueLabelAssignments, ValueLoc};
 use crate::isa::TargetIsa;
-use crate::machinst::MachCompileResult;
+use crate::machinst::{MachCompileResult, Reg};
 use crate::regalloc::{Context, RegDiversions};
 use crate::HashMap;
 use alloc::collections::BTreeMap;
@@ -10,7 +10,6 @@ use core::convert::From;
 use core::iter::Iterator;
 use core::ops::Bound::*;
 use core::ops::Deref;
-use regalloc2::Reg;
 
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};

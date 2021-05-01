@@ -10,10 +10,7 @@ use crate::machinst::*;
 use crate::{settings, settings::Flags, CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use regalloc::{
-    PrettyPrint, PrettyPrintSized, RealRegUniverse, Reg, RegClass, RegUsageCollector,
-    RegUsageMapper, SpillSlot, VirtualReg, Writable,
-};
+use regalloc2::{Operand, PReg, SpillSlot, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::string::{String, ToString};
@@ -27,7 +24,6 @@ pub mod regs;
 pub mod unwind;
 
 use args::*;
-use regs::{create_reg_universe_systemv, show_ireg_sized};
 
 //=============================================================================
 // Instructions (top level): definition
@@ -1262,39 +1258,33 @@ impl Inst {
 //=============================================================================
 // Instructions: printing
 
-impl PrettyPrint for Inst {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
-        fn ljustify(s: String) -> String {
-            let w = 7;
-            if s.len() >= w {
-                s
-            } else {
-                let need = usize::min(w, w - s.len());
-                s + &format!("{nil: <width$}", nil = "", width = need)
-            }
-        }
+fn show_reg(reg: Reg, size: u8) -> String {
+    if let Some(preg) = reg.as_preg() {
+        Inst::reg_name(preg, size).to_string()
+    } else if let Some(slot) = reg.as_spillslot() {
+        format!("{}", slot)
+    } else if let Some(op) = reg.as_operand() {
+        format!("{}", op)
+    }
+}
 
-        fn ljustify2(s1: String, s2: String) -> String {
-            ljustify(s1 + &s2)
-        }
-
-        fn suffix_lq(size: OperandSize) -> String {
+impl fmt::Debug for Inst {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fn suffix_lq(size: OperandSize) -> &'static str {
             match size {
                 OperandSize::Size32 => "l",
                 OperandSize::Size64 => "q",
                 _ => unreachable!(),
             }
-            .to_string()
         }
 
-        fn suffix_lqb(size: OperandSize, is_8: bool) -> String {
+        fn suffix_lqb(size: OperandSize, is_8: bool) -> &'static str {
             match (size, is_8) {
                 (_, true) => "b",
                 (OperandSize::Size32, false) => "l",
                 (OperandSize::Size64, false) => "q",
                 _ => unreachable!(),
             }
-            .to_string()
         }
 
         fn size_lqb(size: OperandSize, is_8: bool) -> u8 {
@@ -1304,42 +1294,48 @@ impl PrettyPrint for Inst {
             size.to_bytes()
         }
 
-        fn suffix_bwlq(size: OperandSize) -> String {
+        fn suffix_bwlq(size: OperandSize) -> &'static str {
             match size {
-                OperandSize::Size8 => "b".to_string(),
-                OperandSize::Size16 => "w".to_string(),
-                OperandSize::Size32 => "l".to_string(),
-                OperandSize::Size64 => "q".to_string(),
+                OperandSize::Size8 => "b",
+                OperandSize::Size16 => "w",
+                OperandSize::Size32 => "l",
+                OperandSize::Size64 => "q",
             }
         }
 
         match self {
-            Inst::Nop { len } => format!("{} len={}", ljustify("nop".to_string()), len),
+            Inst::Nop { len } => write!(f, "nop len={}", len),
 
-            Inst::AluRmiR { size, op, src, dst } => format!(
-                "{} {}, {}",
-                ljustify2(op.to_string(), suffix_lqb(*size, op.is_8bit())),
-                src.show_rru_sized(mb_rru, size_lqb(*size, op.is_8bit())),
-                show_ireg_sized(dst.to_reg(), mb_rru, size_lqb(*size, op.is_8bit())),
+            Inst::AluRmiR { size, op, src, dst } => write!(
+                f,
+                "{:?}{} {}, {}",
+                op,
+                suffix_lqb(*size, op.is_8bit()),
+                show_reg(*src, size_lqb(*size, op.is_8bit())),
+                show_reg(*dst, size_lqb(*size, op.is_8bit())),
             ),
 
-            Inst::UnaryRmR { src, dst, op, size } => format!(
-                "{} {}, {}",
-                ljustify2(op.to_string(), suffix_bwlq(*size)),
-                src.show_rru_sized(mb_rru, size.to_bytes()),
-                show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes()),
+            Inst::UnaryRmR { src, dst, op, size } => write!(
+                f,
+                "{:?}{} {}, {}",
+                op,
+                suffix_bwlq(*size),
+                show_reg(*src, size.to_bytes()),
+                show_reg(*dst, size.to_bytes()),
             ),
 
-            Inst::Not { size, src } => format!(
-                "{} {}",
-                ljustify2("not".to_string(), suffix_bwlq(*size)),
-                show_ireg_sized(src.to_reg(), mb_rru, size.to_bytes())
+            Inst::Not { size, src } => write!(
+                f,
+                "not{} {}",
+                suffix_bwlq(*size),
+                show_reg(*src, size.to_bytes()),
             ),
 
-            Inst::Neg { size, src } => format!(
-                "{} {}",
-                ljustify2("neg".to_string(), suffix_bwlq(*size)),
-                show_ireg_sized(src.to_reg(), mb_rru, size.to_bytes())
+            Inst::Neg { size, src } => write!(
+                f,
+                "neg{} {}",
+                suffix_bwlq(*size),
+                show_reg(*src, size.to_bytes()),
             ),
 
             Inst::Div {
@@ -1347,26 +1343,20 @@ impl PrettyPrint for Inst {
                 signed,
                 divisor,
                 ..
-            } => format!(
+            } => write!(
+                f,
                 "{} {}",
-                ljustify(if *signed {
-                    "idiv".to_string()
-                } else {
-                    "div".into()
-                }),
-                divisor.show_rru_sized(mb_rru, size.to_bytes())
+                if *signed { "idiv" } else { "div" },
+                show_reg(*divisor, size.to_bytes()),
             ),
 
             Inst::MulHi {
                 size, signed, rhs, ..
-            } => format!(
+            } => write!(
+                f,
                 "{} {}",
-                ljustify(if *signed {
-                    "imul".to_string()
-                } else {
-                    "mul".to_string()
-                }),
-                rhs.show_rru_sized(mb_rru, size.to_bytes())
+                if *signed { "imul" } else { "mul" },
+                show_reg(*rhs, size.to_bytes()),
             ),
 
             Inst::CheckedDivOrRemSeq {
@@ -1374,7 +1364,8 @@ impl PrettyPrint for Inst {
                 size,
                 divisor,
                 ..
-            } => format!(
+            } => write!(
+                f,
                 "{} $rax:$rdx, {}",
                 match kind {
                     DivOrRemKind::SignedDiv => "sdiv",
@@ -1382,55 +1373,52 @@ impl PrettyPrint for Inst {
                     DivOrRemKind::SignedRem => "srem",
                     DivOrRemKind::UnsignedRem => "urem",
                 },
-                show_ireg_sized(divisor.to_reg(), mb_rru, size.to_bytes()),
+                show_reg(*divisor, size.to_bytes()),
             ),
 
-            Inst::SignExtendData { size } => match size {
-                OperandSize::Size8 => "cbw",
-                OperandSize::Size16 => "cwd",
-                OperandSize::Size32 => "cdq",
-                OperandSize::Size64 => "cqo",
+            Inst::SignExtendData { size } => write!(
+                f,
+                "{}",
+                match size {
+                    OperandSize::Size8 => "cbw",
+                    OperandSize::Size16 => "cwd",
+                    OperandSize::Size32 => "cdq",
+                    OperandSize::Size64 => "cqo",
+                }
+            ),
+
+            Inst::XmmUnaryRmR { op, src, dst, .. } => write!(
+                f,
+                "{:?} {}, {}",
+                op,
+                show_reg(*src, op.src_size()),
+                show_reg(*dst, 0),
+            ),
+
+            Inst::XmmMovRM { op, src, dst, .. } => {
+                write!(f, "{:?} {}, {}", op, show_reg(*src, 0), show_reg(*dst, 0),)
             }
-            .into(),
 
-            Inst::XmmUnaryRmR { op, src, dst, .. } => format!(
-                "{} {}, {}",
-                ljustify(op.to_string()),
-                src.show_rru_sized(mb_rru, op.src_size()),
-                show_ireg_sized(dst.to_reg(), mb_rru, 8),
-            ),
-
-            Inst::XmmMovRM { op, src, dst, .. } => format!(
-                "{} {}, {}",
-                ljustify(op.to_string()),
-                show_ireg_sized(*src, mb_rru, 8),
-                dst.show_rru(mb_rru),
-            ),
-
-            Inst::XmmRmR { op, src, dst, .. } => format!(
-                "{} {}, {}",
-                ljustify(op.to_string()),
-                src.show_rru_sized(mb_rru, 8),
-                show_ireg_sized(dst.to_reg(), mb_rru, 8),
-            ),
+            Inst::XmmRmR { op, src, dst, .. } => {
+                write!(f, "{:?} {}, {}", op, show_reg(*src, 0), show_reg(*dst, 0),)
+            }
 
             Inst::XmmMinMaxSeq {
                 lhs,
                 rhs_dst,
                 is_min,
                 size,
-            } => format!(
-                "{} {}, {}",
-                ljustify2(
-                    if *is_min {
-                        "xmm min seq ".to_string()
-                    } else {
-                        "xmm max seq ".to_string()
-                    },
-                    format!("f{}", size.to_bits())
-                ),
-                show_ireg_sized(*lhs, mb_rru, 8),
-                show_ireg_sized(rhs_dst.to_reg(), mb_rru, 8),
+            } => write!(
+                f,
+                "{} f{} {}, {}",
+                if *is_min {
+                    "xmm min seq "
+                } else {
+                    "xmm max seq "
+                },
+                size,
+                show_reg(*lhs, 0),
+                show_reg(*rhs_dst, 0),
             ),
 
             Inst::XmmRmRImm {
@@ -1440,28 +1428,26 @@ impl PrettyPrint for Inst {
                 imm,
                 size,
                 ..
-            } => format!(
-                "{} ${}, {}, {}",
-                ljustify(format!(
-                    "{}{}",
-                    op.to_string(),
-                    if *size == OperandSize::Size64 {
-                        ".w"
-                    } else {
-                        ""
-                    }
-                )),
+            } => write!(
+                f,
+                "{:?}{} ${}, {}, {}",
+                op,
+                if *size == OperandSize::Size64 {
+                    ".w"
+                } else {
+                    ""
+                },
                 imm,
-                src.show_rru(mb_rru),
-                dst.show_rru(mb_rru),
+                show_reg(*src, 0),
+                show_reg(*dst, 0),
             ),
 
             Inst::XmmUninitializedValue { dst } => {
-                format!("{} {}", ljustify("uninit".into()), dst.show_rru(mb_rru),)
+                write!(f, "uninit {}", show_reg(*dst, 0))
             }
 
             Inst::XmmLoadConst { src, dst, .. } => {
-                format!("load_const {:?}, {}", src, dst.show_rru(mb_rru),)
+                write!(f, "load_const {:?}, {}", src, show_reg(*dst, 0))
             }
 
             Inst::XmmToGpr {
@@ -1471,11 +1457,12 @@ impl PrettyPrint for Inst {
                 dst_size,
             } => {
                 let dst_size = dst_size.to_bytes();
-                format!(
-                    "{} {}, {}",
-                    ljustify(op.to_string()),
-                    src.show_rru(mb_rru),
-                    show_ireg_sized(dst.to_reg(), mb_rru, dst_size),
+                write!(
+                    f,
+                    "{:?} {}, {}",
+                    op,
+                    show_reg(*src, 0),
+                    show_reg(*dst, dst_size),
                 )
             }
 
@@ -1484,34 +1471,30 @@ impl PrettyPrint for Inst {
                 src,
                 src_size,
                 dst,
-            } => format!(
-                "{} {}, {}",
-                ljustify(op.to_string()),
-                src.show_rru_sized(mb_rru, src_size.to_bytes()),
-                dst.show_rru(mb_rru)
+            } => write!(
+                f,
+                "{:?} {}, {}",
+                op,
+                show_reg(*src, src_size.to_bytes()),
+                show_reg(*dst, 0),
             ),
 
-            Inst::XmmCmpRmR { op, src, dst } => format!(
-                "{} {}, {}",
-                ljustify(op.to_string()),
-                src.show_rru_sized(mb_rru, 8),
-                show_ireg_sized(*dst, mb_rru, 8),
-            ),
+            Inst::XmmCmpRmR { op, src, dst } => {
+                write!(f, "{:?} {}, {}", op, show_reg(*src, 0), show_reg(*dst, 0),)
+            }
 
             Inst::CvtUint64ToFloatSeq {
                 src, dst, dst_size, ..
-            } => format!(
-                "{} {}, {}",
-                ljustify(format!(
-                    "u64_to_{}_seq",
-                    if *dst_size == OperandSize::Size64 {
-                        "f64"
-                    } else {
-                        "f32"
-                    }
-                )),
-                show_ireg_sized(src.to_reg(), mb_rru, 8),
-                dst.show_rru(mb_rru),
+            } => write!(
+                f,
+                "u64_to_{}_seq {}, {}",
+                if *dst_size == OperandSize::Size64 {
+                    "f64"
+                } else {
+                    "f32"
+                },
+                show_reg(*src, 0),
+                show_reg(*dst, 0),
             ),
 
             Inst::CvtFloatToSintSeq {
@@ -1520,15 +1503,13 @@ impl PrettyPrint for Inst {
                 src_size,
                 dst_size,
                 ..
-            } => format!(
-                "{} {}, {}",
-                ljustify(format!(
-                    "cvt_float{}_to_sint{}_seq",
-                    src_size.to_bits(),
-                    dst_size.to_bits()
-                )),
-                show_ireg_sized(src.to_reg(), mb_rru, 8),
-                show_ireg_sized(dst.to_reg(), mb_rru, dst_size.to_bytes()),
+            } => write!(
+                f,
+                "cvt_float{}_to_sint{}_seq {}, {}",
+                src_size.to_bits(),
+                dst_size.to_bits(),
+                show_reg(*src, 0),
+                show_reg(*dst, 0),
             ),
 
             Inst::CvtFloatToUintSeq {
@@ -1537,15 +1518,13 @@ impl PrettyPrint for Inst {
                 src_size,
                 dst_size,
                 ..
-            } => format!(
-                "{} {}, {}",
-                ljustify(format!(
-                    "cvt_float{}_to_uint{}_seq",
-                    src_size.to_bits(),
-                    dst_size.to_bits()
-                )),
-                show_ireg_sized(src.to_reg(), mb_rru, 8),
-                show_ireg_sized(dst.to_reg(), mb_rru, dst_size.to_bytes()),
+            } => write!(
+                f,
+                "cvt_float{}_to_uint{}_seq {}, {}",
+                src_size.to_bits(),
+                dst_size.to_bits(),
+                show_reg(src.to_reg(), 8),
+                show_reg(dst.to_reg(), dst_size.to_bytes()),
             ),
 
             Inst::Imm {
@@ -1554,77 +1533,74 @@ impl PrettyPrint for Inst {
                 dst,
             } => {
                 if *dst_size == OperandSize::Size64 {
-                    format!(
-                        "{} ${}, {}",
-                        ljustify("movabsq".to_string()),
+                    write!(
+                        f,
+                        "movabsq ${}, {}",
                         *simm64 as i64,
-                        show_ireg_sized(dst.to_reg(), mb_rru, 8)
+                        show_reg(dst.to_reg(), 8)
                     )
                 } else {
-                    format!(
-                        "{} ${}, {}",
-                        ljustify("movl".to_string()),
+                    write!(
+                        f,
+                        "movl ${}, {}",
                         (*simm64 as u32) as i32,
-                        show_ireg_sized(dst.to_reg(), mb_rru, 4)
+                        show_reg(dst.to_reg(), 4)
                     )
                 }
             }
 
-            Inst::MovRR { size, src, dst } => format!(
-                "{} {}, {}",
-                ljustify2("mov".to_string(), suffix_lq(*size)),
-                show_ireg_sized(*src, mb_rru, size.to_bytes()),
-                show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes())
+            Inst::MovRR { size, src, dst } => write!(
+                f,
+                "mov{} {}, {}",
+                suffix_lq(*size),
+                show_reg(*src, size.to_bytes()),
+                show_reg(dst.to_reg(), size.to_bytes())
             ),
 
             Inst::MovzxRmR {
                 ext_mode, src, dst, ..
             } => {
                 if *ext_mode == ExtMode::LQ {
-                    format!(
-                        "{} {}, {}",
-                        ljustify("movl".to_string()),
-                        src.show_rru_sized(mb_rru, ext_mode.src_size()),
-                        show_ireg_sized(dst.to_reg(), mb_rru, 4)
+                    write!(
+                        f,
+                        "movl {}, {}",
+                        show_reg(*src, ext_mode.src_size()),
+                        show_reg(*dst, 4),
                     )
                 } else {
-                    format!(
-                        "{} {}, {}",
-                        ljustify2("movz".to_string(), ext_mode.to_string()),
-                        src.show_rru_sized(mb_rru, ext_mode.src_size()),
-                        show_ireg_sized(dst.to_reg(), mb_rru, ext_mode.dst_size())
+                    write!(
+                        f,
+                        "movz {}, {}",
+                        show_reg(*src, ext_mode.src_size()),
+                        show_reg(*dst, ext_mode.dst_size()),
                     )
                 }
             }
 
-            Inst::Mov64MR { src, dst, .. } => format!(
-                "{} {}, {}",
-                ljustify("movq".to_string()),
-                src.show_rru(mb_rru),
-                dst.show_rru(mb_rru)
-            ),
+            Inst::Mov64MR { src, dst, .. } => {
+                write!(f, "movq {}, {}", show_reg(*src, 0), show_reg(*dst, 0),)
+            }
 
-            Inst::LoadEffectiveAddress { addr, dst } => format!(
-                "{} {}, {}",
-                ljustify("lea".to_string()),
-                addr.show_rru(mb_rru),
-                dst.show_rru(mb_rru)
-            ),
+            Inst::LoadEffectiveAddress { addr, dst } => {
+                write!(f, "lea {:?}, {}", addr, show_reg(*dst, 0),)
+            }
 
             Inst::MovsxRmR {
                 ext_mode, src, dst, ..
-            } => format!(
-                "{} {}, {}",
-                ljustify2("movs".to_string(), ext_mode.to_string()),
-                src.show_rru_sized(mb_rru, ext_mode.src_size()),
-                show_ireg_sized(dst.to_reg(), mb_rru, ext_mode.dst_size())
+            } => write!(
+                f,
+                "movs{:?} {}, {}",
+                ext_mode,
+                show_reg(*src, ext_mode.src_size()),
+                show_reg(*dst, ext_mode.dst_size())
             ),
 
-            Inst::MovRM { size, src, dst, .. } => format!(
-                "{} {}, {}",
-                ljustify2("mov".to_string(), suffix_bwlq(*size)),
-                show_ireg_sized(*src, mb_rru, size.to_bytes()),
-                dst.show_rru(mb_rru)
+            Inst::MovRM { size, src, dst, .. } => write!(
+                f,
+                "mov{} {}, {:?}",
+                suffix_bwlq(*size),
+                show_reg(*src, size.to_bytes()),
+                dst,
             ),
 
             Inst::ShiftR {
@@ -1633,26 +1609,27 @@ impl PrettyPrint for Inst {
                 num_bits,
                 dst,
             } => match num_bits {
-                None => format!(
-                    "{} %cl, {}",
-                    ljustify2(kind.to_string(), suffix_bwlq(*size)),
-                    show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes())
+                None => write!(
+                    f,
+                    "{:?}{} %cl, {}",
+                    kind,
+                    suffix_bwlq(*size),
+                    show_reg(dst.to_reg(), size.to_bytes())
                 ),
 
-                Some(num_bits) => format!(
-                    "{} ${}, {}",
-                    ljustify2(kind.to_string(), suffix_bwlq(*size)),
+                Some(num_bits) => write!(
+                    f,
+                    "{:?}{} ${}, {}",
+                    kind,
+                    suffix_bwlq(*size),
                     num_bits,
-                    show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes())
+                    show_reg(dst.to_reg(), size.to_bytes())
                 ),
             },
 
-            Inst::XmmRmiReg { opcode, src, dst } => format!(
-                "{} {}, {}",
-                ljustify(opcode.to_string()),
-                src.show_rru(mb_rru),
-                dst.to_reg().show_rru(mb_rru)
-            ),
+            Inst::XmmRmiReg { opcode, src, dst } => {
+                write!(f, "{:?} {:?}, {}", opcode, src, show_reg(*dst, 0),)
+            }
 
             Inst::CmpRmiR {
                 size,
@@ -1664,158 +1641,139 @@ impl PrettyPrint for Inst {
                     CmpOpcode::Cmp => "cmp",
                     CmpOpcode::Test => "test",
                 };
-                format!(
-                    "{} {}, {}",
-                    ljustify2(op.to_string(), suffix_bwlq(*size)),
-                    src.show_rru_sized(mb_rru, size.to_bytes()),
-                    show_ireg_sized(*dst, mb_rru, size.to_bytes())
+                write!(
+                    f,
+                    "{:?}{} {}, {}",
+                    op,
+                    suffix_bwlq(*size),
+                    show_reg(*src, size.to_bytes()),
+                    show_reg(*dst, size.to_bytes())
                 )
             }
 
-            Inst::Setcc { cc, dst } => format!(
-                "{} {}",
-                ljustify2("set".to_string(), cc.to_string()),
-                show_ireg_sized(dst.to_reg(), mb_rru, 1)
-            ),
+            Inst::Setcc { cc, dst } => write!(f, "set{:?} {}", cc, show_reg(dst.to_reg(), 1)),
 
-            Inst::Cmove { size, cc, src, dst } => format!(
-                "{} {}, {}",
-                ljustify(format!("cmov{}{}", cc.to_string(), suffix_bwlq(*size))),
-                src.show_rru_sized(mb_rru, size.to_bytes()),
-                show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes())
+            Inst::Cmove { size, cc, src, dst } => write!(
+                f,
+                "cmov{:?}{} {}, {}",
+                cc,
+                suffix_bwlq(*size),
+                show_reg(src.to_reg(), size.to_bytes()),
+                show_reg(dst.to_reg(), size.to_bytes()),
             ),
 
             Inst::XmmCmove { size, cc, src, dst } => {
-                format!(
-                    "j{} $next; mov{} {}, {}; $next: ",
-                    cc.invert().to_string(),
+                write!(
+                    f,
+                    "j{:?} $next; mov{} {}, {}; $next: ",
+                    cc.invert(),
                     if *size == OperandSize::Size64 {
                         "sd"
                     } else {
                         "ss"
                     },
-                    src.show_rru_sized(mb_rru, size.to_bytes()),
-                    show_ireg_sized(dst.to_reg(), mb_rru, size.to_bytes())
+                    show_reg(src.to_reg(), size.to_bytes()),
+                    show_reg(dst.to_reg(), size.to_bytes()),
                 )
             }
 
             Inst::Push64 { src } => {
-                format!("{} {}", ljustify("pushq".to_string()), src.show_rru(mb_rru))
+                write!(f, "pushq {}", show_reg(*src, 0))
             }
 
             Inst::Pop64 { dst } => {
-                format!("{} {}", ljustify("popq".to_string()), dst.show_rru(mb_rru))
+                write!(f, "popq {}", show_reg(*dst, 0))
             }
 
-            Inst::CallKnown { dest, .. } => format!("{} {:?}", ljustify("call".to_string()), dest),
+            Inst::CallKnown { dest, .. } => write!(f, "call {:?}", dest),
 
-            Inst::CallUnknown { dest, .. } => format!(
-                "{} *{}",
-                ljustify("call".to_string()),
-                dest.show_rru(mb_rru)
-            ),
+            Inst::CallUnknown { dest, .. } => write!(f, "call *{}", show_reg(*dest, 0),),
 
-            Inst::Ret => "ret".to_string(),
+            Inst::Ret => write!(f, "ret"),
 
-            Inst::EpiloguePlaceholder => "epilogue placeholder".to_string(),
+            Inst::EpiloguePlaceholder => write!(f, "epilogue placeholder"),
 
             Inst::JmpKnown { dst } => {
-                format!("{} {}", ljustify("jmp".to_string()), dst.to_string())
+                write!(f, "jmp {:?}", dst)
             }
 
-            Inst::JmpIf { cc, taken } => format!(
-                "{} {}",
-                ljustify2("j".to_string(), cc.to_string()),
-                taken.to_string(),
-            ),
+            Inst::JmpIf { cc, taken } => write!(f, "j{:?} {:?}", cc, taken,),
 
             Inst::JmpCond {
                 cc,
                 taken,
                 not_taken,
-            } => format!(
-                "{} {}; j {}",
-                ljustify2("j".to_string(), cc.to_string()),
-                taken.to_string(),
-                not_taken.to_string()
-            ),
+            } => write!(f, "j{} {:?}; j {:?}", cc, taken, not_taken,),
 
             Inst::JmpTableSeq { idx, .. } => {
-                format!("{} {}", ljustify("br_table".into()), idx.show_rru(mb_rru))
+                write!(f, "br_table {}", show_reg(*idx, 0))
             }
 
-            Inst::JmpUnknown { target } => format!(
-                "{} *{}",
-                ljustify("jmp".to_string()),
-                target.show_rru(mb_rru)
-            ),
+            Inst::JmpUnknown { target } => write!(f, "jmp *{}", show_reg(*target, 0),),
 
             Inst::TrapIf { cc, trap_code, .. } => {
-                format!("j{} ; ud2 {} ;", cc.invert().to_string(), trap_code)
+                write!(f, "j{:?} ; ud2 {} ;", cc.invert(), trap_code)
             }
 
             Inst::LoadExtName {
                 dst, name, offset, ..
-            } => format!(
-                "{} {}+{}, {}",
-                ljustify("load_ext_name".into()),
+            } => write!(
+                f,
+                "load_ext_name {}+{}, {}",
                 name,
                 offset,
-                show_ireg_sized(dst.to_reg(), mb_rru, 8),
+                show_reg(dst.to_reg(), 8),
             ),
 
             Inst::LockCmpxchg { ty, src, dst, .. } => {
                 let size = ty.bytes() as u8;
-                format!(
+                write!(
+                    f,
                     "lock cmpxchg{} {}, {}",
                     suffix_bwlq(OperandSize::from_bytes(size as u32)),
-                    show_ireg_sized(*src, mb_rru, size),
-                    dst.show_rru(mb_rru)
+                    show_reg(*src, size),
+                    show_reg(*dst, 0),
                 )
             }
 
             Inst::AtomicRmwSeq { ty, op, .. } => {
-                format!(
-                    "atomically {{ {}_bits_at_[%r9]) {:?}= %r10; %rax = old_value_at_[%r9]; %r11, %rflags = trash }}",
-                    ty.bits(), op)
+                write!(f,
+                       "atomically {{ {}_bits_at_[%r9]) {:?}= %r10; %rax = old_value_at_[%r9]; %r11, %rflags = trash }}",
+                       ty.bits(), op)
             }
 
-            Inst::Fence { kind } => match kind {
-                FenceKind::MFence => "mfence".to_string(),
-                FenceKind::LFence => "lfence".to_string(),
-                FenceKind::SFence => "sfence".to_string(),
-            },
+            Inst::Fence { kind } => write!(
+                f,
+                "{}",
+                match kind {
+                    FenceKind::MFence => "mfence",
+                    FenceKind::LFence => "lfence",
+                    FenceKind::SFence => "sfence",
+                }
+            ),
 
-            Inst::VirtualSPOffsetAdj { offset } => format!("virtual_sp_offset_adjust {}", offset),
+            Inst::VirtualSPOffsetAdj { offset } => write!(f, "virtual_sp_offset_adjust {}", offset),
 
-            Inst::Hlt => "hlt".into(),
+            Inst::Hlt => write!(f, "hlt"),
 
-            Inst::Ud2 { trap_code } => format!("ud2 {}", trap_code),
+            Inst::Ud2 { trap_code } => write!(f, "ud2 {}", trap_code),
 
             Inst::ElfTlsGetAddr { ref symbol } => {
-                format!("elf_tls_get_addr {:?}", symbol)
+                write!(f, "elf_tls_get_addr {:?}", symbol)
             }
 
             Inst::MachOTlsGetAddr { ref symbol } => {
-                format!("macho_tls_get_addr {:?}", symbol)
+                write!(f, "macho_tls_get_addr {:?}", symbol)
             }
 
             Inst::ValueLabelMarker { label, reg } => {
-                format!("value_label {:?}, {}", label, reg.show_rru(mb_rru))
+                write!(f, "value_label {:?}, {}", label, show_reg(reg, 0))
             }
 
             Inst::Unwind { inst } => {
-                format!("unwind {:?}", inst)
+                write!(f, "unwind {:?}", inst)
             }
         }
-    }
-}
-
-// Temp hook for legacy printing machinery
-impl fmt::Debug for Inst {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        // Print the insn without a Universe :-(
-        write!(fmt, "{}", self.show_rru(None))
     }
 }
 
@@ -2738,10 +2696,6 @@ impl MachInst for Inst {
         ret
     }
 
-    fn reg_universe(flags: &Flags) -> RealRegUniverse {
-        create_reg_universe_systemv(flags)
-    }
-
     fn worst_case_size() -> CodeOffset {
         15
     }
@@ -2804,8 +2758,12 @@ impl MachInstEmit for Inst {
         emit::emit(self, sink, info, state);
     }
 
-    fn pretty_print(&self, mb_rru: Option<&RealRegUniverse>, _: &mut Self::State) -> String {
-        self.show_rru(mb_rru)
+    fn reg_name(preg: PReg, size: u8) -> &'static str {
+        regs::reg_name(preg, size)
+    }
+
+    fn pretty_print(&self, _: &mut Self::State) -> String {
+        format!("{:?}", self)
     }
 }
 

@@ -16,6 +16,7 @@
 //! ourselves have to save) and this is balanaced against the RA's pressure in the other direction
 //! at callsites.
 
+use crate::isa::CallConv;
 use crate::machinst::Reg;
 use crate::settings;
 use regalloc2::{MachineEnv, PReg, RegClass};
@@ -152,16 +153,11 @@ pub(crate) fn xmm15() -> PReg {
     fpr(15)
 }
 
-/// Create the MachineEnv for x64.
-pub(crate) fn create_machine_env(flags: &settings::Flags) -> MachineEnv {}
-
-/// Create the register universe for X64.
-///
-/// The ordering of registers matters, as commented in the file doc comment: assumes the
-/// calling-convention is SystemV, at the moment.
-pub(crate) fn create_reg_universe_systemv(flags: &settings::Flags) -> MachineEnv {
+/// Create the register-allocator environment for x86-64.
+pub(crate) fn create_machine_env(flags: &settings::Flags, call_conv: CallConv) -> MachineEnv {
     let mut regs = vec![];
-    let mut regs_by_class = vec![vec![], vec![]];
+    let mut preferred_regs_by_class = vec![vec![], vec![]];
+    let mut non_preferred_regs_by_class = vec![vec![], vec![]];
     let mut scratch_by_class = vec![];
 
     // Add all PRegs. Every PReg that appears in VCode (even e.g. as a
@@ -201,52 +197,70 @@ pub(crate) fn create_reg_universe_systemv(flags: &settings::Flags) -> MachineEnv
 
     let use_pinned_reg = flags.enable_pinned_reg();
 
-    // Add allocatable PRegs by class. TODO: two priorities within
-    // each class -- preferred and non-preferred.
-    regs_by_class[0].push(rax());
-    regs_by_class[0].push(rcx());
-    regs_by_class[0].push(rdx());
-    regs_by_class[0].push(rbx());
-    regs_by_class[0].push(rsi());
-    regs_by_class[0].push(rdi());
-    regs_by_class[0].push(r8());
-    regs_by_class[0].push(r9());
-    regs_by_class[0].push(r10());
-    regs_by_class[0].push(r11());
-    regs_by_class[0].push(r12());
-    regs_by_class[0].push(r13());
-    if !use_pinned_reg {
-        regs_by_class[0].push(r15());
+    // Add allocatable PRegs by class.
+    preferred_regs_by_class[0].push(rax());
+    preferred_regs_by_class[0].push(rcx());
+    preferred_regs_by_class[0].push(rdx());
+    preferred_regs_by_class[0].push(rbx());
+    if call_conv.extends_windows_fastcall() {
+        non_preferred_regs_by_class[0].push(rsi());
+        non_preferred_regs_by_class[0].push(rdi());
+    } else {
+        preferred_regs_by_class[0].push(rsi());
+        preferred_regs_by_class[0].push(rdi());
     }
-    scratch_by_class.push(r14());
+    preferred_regs_by_class[0].push(r8());
+    preferred_regs_by_class[0].push(r9());
+    preferred_regs_by_class[0].push(r10());
+    non_preferred_regs_by_class[0].push(r12());
+    non_preferred_regs_by_class[0].push(r13());
+    non_preferred_regs_by_class[0].push(r14());
+    if !use_pinned_reg {
+        non_preferred_regs_by_class[0].push(r15());
+    }
+    scratch_by_class.push(r11());
 
-    regs_by_class[1].push(xmm0());
-    regs_by_class[1].push(xmm1());
-    regs_by_class[1].push(xmm2());
-    regs_by_class[1].push(xmm3());
-    regs_by_class[1].push(xmm4());
-    regs_by_class[1].push(xmm5());
-    regs_by_class[1].push(xmm6());
-    regs_by_class[1].push(xmm7());
-    regs_by_class[1].push(xmm8());
-    regs_by_class[1].push(xmm9());
-    regs_by_class[1].push(xmm10());
-    regs_by_class[1].push(xmm11());
-    regs_by_class[1].push(xmm12());
-    regs_by_class[1].push(xmm13());
-    regs_by_class[1].push(xmm14());
-    scratch_by_class.push(xmm15());
+    preferred_regs_by_class[1].push(xmm0());
+    preferred_regs_by_class[1].push(xmm1());
+    preferred_regs_by_class[1].push(xmm2());
+    preferred_regs_by_class[1].push(xmm3());
+    preferred_regs_by_class[1].push(xmm4());
+    if call_conv.extends_windows_fastcall() {
+        non_preferred_regs_by_class[1].push(xmm6());
+        non_preferred_regs_by_class[1].push(xmm7());
+        non_preferred_regs_by_class[1].push(xmm8());
+        non_preferred_regs_by_class[1].push(xmm9());
+        non_preferred_regs_by_class[1].push(xmm10());
+        non_preferred_regs_by_class[1].push(xmm11());
+        non_preferred_regs_by_class[1].push(xmm12());
+        non_preferred_regs_by_class[1].push(xmm13());
+        non_preferred_regs_by_class[1].push(xmm14());
+        non_preferred_regs_by_class[1].push(xmm15());
+    } else {
+        preferred_regs_by_class[1].push(xmm6());
+        preferred_regs_by_class[1].push(xmm7());
+        preferred_regs_by_class[1].push(xmm8());
+        preferred_regs_by_class[1].push(xmm9());
+        preferred_regs_by_class[1].push(xmm10());
+        preferred_regs_by_class[1].push(xmm11());
+        preferred_regs_by_class[1].push(xmm12());
+        preferred_regs_by_class[1].push(xmm13());
+        preferred_regs_by_class[1].push(xmm14());
+        preferred_regs_by_class[1].push(xmm15());
+    }
+    scratch_by_class.push(xmm5());
 
     MachineEnv {
         regs,
-        regs_by_class,
+        preferred_regs_by_class,
+        non_preferred_regs_by_class,
         scratch_by_class,
     }
 }
 
 /// If `ireg` denotes a PReg, make a best-effort attempt to show its
 /// name with the appropriate size-based declension.
-pub fn show_ireg_sized(reg: PReg, size: u8) -> &'static str {
+pub fn reg_name(reg: PReg, size: u8) -> &'static str {
     let sizes = match (reg.class(), reg.hw_enc()) {
         (RegClass::Int, 0) => ["%rax", "%eax", "%ax", "%al"],
         (RegClass::Int, 1) => ["%rcx", "%ecx", "%cx", "%cl"],

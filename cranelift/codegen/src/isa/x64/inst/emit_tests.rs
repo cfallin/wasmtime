@@ -4278,11 +4278,10 @@ fn test_x64_emit() {
     isa_flag_builder.enable("has_sse41").unwrap();
     let isa_flags = x64::settings::Flags::new(&flags, isa_flag_builder);
 
-    let rru = regs::create_reg_universe_systemv(&flags);
     let emit_info = EmitInfo::new(flags, isa_flags);
     for (insn, expected_encoding, expected_printing) in insns {
         // Check the printed text is as expected.
-        let actual_printing = insn.show_rru(Some(&rru));
+        let actual_printing = format!("{:?}", insn);
         assert_eq!(expected_printing, actual_printing);
         let mut sink = test_utils::TestCodeSink::new();
         let mut buffer = MachBuffer::new();

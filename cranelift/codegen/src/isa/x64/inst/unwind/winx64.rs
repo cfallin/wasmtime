@@ -1,6 +1,6 @@
 //! Unwind information for Windows x64 ABI.
 
-use regalloc::{Reg, RegClass};
+use crate::machinst::{Reg, RegClass};
 
 pub(crate) struct RegisterMapper;
 

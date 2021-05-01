@@ -170,3 +170,15 @@ impl Reg {
         self.as_alloc().filter_map(|a| a.as_spillslot())
     }
 }
+
+impl std::fmt::Debug for Reg {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if let Some(preg) = self.as_reg() {
+            write!(f, "{}", preg)
+        } else if let Some(slot) = self.as_spillslot() {
+            write!(f, "{}", slot)
+        } else if let Some(op) = self.as_operand() {
+            write!(f, "{}", op)
+        }
+    }
+}

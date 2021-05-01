@@ -32,10 +32,7 @@ where
     // if the Debug level hasn't been statically (through features) or dynamically (through
     // RUST_LOG) enabled.
     if log_enabled!(Level::Debug) {
-        debug!(
-            "vcode from lowering: \n{}",
-            vcode.show_rru(Some(b.reg_universe()))
-        );
+        debug!("vcode from lowering: \n{:?}", vcode,);
     }
 
     // Perform register allocation.
@@ -60,10 +57,7 @@ where
     }
 
     if log_enabled!(Level::Debug) {
-        debug!(
-            "vcode after regalloc: final version:\n{}",
-            vcode.show_rru(Some(b.reg_universe()))
-        );
+        debug!("vcode after regalloc: final version:\n{:?}", vcode,);
     }
 
     Ok(vcode)
