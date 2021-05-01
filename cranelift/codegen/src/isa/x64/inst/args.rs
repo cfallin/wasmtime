@@ -10,7 +10,6 @@ use crate::machinst::{Reg, Writable};
 use regalloc2::RegClass;
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
-use std::string::String;
 
 /// A possible addressing mode (amode) that can be used in instructions.
 /// These denote a 64-bit value only.

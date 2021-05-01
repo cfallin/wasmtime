@@ -10,7 +10,7 @@ use crate::machinst::*;
 use crate::{settings, settings::Flags, CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use regalloc2::{Operand, PReg, SpillSlot, VReg};
+use regalloc2::{Operand, PReg, SpillSlot};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::string::{String, ToString};
@@ -332,17 +332,17 @@ pub enum Inst {
     /// Direct call: call simm32.
     CallKnown {
         dest: ExternalName,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
         opcode: Opcode,
+        operands: Vec<Operand>,
+        clobbers: &'static [PReg],
     },
 
     /// Indirect call: callq (reg mem).
     CallUnknown {
         dest: RegMem,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
         opcode: Opcode,
+        operands: Vec<Operand>,
+        clobbers: &'static [PReg],
     },
 
     /// Return.
@@ -1005,30 +1005,30 @@ impl Inst {
 
     pub(crate) fn call_known(
         dest: ExternalName,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
         opcode: Opcode,
+        operands: Vec<Operand>,
+        clobbers: &'static [PReg],
     ) -> Inst {
         Inst::CallKnown {
             dest,
-            uses,
-            defs,
             opcode,
+            operands,
+            clobbers,
         }
     }
 
     pub(crate) fn call_unknown(
         dest: RegMem,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
         opcode: Opcode,
+        operands: Vec<Operand>,
+        clobbers: &'static [PReg],
     ) -> Inst {
         dest.assert_regclass_is(RegClass::I64);
         Inst::CallUnknown {
             dest,
-            uses,
-            defs,
             opcode,
+            operands,
+            clobbers,
         }
     }
 

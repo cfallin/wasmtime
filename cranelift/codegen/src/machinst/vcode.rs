@@ -703,7 +703,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
     }
 }
 
-impl<I: VCodeInst> regalloc2::Function for VCode<I> {
+impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
     fn insts(&self) -> usize {
         self.insts.len()
     }
@@ -791,37 +791,14 @@ impl<I: VCodeInst> regalloc2::Function for VCode<I> {
     }
 
     fn multi_spillslot_named_by_last_slot(&self) -> bool {
-        // regalloc2-TODO: Verify this
         false
     }
 }
 
-impl<I: VCodeInst> fmt::Debug for VCode<I> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln!(f, "VCode_Debug {{")?;
-        writeln!(f, "  Entry block: {}", self.entry)?;
-
-        for block in 0..self.num_blocks() {
-            writeln!(f, "Block {}:", block,)?;
-            for succ in self.succs(block as BlockIndex) {
-                writeln!(f, "  (successor: Block {})", succ.get())?;
-            }
-            let (start, end) = self.block_ranges[block];
-            writeln!(f, "  (instruction range: {} .. {})", start, end)?;
-            for inst in start..end {
-                writeln!(f, "  Inst {}: {:?}", inst, self.insts[inst as usize])?;
-            }
-        }
-
-        writeln!(f, "}}")?;
-        Ok(())
-    }
-}
-
 /// Pretty-printing.
-impl<I: VCodeInst> std::fmt::Debug for VCode<I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "VCode_ShowWithRRU {{{{\n")?;
+impl<I: VCodeInst, A: ABICallee<I = I>> fmt::Debug for VCode<I, A> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "VCode {{{{\n")?;
         write!(f, "  Entry block: {}\n", self.entry)?;
 
         let mut state = Default::default();

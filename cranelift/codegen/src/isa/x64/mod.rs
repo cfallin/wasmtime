@@ -44,7 +44,11 @@ impl X64Backend {
         }
     }
 
-    fn compile_vcode(&self, func: &Function, flags: Flags) -> CodegenResult<VCode<inst::Inst>> {
+    fn compile_vcode(
+        &self,
+        func: &Function,
+        flags: Flags,
+    ) -> CodegenResult<VCode<inst::Inst, abi::X64ABICallee>> {
         // This performs lowering to VCode, register-allocates the code, computes
         // block layout and finalizes branches. The result is ready for binary emission.
         let emit_info = EmitInfo::new(flags.clone(), self.x64_flags.clone());

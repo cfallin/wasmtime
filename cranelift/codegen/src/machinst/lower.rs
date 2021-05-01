@@ -933,7 +933,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
     }
 }
 
-impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
+impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     type I = I;
 
     fn data(&self, ir_inst: Inst) -> &InstructionData {

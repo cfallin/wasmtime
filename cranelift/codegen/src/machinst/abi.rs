@@ -6,6 +6,11 @@ use crate::ir::{Signature, StackSlot};
 use crate::isa::CallConv;
 use crate::machinst::*;
 use crate::settings;
+use smallvec::SmallVec;
+
+/// A small vector of instructions (with some reasonable size);
+/// appropriate for a small fixed sequence implementing one operation.
+pub type SmallInstVec<I> = SmallVec<[I; 4]>;
 
 /// Trait implemented by an object that tracks ABI-related state (e.g., stack
 /// layout) and can generate code while emitting the *body* of a function.
@@ -51,7 +56,7 @@ pub trait ABICallee {
         &self,
         ctx: &mut C,
         args: Vec<ValueRegs<Writable<VReg>>>,
-    ) -> Vec<Self::I>;
+    ) -> SmallInstVec<Self::I>;
 
     /// Generate a return-value instruction sequence: the given vregs
     /// will be used as return values and copied or constrained to end
@@ -67,7 +72,7 @@ pub trait ABICallee {
         &self,
         ctx: &mut C,
         retvals: Vec<ValueRegs<VReg>>,
-    ) -> Vec<Self::I>;
+    ) -> SmallInstVec<Self::I>;
 
     /// Get the address of a stackslot.
     fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Writable<Reg>) -> Self::I;
@@ -100,10 +105,10 @@ pub trait ABICallee {
     /// `set_clobbered()`.  `self` is mutable so that we can store
     /// information in it which will be useful when creating the
     /// epilogue.
-    fn gen_prologue(&mut self) -> Vec<Self::I>;
+    fn gen_prologue(&mut self) -> SmallInstVec<Self::I>;
 
     /// Generate an epilogue, post-regalloc.
-    fn gen_epilogue(&self) -> Vec<Self::I>;
+    fn gen_epilogue(&self) -> SmallInstVec<Self::I>;
 
     /// Returns the full frame size for the given function, after prologue
     /// emission has run. This comprises the spill slots and stack-storage slots
@@ -127,7 +132,7 @@ pub trait ABICallee {
     /// This returns the instruction (rather than emitting to the
     /// context) because it is used post-regalloc to implement edits,
     /// rather than during lowering itself.
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg) -> Vec<Self::I>;
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg) -> SmallInstVec<Self::I>;
 
     /// Generate a reload (fill). As for spills, the type may be given to allow
     /// a more optimized load instruction to be generated.
@@ -135,13 +140,18 @@ pub trait ABICallee {
     /// This returns the instruction (rather than emitting to the
     /// context) because it is used post-regalloc to implement edits,
     /// rather than during lowering itself.
-    fn gen_reload(&self, to_reg: PReg, from_slot: SpillSlot) -> Vec<Self::I>;
+    fn gen_reload(&self, to_reg: PReg, from_slot: SpillSlot) -> SmallInstVec<Self::I>;
 
     /// Generate a stack-to-stack move. Some architectures may be able
     /// to do this without requiring a scratch register; on others, a
     /// scratch register should be reserved as needed (and not
     /// provided to the allocator).
-    fn gen_stack_move(&self, to_slot: SpillSlot, from_slot: SpillSlot, ty: Type) -> Vec<Self::I>;
+    fn gen_stack_move(
+        &self,
+        to_slot: SpillSlot,
+        from_slot: SpillSlot,
+        ty: Type,
+    ) -> SmallInstVec<Self::I>;
 }
 
 /// Trait implemented by an object that tracks ABI-related state and can
