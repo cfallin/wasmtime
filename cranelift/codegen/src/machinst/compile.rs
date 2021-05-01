@@ -2,7 +2,6 @@
 
 use crate::ir::Function;
 use crate::machinst::*;
-use crate::settings;
 use crate::timing;
 
 use log::{debug, log_enabled, Level};

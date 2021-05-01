@@ -1,7 +1,5 @@
 //! Miscellaneous helpers for machine backends.
 
-use super::{InsnOutput, LowerCtx, VCodeInst, ValueRegs};
-use super::{Reg, Writable};
 use crate::ir::Type;
 use std::ops::{Add, BitAnd, Not, Sub};
 

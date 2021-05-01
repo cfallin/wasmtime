@@ -22,18 +22,12 @@
 use super::Reg;
 use crate::ir::{self, types, Constant, ConstantData, SourceLoc};
 use crate::machinst::*;
-use crate::settings;
 use crate::timing;
-use regalloc2::{Allocation, Operand, OperandKind, PReg, VReg};
-
-use alloc::boxed::Box;
-use alloc::{borrow::Cow, vec::Vec};
 use cranelift_entity::{entity_impl, Keys, PrimaryMap};
+use regalloc2::{Operand, OperandKind, PReg, VReg};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::iter;
-use std::string::String;
 
 /// Index referring to an instruction in VCode.
 pub type InsnIndex = u32;
@@ -824,54 +818,49 @@ impl<I: VCodeInst> fmt::Debug for VCode<I> {
     }
 }
 
-/// Pretty-printing with `RealRegUniverse` context.
-impl<I: VCodeInst> PrettyPrint for VCode<I> {
-    fn show_rru(&self, mb_rru: Option<&RealRegUniverse>) -> String {
-        use std::fmt::Write;
-
-        let mut s = String::new();
-        write!(&mut s, "VCode_ShowWithRRU {{{{\n").unwrap();
-        write!(&mut s, "  Entry block: {}\n", self.entry).unwrap();
+/// Pretty-printing.
+impl<I: VCodeInst> std::fmt::Debug for VCode<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "VCode_ShowWithRRU {{{{\n")?;
+        write!(f, "  Entry block: {}\n", self.entry)?;
 
         let mut state = Default::default();
         let mut safepoint_idx = 0;
         for i in 0..self.num_blocks() {
             let block = i as BlockIndex;
 
-            write!(&mut s, "Block {}:\n", block).unwrap();
+            write!(f, "Block {}:\n", block)?;
             if let Some(bb) = self.bindex_to_bb(block) {
-                write!(&mut s, "  (original IR block: {})\n", bb).unwrap();
+                write!(f, "  (original IR block: {})\n", bb)?;
             }
             for succ in self.succs(block) {
-                write!(&mut s, "  (successor: Block {})\n", succ.get()).unwrap();
+                write!(f, "  (successor: Block {})\n", succ.get())?;
             }
             let (start, end) = self.block_ranges[block as usize];
-            write!(&mut s, "  (instruction range: {} .. {})\n", start, end).unwrap();
+            write!(f, "  (instruction range: {} .. {})\n", start, end)?;
             for inst in start..end {
                 if safepoint_idx < self.safepoint_insns.len()
                     && self.safepoint_insns[safepoint_idx] == inst
                 {
                     write!(
-                        &mut s,
+                        f,
                         "      (safepoint: slots {:?} with EmitState {:?})\n",
                         self.safepoint_slots[safepoint_idx], state,
-                    )
-                    .unwrap();
+                    )?;
                     safepoint_idx += 1;
                 }
                 write!(
-                    &mut s,
-                    "  Inst {}:   {}\n",
+                    f,
+                    "  Inst {}:   {}",
                     inst,
-                    self.insts[inst as usize].pretty_print(mb_rru, &mut state)
-                )
-                .unwrap();
+                    self.insts[inst as usize].pretty_print(f, &mut state)
+                )?;
             }
         }
 
-        write!(&mut s, "}}}}\n").unwrap();
+        write!(f, "}}}}\n")?;
 
-        s
+        Ok(())
     }
 }
 

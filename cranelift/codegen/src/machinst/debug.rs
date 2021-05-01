@@ -24,7 +24,6 @@ use crate::ir::ValueLabel;
 use crate::machinst::*;
 use crate::value_label::{LabelValueLoc, ValueLabelsRanges, ValueLocRange};
 use log::trace;
-use regalloc2::OperandKind;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 

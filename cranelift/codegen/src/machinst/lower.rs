@@ -21,7 +21,6 @@ use crate::machinst::{
     VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
 };
 use crate::CodegenResult;
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 use log::debug;

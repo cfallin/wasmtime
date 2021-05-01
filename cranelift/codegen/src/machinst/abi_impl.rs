@@ -138,7 +138,6 @@ use regalloc2::{Operand, PReg, RegClass, SpillSlot, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
-use std::mem;
 
 /// A location for (part of) an argument or return value. These "storage slots"
 /// are specified for each register-sized part of an argument.
@@ -378,12 +377,12 @@ pub trait ABIMachineSpec {
     ///
     /// - The add-imm sequence must work correctly when `from_reg` and/or
     ///   `into_reg` are the register returned by `get_stacklimit_reg()`.
-    fn gen_add_imm(into_reg: Writable<Reg>, from_reg: Reg, imm: u32) -> SmallInstVec<Self::I>;
+    fn gen_add_imm(into_reg: Writable<Reg>, from_reg: Reg, imm: u32) -> Vec<Self::I>;
 
     /// Generate a sequence that traps with a `TrapCode::StackOverflow` code if
     /// the stack pointer is less than the given limit register (assuming the
     /// stack grows downward).
-    fn gen_stack_lower_bound_trap(limit_reg: Reg) -> SmallInstVec<Self::I>;
+    fn gen_stack_lower_bound_trap(limit_reg: Reg) -> Vec<Self::I>;
 
     /// Generate an instruction to compute an address of a stack slot (FP- or
     /// SP-based offset).
@@ -409,7 +408,7 @@ pub trait ABIMachineSpec {
     fn gen_store_base_offset(base: Reg, offset: i32, from_reg: Reg, ty: Type) -> Self::I;
 
     /// Adjust the stack pointer up or down.
-    fn gen_sp_reg_adjust(amount: i32) -> SmallInstVec<Self::I>;
+    fn gen_sp_reg_adjust(amount: i32) -> Vec<Self::I>;
 
     /// Generate a meta-instruction that adjusts the nominal SP offset.
     fn gen_nominal_sp_adj(amount: i32) -> Self::I;
@@ -417,13 +416,13 @@ pub trait ABIMachineSpec {
     /// Generate the usual frame-setup sequence for this architecture: e.g.,
     /// `push rbp / mov rbp, rsp` on x86-64, or `stp fp, lr, [sp, #-16]!` on
     /// AArch64.
-    fn gen_prologue_frame_setup(flags: &settings::Flags) -> SmallInstVec<Self::I>;
+    fn gen_prologue_frame_setup(flags: &settings::Flags) -> Vec<Self::I>;
 
     /// Generate the usual frame-restore sequence for this architecture.
-    fn gen_epilogue_frame_restore(flags: &settings::Flags) -> SmallInstVec<Self::I>;
+    fn gen_epilogue_frame_restore(flags: &settings::Flags) -> Vec<Self::I>;
 
     /// Generate a probestack call.
-    fn gen_probestack(_frame_size: u32) -> SmallInstVec<Self::I>;
+    fn gen_probestack(_frame_size: u32) -> Vec<Self::I>;
 
     /// Generate a clobber-save sequence. This takes the list of *all* registers
     /// written/modified by the function body. The implementation here is
@@ -438,7 +437,7 @@ pub trait ABIMachineSpec {
     fn gen_clobber_save(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
-        clobbers: &Set<Writable<RealReg>>,
+        clobbers: &[PReg],
         fixed_frame_storage_size: u32,
     ) -> (u64, SmallVec<[Self::I; 16]>);
 
@@ -449,7 +448,7 @@ pub trait ABIMachineSpec {
     fn gen_clobber_restore(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
-        clobbers: &Set<Writable<RealReg>>,
+        clobbers: &[PReg],
         fixed_frame_storage_size: u32,
     ) -> SmallVec<[Self::I; 16]>;
 
@@ -576,7 +575,7 @@ pub struct ABICalleeImpl<M: ABIMachineSpec> {
     /// Total stack size of all stackslots.
     stackslots_size: u32,
     /// Clobbered registers, from regalloc.
-    clobbered: Set<Writable<RealReg>>,
+    clobbered: Vec<PReg>,
     /// Total number of spillslots, from regalloc.
     spillslots: Option<usize>,
     /// Storage allocated for the fixed part of the stack frame.  This is
@@ -607,7 +606,7 @@ pub struct ABICalleeImpl<M: ABIMachineSpec> {
     /// need to be extremely careful with each instruction. The instructions are
     /// manually register-allocated and carefully only use caller-saved
     /// registers and keep nothing live after this sequence of instructions.
-    stack_limit: Option<(Reg, SmallInstVec<M::I>)>,
+    stack_limit: Option<(Reg, Vec<M::I>)>,
     /// Are we to invoke the probestack function in the prologue? If so,
     /// what is the minimum size at which we must invoke it?
     probestack_min_frame: Option<u32>,
@@ -646,14 +645,14 @@ fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
                     let from_reg = val.only_reg().unwrap();
                     let new_vreg = ctx.alloc_tmp(ty).only_reg().unwrap().vreg();
                     let from_bits = ty_bits(ty) as u8;
-                    let ext = M::get_ext_mode(self.sig.call_conv, extension);
+                    let ext = M::get_ext_mode(call_conv, extension);
                     let signed = ext == ArgumentExtension::Sext;
                     insts.push(M::gen_extend(
                         Writable::from_reg(Reg::reg_def(new_vreg)),
                         Reg::reg_use(from_reg),
                         signed,
                         from_bits,
-                        /* to_bits = */ word_bits,
+                        /* to_bits = */ M::word_bits(),
                     ));
                     *val = ValueRegs::one(new_vreg);
                 }
@@ -723,7 +722,7 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
             sig,
             stackslots,
             stackslots_size: stack_offset,
-            clobbered: Set::empty(),
+            clobbered: vec![],
             spillslots: None,
             fixed_frame_storage_size: 0,
             total_frame_size: None,
@@ -760,12 +759,7 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
     /// No values can be live after the prologue, but in this case that's ok
     /// because we just need to perform a stack check before progressing with
     /// the rest of the function.
-    fn insert_stack_check(
-        &self,
-        stack_limit: Reg,
-        stack_size: u32,
-        insts: &mut SmallInstVec<M::I>,
-    ) {
+    fn insert_stack_check(&self, stack_limit: Reg, stack_size: u32, insts: &mut Vec<M::I>) {
         // With no explicit stack allocated we can just emit the simple check of
         // the stack registers against the stack limit register, and trap if
         // it's out of bounds.
@@ -818,7 +812,7 @@ fn gen_stack_limit<M: ABIMachineSpec>(
     f: &ir::Function,
     abi: &ABISig,
     gv: ir::GlobalValue,
-) -> (Reg, SmallInstVec<M::I>) {
+) -> (Reg, Vec<M::I>) {
     let mut insts = smallvec![];
     let reg = generate_gv::<M>(f, abi, gv, &mut insts);
     return (reg, insts);
@@ -828,7 +822,7 @@ fn generate_gv<M: ABIMachineSpec>(
     f: &ir::Function,
     abi: &ABISig,
     gv: ir::GlobalValue,
-    insts: &mut SmallInstVec<M::I>,
+    insts: &mut Vec<M::I>,
 ) -> Reg {
     match f.global_values[gv] {
         // Return the direct register the vmcontext is in
@@ -882,7 +876,7 @@ fn gen_load_stack_multi<M: ABIMachineSpec>(
     from: StackAMode,
     dst: ValueRegs<Writable<Reg>>,
     ty: Type,
-) -> SmallInstVec<M::I> {
+) -> Vec<M::I> {
     let mut ret = smallvec![];
     let (_, tys) = M::I::rc_for_type(ty).unwrap();
     let mut offset = 0;
@@ -898,7 +892,7 @@ fn gen_store_stack_multi<M: ABIMachineSpec>(
     from: StackAMode,
     src: ValueRegs<Reg>,
     ty: Type,
-) -> SmallInstVec<M::I> {
+) -> Vec<M::I> {
     let mut ret = smallvec![];
     let (_, tys) = M::I::rc_for_type(ty).unwrap();
     let mut offset = 0;
@@ -988,7 +982,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                     for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
                             &ABIArgSlot::Stack { offset, ty, .. } => {
-                                insts.push(M::gen_load_stack(
+                                load_insts.push(M::gen_load_stack(
                                     StackAMode::FPOffset(
                                         M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                                         ty,
@@ -1006,7 +1000,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                 &ABIArg::StructArg { offset, .. } => {
                     // Load the pointer directly into the vreg.
                     let into_reg = vregs.only_reg().unwrap();
-                    insts.push(M::gen_get_stack_addr(
+                    load_insts.push(M::gen_get_stack_addr(
                         StackAMode::FPOffset(
                             M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                             I8,
@@ -1100,7 +1094,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         self.spillslots = Some(slots);
     }
 
-    fn set_clobbered(&mut self, clobbered: Set<Writable<RealReg>>) {
+    fn set_clobbered(&mut self, clobbered: Vec<PReg>) {
         self.clobbered = clobbered;
     }
 
@@ -1176,7 +1170,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         let (_, clobber_insts) = M::gen_clobber_save(
             self.call_conv,
             &self.flags,
-            &self.clobbered,
+            &self.clobbered[..],
             self.fixed_frame_storage_size,
         );
         insts.extend(clobber_insts);
@@ -1203,7 +1197,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         insts.extend(M::gen_clobber_restore(
             self.call_conv,
             &self.flags,
-            &self.clobbered,
+            &self.clobbered[..],
             self.fixed_frame_storage_size,
         ));
 
@@ -1236,13 +1230,13 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     }
 
     fn gen_spill(&self, to_slot: SpillSlot, from_reg: PReg) -> Vec<Self::I> {
-        let ty = Self::I::type_for_rc(to_reg.class());
+        let ty = Self::I::type_for_rc(from_reg.class());
         // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
-        let islot = slot.index() as i64;
+        let islot = to_slot.index() as i64;
         let spill_off = islot * M::word_bytes() as i64;
         let sp_off = self.stackslots_size as i64 + spill_off;
-        trace!("store_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
-        vec![cM::gen_store_stack(
+        trace!("store_spillslot: slot {:?} -> sp_off {}", to_slot, sp_off);
+        vec![M::gen_store_stack(
             StackAMode::NominalSPOffset(sp_off, ty),
             Reg::preg_use(from_reg),
             ty,
@@ -1252,10 +1246,10 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn gen_reload(&self, to_reg: PReg, from_slot: SpillSlot) -> Vec<Self::I> {
         let ty = Self::I::type_for_rc(to_reg.class());
         // Offset from beginning of spillslot area, which is at nominal SP + stackslots_size.
-        let islot = slot.index() as i64;
+        let islot = from_slot.index() as i64;
         let spill_off = islot * M::word_bytes() as i64;
         let sp_off = self.stackslots_size as i64 + spill_off;
-        trace!("load_spillslot: slot {:?} -> sp_off {}", slot, sp_off);
+        trace!("load_spillslot: slot {:?} -> sp_off {}", from_slot, sp_off);
         vec![M::gen_load_stack(
             StackAMode::NominalSPOffset(sp_off, ty),
             Writable::from_reg(Reg::preg_def(to_reg)),
@@ -1270,7 +1264,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         let from_sp_off = self.stackslots_size as i64 + from_spill_off;
         M::gen_stack_move(
             StackAMode::NominalSPOffset(to_sp_off, ty),
-            StaackAMode::NominalSPOffset(from_sp_off, ty),
+            StackAMode::NominalSPOffset(from_sp_off, ty),
             ty,
         )
     }
@@ -1394,10 +1388,6 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         self.rets.push(regs);
     }
 
-    fn clobbers(&self) -> &'static [PReg] {
-        M::get_clobbers(self.sig.call_conv)
-    }
-
     fn emit_call<C: LowerCtx<I = Self::I>>(&mut self, ctx: &mut C) {
         // Adjust the stack downward to allocate any needed arg and return-value space.
         let stack_size = self.sig.stack_arg_space + self.sig.stack_ret_space;
@@ -1405,7 +1395,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
 
         // Create the ret-area pointer if needed, and add to args.
         if let Some(i) = self.sig.stack_ret_arg {
-            let rd = ctx.alloc_tmp(word_type).only_reg().unwrap().vreg();
+            let rd = ctx.alloc_tmp(M::word_type()).only_reg().unwrap().vreg();
             let ret_area_base = self.sig.stack_arg_space;
             ctx.emit(M::gen_get_stack_addr(
                 StackAMode::SPOffset(ret_area_base, I8),
