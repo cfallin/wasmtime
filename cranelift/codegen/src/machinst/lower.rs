@@ -5,7 +5,7 @@
 // TODO: separate the IR-query core of `LowerCtx` from the lowering logic built
 // on top of it, e.g. the side-effect/coloring analysis and the scan support.
 
-use super::{Reg, Writable};
+use super::Reg;
 use crate::data_value::DataValue;
 use crate::entity::SecondaryMap;
 use crate::fx::{FxHashMap, FxHashSet};
@@ -17,7 +17,7 @@ use crate::ir::{
     ValueLabelAssignments, ValueLabelStart,
 };
 use crate::machinst::{
-    writable_value_regs, ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode,
+    ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode,
     VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
 };
 use crate::CodegenResult;
@@ -132,10 +132,10 @@ pub trait LowerCtx {
     /// these register(s) may overlap with inputs used at the
     /// beginning of the instruction. If the output is written before
     /// all inputs are read, use `output_at_start_regs()` instead.)
-    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Writable<Reg>>;
+    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
     /// Get the reg(s) for the `idx`th output of an instruction, to be
     /// defined at the beginning of the instruction.
-    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Writable<Reg>>;
+    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
     /// Get the reg(s) for the `idx_in`th input and `idx_out`th output
     /// of an instruction, specifying that the output *must* reuse the
     /// given input's registers. The input and output must have the
@@ -145,13 +145,13 @@ pub trait LowerCtx {
         ir_inst: Inst,
         input_idx: usize,
         output_idx: usize,
-    ) -> (Reg, Writable<Reg>);
+    ) -> (Reg, Reg);
 
     // Codegen primitives: allocate temps, emit instructions, set result registers,
     // ask for an input to be gen'd into a register.
 
     /// Get a new temp. Because VCode is SSA, this can only be written once.
-    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Writable<Reg>>;
+    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Reg>;
     /// Emit a machine instruction.
     fn emit(&mut self, mach_inst: Self::I);
     /// Emit a machine instruction that is a safepoint.
@@ -445,12 +445,12 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 self.f.dfg.block_params(entry_bb)
             );
             // Collect arg vregs.
-            let arg_regs: Vec<Writable<VReg>> = self
+            let arg_regs: Vec<VReg> = self
                 .f
                 .dfg
                 .block_params(entry_bb)
                 .iter()
-                .map(|param| writable_value_regs(self.value_regs[*param]))
+                .map(|param| self.value_regs[*param])
                 .collect();
             // Generate whatever sequence is necessary to
             for inst in self.vcode.abi().gen_arg_seq(arg_regs) {
@@ -1048,16 +1048,16 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
         vregs.map(|v| Reg::reg_use_at_end(v))
     }
 
-    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Writable<Reg>> {
+    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
         let val = self.f.dfg.inst_results(ir_inst)[idx];
         let vregs = self.value_regs[val];
-        vregs.map(|v| Writable::from_reg(Operand::reg_def(v)))
+        vregs.map(|v| Operand::reg_def(v))
     }
 
-    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Writable<Reg>> {
+    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
         let val = self.f.dfg.inst_results(ir_inst)[idx];
         let vregs = self.value_regs[val];
-        vregs.map(|v| Writable::from_reg(Operand::reg_def(v)))
+        vregs.map(|v| Operand::reg_def(v))
     }
 
     fn reused_input_output_regs(
@@ -1065,7 +1065,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
         ir_inst: Inst,
         input_idx: usize,
         output_idx: usize,
-    ) -> (Reg, Writable<Reg>) {
+    ) -> (Reg, Reg) {
         let input_val = self.f.dfg.inst_args(ir_inst)[input_idx];
         let input_val = self.f.dfg.resolve_aliases(input_val);
         let input_vregs = self.put_value_in_vregs(input_val);
@@ -1080,13 +1080,13 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
             .expect("reuse semantics not well-defined for multi-reg case");
         (
             Reg::reg_use(input_vreg),
-            Writable::from_reg(Reg::reg_reuse_def(output_vreg, input_idx)),
+            Reg::reg_reuse_def(output_vreg, input_idx),
         )
     }
 
-    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Writable<Reg>> {
+    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Reg> {
         let vregs = alloc_vregs(ty, &mut self.next_vreg, &mut self.vcode).unwrap();
-        vregs.map(|v| Writable::from_reg(Reg::reg_temp(v)))
+        vregs.map(|v| Reg::reg_temp(v))
     }
 
     fn emit(&mut self, mach_inst: I) {

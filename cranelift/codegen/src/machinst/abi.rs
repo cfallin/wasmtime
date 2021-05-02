@@ -1,6 +1,6 @@
 //! ABI definitions.
 
-use super::{Reg, SpillSlot, Writable};
+use super::{Reg, SpillSlot};
 use crate::binemit::StackMap;
 use crate::ir::{Signature, StackSlot};
 use crate::isa::CallConv;
@@ -55,7 +55,7 @@ pub trait ABICallee {
     fn gen_arg_seq<C: LowerCtx<I = Self::I>>(
         &self,
         ctx: &mut C,
-        args: Vec<ValueRegs<Writable<VReg>>>,
+        args: Vec<ValueRegs<VReg>>,
     ) -> SmallInstVec<Self::I>;
 
     /// Generate a return-value instruction sequence: the given vregs
@@ -75,7 +75,7 @@ pub trait ABICallee {
     ) -> SmallInstVec<Self::I>;
 
     /// Get the address of a stackslot.
-    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Writable<Reg>) -> Self::I;
+    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Reg) -> Self::I;
 
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.
@@ -88,7 +88,7 @@ pub trait ABICallee {
     fn set_num_spillslots(&mut self, slots: usize);
 
     /// Update with the clobbered registers, post-regalloc.
-    fn set_clobbered(&mut self, clobbered: Vec<Writable<PReg>>);
+    fn set_clobbered(&mut self, clobbered: Vec<PReg>);
 
     /// Generate a stack map, given a list of spillslots and the emission state
     /// at a given program point (prior to emission fo the safepointing

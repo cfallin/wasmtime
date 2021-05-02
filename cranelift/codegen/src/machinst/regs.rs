@@ -13,32 +13,6 @@ pub struct Reg {
     inner: OperandOrAllocation,
 }
 
-/// A `Writable` wrapper denotes, at the type level, that we are
-/// allowed to write to the given operand/reg.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Writable<T: Copy + Clone + Debug + PartialEq + Eq>(T);
-
-impl<T: Copy + Clone + Debug + PartialEq + Eq> Writable<T> {
-    /// Create a new `Writable`. Note that this is not specially
-    /// hidden or encapsulated: the user sometimes needs to assert
-    /// that they really can write to a register when generating
-    /// special code sequences. However, its use should be rare and
-    /// should be audited.
-    pub fn from_reg(r: T) -> Self {
-        Writable(r)
-    }
-
-    /// Get the inner reg.
-    pub fn to_reg(self) -> T {
-        self.0
-    }
-
-    /// Map the inner reg to another value.
-    pub fn map<F: Fn(T) -> U, U: Copy + Clone + Debug + PartialEq + Eq>(self, f: F) -> Writable<U> {
-        Writable(f(self.0))
-    }
-}
-
 impl Reg {
     /// Create a `Reg` that wraps an `Operand`: this is the
     /// pre-regalloc form of an instruction's register slot.

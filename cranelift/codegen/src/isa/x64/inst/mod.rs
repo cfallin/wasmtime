@@ -42,8 +42,9 @@ pub enum Inst {
     AluRmiR {
         size: OperandSize, // 4 or 8
         op: AluRmiROpcode,
-        src: RegMemImm,
-        dst: Writable<Reg>,
+        src1: RegMemImm,
+        src2: Reg,
+        dst: Reg,
     },
 
     /// Instructions on GPR that only read src and defines dst (dst is not modified): bsr, etc.
@@ -51,19 +52,21 @@ pub enum Inst {
         size: OperandSize, // 2, 4 or 8
         op: UnaryRmROpcode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// Bitwise not
     Not {
         size: OperandSize, // 1, 2, 4 or 8
-        src: Writable<Reg>,
+        src: Reg,
+        dst: Reg,
     },
 
     /// Integer negation
     Neg {
         size: OperandSize, // 1, 2, 4 or 8
-        src: Writable<Reg>,
+        src: Reg,
+        dst: Reg,
     },
 
     /// Integer quotient and remainder: (div idiv) $rax $rdx (reg addr)
@@ -71,6 +74,10 @@ pub enum Inst {
         size: OperandSize, // 1, 2, 4 or 8
         signed: bool,
         divisor: RegMem,
+        in_lo: Reg,   // must be constrained to rax
+        in_hi: Reg,   // must be constrained to rdx
+        out_div: Reg, // must be constrained to rax
+        out_rem: Reg, // must be constrained to rdx
     },
 
     /// The high bits (RDX) of a (un)signed multiply: RDX:RAX := RAX * rhs.
@@ -78,6 +85,9 @@ pub enum Inst {
         size: OperandSize, // 2, 4, or 8
         signed: bool,
         rhs: RegMem,
+        src: Reg,    // must be constrained to rax
+        out_lo: Reg, // must be constrained to rax
+        out_hi: Reg, // must be constrained to rdx
     },
 
     /// A synthetic sequence to implement the right inline checks for remainder and division,
@@ -86,24 +96,24 @@ pub enum Inst {
     /// instruction does.
     /// The generated code sequence is described in the emit's function match arm for this
     /// instruction.
-    ///
-    /// Note: %rdx is marked as modified by this instruction, to avoid an early clobber problem
-    /// with the temporary and divisor registers. Make sure to zero %rdx right before this
-    /// instruction, or you might run into regalloc failures where %rdx is live before its first
-    /// def!
     CheckedDivOrRemSeq {
         kind: DivOrRemKind,
         size: OperandSize,
         /// The divisor operand. Note it's marked as modified so that it gets assigned a register
         /// different from the temporary.
-        divisor: Writable<Reg>,
-        tmp: Option<Writable<Reg>>,
+        divisor: Reg, // input
+        tmp: Reg,      // tmp, alloc'd for whole seq
+        dividend: Reg, // input; must be constrained to rax
+        out_lo: Reg,   // output; must be constrained to rax
+        out_hi: Reg,   // output; must be constrained to rdx
     },
 
     /// Do a sign-extend based on the sign of the value in rax into rdx: (cwd cdq cqo)
     /// or al into ah: (cbw)
     SignExtendData {
         size: OperandSize, // 1, 2, 4 or 8
+        src: Reg,          // must be constrained to rax
+        dst: Reg,          // must be constrained to rax (size == 1) or rdx
     },
 
     /// Constant materialization: (imm32 imm64) reg.
@@ -111,14 +121,14 @@ pub enum Inst {
     Imm {
         dst_size: OperandSize, // 4 or 8
         simm64: u64,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// GPR to GPR move: mov (64 32) reg reg.
     MovRR {
         size: OperandSize, // 4 or 8
         src: Reg,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// Zero-extended loads, except for 64 bits: movz (bl bq wl wq lq) addr reg.
@@ -127,26 +137,20 @@ pub enum Inst {
     MovzxRmR {
         ext_mode: ExtMode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// A plain 64-bit integer load, since MovZX_RM_R can't represent that.
-    Mov64MR {
-        src: SyntheticAmode,
-        dst: Writable<Reg>,
-    },
+    Mov64MR { src: SyntheticAmode, dst: Reg },
 
     /// Loads the memory address of addr into dst.
-    LoadEffectiveAddress {
-        addr: SyntheticAmode,
-        dst: Writable<Reg>,
-    },
+    LoadEffectiveAddress { addr: SyntheticAmode, dst: Reg },
 
     /// Sign-extended loads and moves: movs (bl bq wl wq lq) addr reg.
     MovsxRmR {
         ext_mode: ExtMode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// Integer stores: mov (b w l q) reg addr.
@@ -162,14 +166,16 @@ pub enum Inst {
         kind: ShiftKind,
         /// shift count: Some(0 .. #bits-in-type - 1), or None to mean "%cl".
         num_bits: Option<u8>,
-        dst: Writable<Reg>,
+        src: Reg,
+        dst: Reg, // reuses src
     },
 
     /// Arithmetic SIMD shifts.
     XmmRmiReg {
         opcode: SseOpcode,
-        src: RegMemImm,
-        dst: Writable<Reg>,
+        src1: RegMemImm,
+        src2: Reg,
+        dst: Reg, // reuses src2
     },
 
     /// Integer comparisons/tests: cmp or test (b w l q) (reg addr imm) reg.
@@ -181,15 +187,16 @@ pub enum Inst {
     },
 
     /// Materializes the requested condition code in the destination reg.
-    Setcc { cc: CC, dst: Writable<Reg> },
+    Setcc { cc: CC, dst: Reg },
 
     /// Integer conditional move.
     /// Overwrites the destination register.
     Cmove {
         size: OperandSize, // 2, 4, or 8
         cc: CC,
-        src: RegMem,
-        dst: Writable<Reg>,
+        src1: RegMem,
+        src2: Reg,
+        dst: Reg, // reuses src2
     },
 
     // =====================================
@@ -198,15 +205,16 @@ pub enum Inst {
     Push64 { src: RegMemImm },
 
     /// popq reg
-    Pop64 { dst: Writable<Reg> },
+    Pop64 { dst: Reg },
 
     // =====================================
     // Floating-point operations.
     /// XMM (scalar or vector) binary op: (add sub and or xor mul adc? sbb?) (32 64) (reg addr) reg
     XmmRmR {
         op: SseOpcode,
-        src: RegMem,
-        dst: Writable<Reg>,
+        src1: RegMem,
+        src2: Reg,
+        dst: Reg, // reuses src2
     },
 
     /// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg, sqrt,
@@ -218,7 +226,7 @@ pub enum Inst {
     XmmUnaryRmR {
         op: SseOpcode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
     },
 
     /// XMM (scalar or vector) unary op (from xmm to reg/mem): stores, movd, movq
@@ -231,7 +239,7 @@ pub enum Inst {
     /// XMM (vector) unary op (to move a constant value into an xmm register): movups
     XmmLoadConst {
         src: VCodeConstant,
-        dst: Writable<Reg>,
+        dst: Reg,
         ty: Type,
     },
 
@@ -239,7 +247,7 @@ pub enum Inst {
     XmmToGpr {
         op: SseOpcode,
         src: Reg,
-        dst: Writable<Reg>,
+        dst: Reg,
         dst_size: OperandSize,
     },
 
@@ -247,21 +255,17 @@ pub enum Inst {
     GprToXmm {
         op: SseOpcode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
         src_size: OperandSize,
     },
 
     /// Converts an unsigned int64 to a float32/float64.
     CvtUint64ToFloatSeq {
         dst_size: OperandSize, // 4 or 8
-        /// A copy of the source register, fed by lowering. It is marked as modified during
-        /// register allocation to make sure that the temporary registers differ from the src
-        /// register, since both registers are live at the same time in the generated code
-        /// sequence.
-        src: Writable<Reg>,
-        dst: Writable<Reg>,
-        tmp_gpr1: Writable<Reg>,
-        tmp_gpr2: Writable<Reg>,
+        src: Reg,
+        dst: Reg,
+        tmp_gpr1: Reg,
+        tmp_gpr2: Reg,
     },
 
     /// Converts a scalar xmm to a signed int32/int64.
@@ -269,14 +273,10 @@ pub enum Inst {
         dst_size: OperandSize,
         src_size: OperandSize,
         is_saturating: bool,
-        /// A copy of the source register, fed by lowering. It is marked as modified during
-        /// register allocation to make sure that the temporary xmm register differs from the src
-        /// register, since both registers are live at the same time in the generated code
-        /// sequence.
-        src: Writable<Reg>,
-        dst: Writable<Reg>,
-        tmp_gpr: Writable<Reg>,
-        tmp_xmm: Writable<Reg>,
+        src: Reg,
+        dst: Reg,
+        tmp_gpr: Reg,
+        tmp_xmm: Reg,
     },
 
     /// Converts a scalar xmm to an unsigned int32/int64.
@@ -284,14 +284,10 @@ pub enum Inst {
         src_size: OperandSize,
         dst_size: OperandSize,
         is_saturating: bool,
-        /// A copy of the source register, fed by lowering, reused as a temporary. It is marked as
-        /// modified during register allocation to make sure that the temporary xmm register
-        /// differs from the src register, since both registers are live at the same time in the
-        /// generated code sequence.
-        src: Writable<Reg>,
-        dst: Writable<Reg>,
-        tmp_gpr: Writable<Reg>,
-        tmp_xmm: Writable<Reg>,
+        src: Reg,
+        dst: Reg,
+        tmp_gpr: Reg,
+        tmp_xmm: Reg,
     },
 
     /// A sequence to compute min/max with the proper NaN semantics for xmm registers.
@@ -299,7 +295,8 @@ pub enum Inst {
         size: OperandSize,
         is_min: bool,
         lhs: Reg,
-        rhs_dst: Writable<Reg>,
+        rhs: Reg,
+        dst: Reg,
     },
 
     /// XMM (scalar) conditional move.
@@ -307,8 +304,9 @@ pub enum Inst {
     XmmCmove {
         size: OperandSize, // 4 or 8
         cc: CC,
-        src: RegMem,
-        dst: Writable<Reg>,
+        src1: RegMem,
+        src2: Reg,
+        dst: Reg, // reuses src2
     },
 
     /// Float comparisons/tests: cmp (b w l q) (reg addr imm) reg.
@@ -322,7 +320,7 @@ pub enum Inst {
     XmmRmRImm {
         op: SseOpcode,
         src: RegMem,
-        dst: Writable<Reg>,
+        dst: Reg,
         imm: u8,
         size: OperandSize, // 4 or 8
     },
@@ -347,10 +345,6 @@ pub enum Inst {
 
     /// Return.
     Ret,
-
-    /// A placeholder instruction, generating no code, meaning that a function epilogue must be
-    /// inserted there.
-    EpiloguePlaceholder,
 
     /// Jump to a known target: jmp simm32.
     JmpKnown { dst: MachLabel },
@@ -379,8 +373,8 @@ pub enum Inst {
     /// See comment in lowering about the temporaries signedness.
     JmpTableSeq {
         idx: Reg,
-        tmp1: Writable<Reg>,
-        tmp2: Writable<Reg>,
+        tmp1: Reg,
+        tmp2: Reg,
         default_target: MachLabel,
         targets: Vec<MachLabel>,
         targets_for_term: Vec<MachLabel>,
@@ -403,7 +397,7 @@ pub enum Inst {
     /// movq $name@GOTPCREL(%rip), dst    if PIC is enabled, or
     /// movabsq $name, dst                otherwise.
     LoadExtName {
-        dst: Writable<Reg>,
+        dst: Reg,
         name: Box<ExternalName>,
         offset: i64,
     },
@@ -423,6 +417,8 @@ pub enum Inst {
         ty: Type, // I8, I16, I32 or I64
         src: Reg,
         dst: SyntheticAmode,
+        expected: Reg, // input; must be constrained to rax
+        actual: Reg,   // output; must be constrained to rax
     },
 
     /// A synthetic instruction, based on a loop around a native `lock cmpxchg` instruction.
@@ -451,6 +447,10 @@ pub enum Inst {
     AtomicRmwSeq {
         ty: Type, // I8, I16, I32 or I64
         op: inst_common::AtomicRmwOp,
+        addr: Reg,    // input; must be constrained to r9
+        src: Reg,     // input; must be constrained to r10
+        scratch: Reg, // temp; must be constrained to r11
+        old_out: Reg, // output; must be constrained to rax
     },
 
     /// A memory fence (mfence, lfence or sfence).
@@ -474,15 +474,21 @@ pub enum Inst {
     /// One alternative would be a compound instruction that somehow encapsulates the others and
     /// reports its own `def`s/`use`s/`mod`s; this adds complexity (the instruction list is no
     /// longer flat) and requires knowledge about semantics and initial-value independence anyway.
-    XmmUninitializedValue { dst: Writable<Reg> },
+    XmmUninitializedValue { dst: Reg },
 
     /// A call to the `ElfTlsGetAddr` libcall. Returns address
     /// of TLS symbol in rax.
-    ElfTlsGetAddr { symbol: ExternalName },
+    ElfTlsGetAddr {
+        symbol: ExternalName,
+        dst: Reg, // must be constrained to rax
+    },
 
     /// A Mach-O TLS symbol access. Returns address of the TLS
     /// symbol in rax.
-    MachOTlsGetAddr { symbol: ExternalName },
+    MachOTlsGetAddr {
+        symbol: ExternalName,
+        dst: Reg, // must be constrained to rax
+    },
 
     /// A definition of a value label.
     ValueLabelMarker { reg: Reg, label: ValueLabel },
@@ -640,7 +646,7 @@ impl Inst {
         kind: DivOrRemKind,
         size: OperandSize,
         divisor: Writable<Reg>,
-        tmp: Option<Writable<Reg>>,
+        tmp: Writable<Reg>,
     ) -> Inst {
         debug_assert!(divisor.to_reg().get_class() == RegClass::I64);
         debug_assert!(tmp
@@ -2143,7 +2149,7 @@ impl RegMem {
     }
 }
 
-fn x64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
+fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, f: F) {
     // Note this must be carefully synchronized with x64_get_regs.
     let produces_const = inst.produces_const();
 
@@ -2451,12 +2457,8 @@ fn x64_map_regs<RUM: RegUsageMapper>(inst: &mut Inst, mapper: &RUM) {
 // Instructions: misc functions and external interface
 
 impl MachInst for Inst {
-    fn get_regs(&self, collector: &mut RegUsageCollector) {
-        x64_get_regs(&self, collector)
-    }
-
-    fn map_regs<RUM: RegUsageMapper>(&mut self, mapper: &RUM) {
-        x64_map_regs(self, mapper);
+    fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: F) {
+        x64_visit_regs(self, f)
     }
 
     fn is_move(&self) -> Option<(Writable<Reg>, Reg)> {

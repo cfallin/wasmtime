@@ -440,7 +440,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let ty = I::type_for_rc(class);
                 if from.is_reg() && to.is_reg() {
                     vec![I::gen_move(
-                        Writable::from_reg(Reg::preg_def(to.as_reg().unwrap())),
+                        Reg::preg_def(to.as_reg().unwrap()),
                         Reg::preg_use(from.as_reg().unwrap()),
                         ty,
                     )]
@@ -476,7 +476,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         }
         let mut clobbered_vec: Vec<PReg> = vec![];
         for i in clobbered.iter() {
-            clobbered_vec.push(Writable::from_reg(PReg::from_index(i)));
+            clobbered_vec.push(PReg::from_index(i));
         }
         self.abi.set_clobbered(clobbered_vec);
 
@@ -747,7 +747,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
         }
     }
 
-    fn is_move(&self, insn: &regalloc2::Inst) -> Option<(Writable<Reg>, Reg)> {
+    fn is_move(&self, insn: &regalloc2::Inst) -> Option<(Reg, Reg)> {
         self.insts[insn.index()].is_move()
     }
 

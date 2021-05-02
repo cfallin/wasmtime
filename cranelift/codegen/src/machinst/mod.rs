@@ -122,7 +122,7 @@ pub trait MachInst: Clone + Debug {
     /// semantics) to delete this instruction when `src == dest`; take
     /// care, for example, that moves with other side effects, such as
     /// widening, are not included.
-    fn is_move(&self) -> Option<(Writable<Reg>, Reg)>;
+    fn is_move(&self) -> Option<(Reg, Reg)>;
 
     /// Is this a terminator (branch or ret)? If so, return its type
     /// (ret/uncond/cond) and target if applicable.
@@ -154,7 +154,7 @@ pub trait MachInst: Clone + Debug {
     }
 
     /// Generate a move.
-    fn gen_move(to_reg: Writable<Reg>, from_reg: Reg, ty: Type) -> Self;
+    fn gen_move(to_reg: Reg, from_reg: Reg, ty: Type) -> Self;
 
     /// Generate a register-constraint pseudoinst. This pseudoinst can
     /// be used to constrain certain vregs to certain locations (e.g.,
@@ -163,8 +163,8 @@ pub trait MachInst: Clone + Debug {
     fn gen_reg_constraint_inst(args: Vec<Operand>) -> Self;
 
     /// Generate a constant into a reg.
-    fn gen_constant<F: FnMut(Type) -> Writable<Reg>>(
-        to_regs: ValueRegs<Writable<Reg>>,
+    fn gen_constant<F: FnMut(Type) -> Reg>(
+        to_regs: ValueRegs<Reg>,
         value: u128,
         ty: Type,
         alloc_tmp: F,

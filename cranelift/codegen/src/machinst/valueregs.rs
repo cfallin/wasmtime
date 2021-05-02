@@ -1,7 +1,7 @@
 //! Data structure for tracking the (possibly multiple) registers that hold one
 //! SSA `Value`.
 
-use super::{PReg, Reg, VReg, Writable};
+use super::{PReg, Reg, VReg};
 use std::fmt::Debug;
 
 #[cfg(feature = "arm32")]
@@ -50,21 +50,6 @@ impl InvalidSentinel for VReg {
 impl InvalidSentinel for PReg {
     fn invalid_sentinel() -> Self {
         PReg::invalid()
-    }
-}
-impl InvalidSentinel for Writable<Reg> {
-    fn invalid_sentinel() -> Self {
-        Writable::from_reg(Reg::invalid_sentinel())
-    }
-}
-impl InvalidSentinel for Writable<VReg> {
-    fn invalid_sentinel() -> Self {
-        Writable::from_reg(VReg::invalid_sentinel())
-    }
-}
-impl InvalidSentinel for Writable<PReg> {
-    fn invalid_sentinel() -> Self {
-        Writable::from_reg(VReg::invalid_sentinel())
     }
 }
 
@@ -182,16 +167,4 @@ impl<R: Clone + Copy + Debug + PartialEq + Eq + InvalidSentinel> ValueRegs<R> {
             parts: [f(self.parts[0]), f(self.parts[1])],
         }
     }
-}
-
-/// Create a writable ValueRegs.
-#[allow(dead_code)]
-pub(crate) fn writable_value_regs(regs: ValueRegs<Reg>) -> ValueRegs<Writable<Reg>> {
-    regs.map(|r| Writable::from_reg(r))
-}
-
-/// Strip a writable ValueRegs down to a readonly ValueRegs.
-#[allow(dead_code)]
-pub(crate) fn non_writable_value_regs(regs: ValueRegs<Writable<Reg>>) -> ValueRegs<Reg> {
-    regs.map(|r| r.to_reg())
 }

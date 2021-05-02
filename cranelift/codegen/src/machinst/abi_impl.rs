@@ -124,7 +124,7 @@
 //!   - Return v0 in memory at `[P+16]`.
 
 use super::abi::*;
-use super::{Reg, Writable};
+use super::Reg;
 use crate::binemit::StackMap;
 use crate::ir::types::*;
 use crate::ir::{ArgumentExtension, ArgumentPurpose, StackSlot};
@@ -358,7 +358,7 @@ pub trait ABIMachineSpec {
     fn fp_to_arg_offset(call_conv: isa::CallConv, flags: &settings::Flags) -> i64;
 
     /// Generate a load from the stack.
-    fn gen_load_stack(mem: StackAMode, into_reg: Writable<Reg>, ty: Type) -> Self::I;
+    fn gen_load_stack(mem: StackAMode, into_reg: Reg, ty: Type) -> Self::I;
 
     /// Generate a store to the stack.
     fn gen_store_stack(mem: StackAMode, from_reg: Reg, ty: Type) -> Self::I;
@@ -370,7 +370,7 @@ pub trait ABIMachineSpec {
 
     /// Generate an integer-extend operation.
     fn gen_extend(
-        to_reg: Writable<Reg>,
+        to_reg: Reg,
         from_reg: Reg,
         is_signed: bool,
         from_bits: u8,
@@ -386,7 +386,7 @@ pub trait ABIMachineSpec {
     ///
     /// - The add-imm sequence must work correctly when `from_reg` and/or
     ///   `into_reg` are the register returned by `get_stacklimit_reg()`.
-    fn gen_add_imm(into_reg: Writable<Reg>, from_reg: Reg, imm: u32) -> SmallInstVec<Self::I>;
+    fn gen_add_imm(into_reg: Reg, from_reg: Reg, imm: u32) -> SmallInstVec<Self::I>;
 
     /// Generate a sequence that traps with a `TrapCode::StackOverflow` code if
     /// the stack pointer is less than the given limit register (assuming the
@@ -395,7 +395,7 @@ pub trait ABIMachineSpec {
 
     /// Generate an instruction to compute an address of a stack slot (FP- or
     /// SP-based offset).
-    fn gen_get_stack_addr(mem: StackAMode, into_reg: Writable<Reg>, ty: Type) -> Self::I;
+    fn gen_get_stack_addr(mem: StackAMode, into_reg: Reg, ty: Type) -> Self::I;
 
     /// Get a fixed register to use to compute a stack limit. This is needed for
     /// certain sequences generated after the register allocator has already
@@ -411,7 +411,7 @@ pub trait ABIMachineSpec {
     fn get_stacklimit_reg() -> Reg;
 
     /// Generate a store to the given [base+offset] address.
-    fn gen_load_base_offset(into_reg: Writable<Reg>, base: Reg, offset: i32, ty: Type) -> Self::I;
+    fn gen_load_base_offset(into_reg: Reg, base: Reg, offset: i32, ty: Type) -> Self::I;
 
     /// Generate a load from the given [base+offset] address.
     fn gen_store_base_offset(base: Reg, offset: i32, from_reg: Reg, ty: Type) -> Self::I;
@@ -466,7 +466,7 @@ pub trait ABIMachineSpec {
     fn gen_call(
         dest: &CallDest,
         opcode: ir::Opcode,
-        tmp: Writable<Reg>,
+        tmp: Reg,
         callee_conv: isa::CallConv,
         callee_conv: isa::CallConv,
         operands: Vec<Operand>,
@@ -599,7 +599,7 @@ pub struct ABICalleeImpl<M: ABIMachineSpec> {
     /// frame/allocation size needed for stackslots and spillslots.
     total_frame_size: Option<u32>,
     /// The register holding the return-area pointer, if needed.
-    ret_area_ptr: Option<Writable<VReg>>,
+    ret_area_ptr: Option<VReg>,
     /// Calling convention this function expects.
     call_conv: isa::CallConv,
     /// The settings controlling this function's compilation.
@@ -659,7 +659,7 @@ fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
                     let ext = M::get_ext_mode(call_conv, extension);
                     let signed = ext == ArgumentExtension::Sext;
                     insts.push(M::gen_extend(
-                        Writable::from_reg(Reg::reg_def(new_vreg)),
+                        Reg::reg_def(new_vreg),
                         Reg::reg_use(from_reg),
                         signed,
                         from_bits,
@@ -794,7 +794,7 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
         // `scratch`. If our stack size doesn't fit into an immediate this
         // means we need a second scratch register for loading the stack size
         // into a register.
-        let scratch = Writable::from_reg(M::get_stacklimit_reg());
+        let scratch = M::get_stacklimit_reg();
         insts.extend(M::gen_add_imm(scratch, stack_limit, stack_size).into_iter());
         insts.extend(M::gen_stack_lower_bound_trap(scratch.to_reg()));
     }
@@ -815,7 +815,7 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
 /// the x86 backend does for now, and hopefully this can be somewhat cleaned up
 /// in the future too!
 ///
-/// Also note that this function will make use of `writable_spilltmp_reg()` as a
+/// Also note that this function will make use of `spilltmp_reg()` as a
 /// temporary register to store values in if necessary. Currently after we write
 /// to this register there's guaranteed to be no spilled values between where
 /// it's used, because we're not participating in register allocation anyway!
@@ -850,7 +850,7 @@ fn generate_gv<M: ABIMachineSpec>(
             readonly: _,
         } => {
             let base = generate_gv::<M>(f, abi, base, insts);
-            let into_reg = Writable::from_reg(M::get_stacklimit_reg());
+            let into_reg = M::get_stacklimit_reg();
             insts.push(M::gen_load_base_offset(
                 into_reg,
                 base,
@@ -885,7 +885,7 @@ fn ty_from_ty_hint_or_reg_class<M: ABIMachineSpec>(r: Reg, ty: Option<Type>) -> 
 
 fn gen_load_stack_multi<M: ABIMachineSpec>(
     from: StackAMode,
-    dst: ValueRegs<Writable<Reg>>,
+    dst: ValueRegs<Reg>,
     ty: Type,
 ) -> SmallInstVec<M::I> {
     let mut ret = smallvec![];
@@ -966,7 +966,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     fn gen_arg_seq<C: LowerCtx<I = Self::I>>(
         &self,
         ctx: &mut C,
-        mut args: Vec<ValueRegs<Writable<VReg>>>,
+        mut args: Vec<ValueRegs<VReg>>,
     ) -> SmallInstVec<Self::I> {
         if let Some(idx) = self.sig.stack_ret_arg {
             // Allocate the extra return-area-ptr arg a vreg, if needed.
@@ -998,7 +998,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                                         M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                                         ty,
                                     ),
-                                    Writable::from_reg(Reg::reg_def(vreg)),
+                                    Reg::reg_def(vreg),
                                     ty,
                                 ));
                             }
@@ -1093,7 +1093,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     }
 
     /// Produce an instruction that computes a stackslot address.
-    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into_reg: Writable<Reg>) -> Self::I {
+    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into_reg: Reg) -> Self::I {
         // Offset from beginning of stackslot area, which is at nominal SP (see
         // [MemArg::NominalSPOffset] for more details on nominal SP tracking).
         let stack_off = self.stackslots[slot] as i64;
@@ -1263,7 +1263,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         trace!("load_spillslot: slot {:?} -> sp_off {}", from_slot, sp_off);
         smallvec![M::gen_load_stack(
             StackAMode::NominalSPOffset(sp_off, ty),
-            Writable::from_reg(Reg::preg_def(to_reg)),
+            Reg::preg_def(to_reg),
             ty,
         )]
     }
