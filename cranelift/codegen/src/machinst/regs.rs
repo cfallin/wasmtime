@@ -262,3 +262,85 @@ impl RegType for VReg {
         self.class()
     }
 }
+impl RegType for Reg {
+    fn mk_use(self) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_use(op.vreg())
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Use)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_use_after(self) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_use_at_end(op.vreg())
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Use)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_def(self) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_def(op.vreg())
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Def)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_def_before(self) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_def_at_start(op.vreg())
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Def)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_reuse_def(self, idx: usize) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_reuse_def(op.vreg(), idx)
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Def)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_fixed_use(self, reg: PReg) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_fixed_use(op.vreg(), reg)
+        } else if let Some(alloc) = self.as_alloc() {
+            assert_eq!(alloc.as_reg().unwrap(), reg);
+            Reg::preg_use(reg)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_fixed_def(self, reg: PReg) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_fixed_def(op.vreg(), reg)
+        } else if let Some(alloc) = self.as_alloc() {
+            assert_eq!(alloc.as_reg().unwrap(), reg);
+            Reg::preg_def(reg)
+        } else {
+            unreachable!()
+        }
+    }
+    fn mk_temp(self) -> Reg {
+        if let Some(op) = self.as_operand() {
+            Reg::reg_temp(op.vreg())
+        } else if let Some(alloc) = self.as_alloc() {
+            Reg::alloc(alloc, OperandKind::Def)
+        } else {
+            unreachable!()
+        }
+    }
+    fn from_reg(r: Reg) -> Self {
+        r
+    }
+    fn class(self) -> RegClass {
+        self.class()
+    }
+}

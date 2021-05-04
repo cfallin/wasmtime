@@ -443,8 +443,7 @@ pub enum Inst {
         ty: Type, // I8, I16, I32 or I64
         src: Reg,
         dst: SyntheticAmode,
-        expected: Reg, // input
-        actual: Reg,   // output
+        actual: Reg, // output; reuses src
     },
 
     /// A synthetic instruction, based on a loop around a native `lock cmpxchg` instruction.
@@ -728,7 +727,7 @@ impl Inst {
         let dividend = dividend.mk_fixed_use(regs::rax());
         let tmp = tmp.mk_temp();
         let out_lo = out_lo.mk_fixed_use(regs::rax());
-        let out_hi = out_hi.mk_fixed_use(regs::rax());
+        let out_hi = out_hi.mk_fixed_use(regs::rdx());
 
         Inst::CheckedDivOrRemSeq {
             kind,

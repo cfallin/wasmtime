@@ -4462,7 +4462,11 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                     // because if not, there is a chance that the register we use could be initialized
                     // with NaN .. in which case the CMPPS would fail since NaN != NaN.
                     let tmp = ctx.alloc_tmp(output_ty).only_reg().unwrap();
-                    ctx.emit(Inst::xmm_rm_r_const(SseOpcode::Xorps, RegMem::from(tmp), tmp));
+                    ctx.emit(Inst::xmm_rm_r_const(
+                        SseOpcode::Xorps,
+                        RegMem::from(tmp),
+                        tmp,
+                    ));
                     let cond = FcmpImm::from(FloatCC::Equal);
                     let cmpps = Inst::xmm_rm_r_imm_const(
                         SseOpcode::Cmpps,
