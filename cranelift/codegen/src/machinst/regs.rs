@@ -179,3 +179,86 @@ impl std::fmt::Debug for Reg {
         }
     }
 }
+
+/// We parameterize some Inst constructors to allow use both before
+/// and after the regalloc has run: we can use `PReg` and `VReg`
+/// values to build instructions, passing in lambdas to build
+/// `Operand`s with constraints in the `VReg` case.
+pub trait RegType {
+    fn mk_use(self) -> Reg;
+    fn mk_use_after(self) -> Reg;
+    fn mk_def(self) -> Reg;
+    fn mk_def_before(self) -> Reg;
+    fn mk_reuse_def(self, idx: usize) -> Reg;
+    fn mk_fixed_use(self, reg: PReg) -> Reg;
+    fn mk_fixed_def(self, reg: PReg) -> Reg;
+    fn mk_temp(self) -> Reg;
+    fn from_reg(r: Reg) -> Self;
+    fn class(self) -> RegClass;
+}
+impl RegType for PReg {
+    fn mk_use(self) -> Reg {
+        Reg::preg_use(self)
+    }
+    fn mk_use_after(self) -> Reg {
+        Reg::preg_use(self)
+    }
+    fn mk_def(self) -> Reg {
+        Reg::preg_def(self)
+    }
+    fn mk_def_before(self) -> Reg {
+        Reg::preg_def(self)
+    }
+    fn mk_reuse_def(self, idx: usize) -> Reg {
+        Reg::preg_def(self)
+    }
+    fn mk_fixed_use(self, reg: PReg) -> Reg {
+        assert_eq!(self, reg);
+        Reg::preg_use(self)
+    }
+    fn mk_fixed_def(self, reg: PReg) -> Reg {
+        assert_eq!(self, reg);
+        Reg::preg_def(self)
+    }
+    fn mk_temp(self) -> Reg {
+        Reg::preg_def(self)
+    }
+    fn from_reg(r: Reg) -> Self {
+        r.as_preg().unwrap()
+    }
+    fn class(self) -> RegClass {
+        self.class()
+    }
+}
+impl RegType for VReg {
+    fn mk_use(self) -> Reg {
+        Reg::reg_use(self)
+    }
+    fn mk_use_after(self) -> Reg {
+        Reg::reg_use_at_end(self)
+    }
+    fn mk_def(self) -> Reg {
+        Reg::reg_def(self)
+    }
+    fn mk_def_before(self) -> Reg {
+        Reg::reg_def_at_start(self)
+    }
+    fn mk_reuse_def(self, idx: usize) -> Reg {
+        Reg::reg_reuse_def(self, idx)
+    }
+    fn mk_fixed_use(self, reg: PReg) -> Reg {
+        Reg::reg_fixed_use(self, reg)
+    }
+    fn mk_fixed_def(self, reg: PReg) -> Reg {
+        Reg::reg_fixed_def(self, reg)
+    }
+    fn mk_temp(self) -> Reg {
+        Reg::reg_temp(self)
+    }
+    fn from_reg(r: Reg) -> Self {
+        r.as_operand().unwrap().vreg()
+    }
+    fn class(self) -> RegClass {
+        self.class()
+    }
+}

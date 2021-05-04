@@ -8,6 +8,7 @@ use crate::isa::{unwind::UnwindInst, x64::inst::*, CallConv};
 use crate::machinst::abi::SmallInstVec;
 use crate::machinst::abi_impl::*;
 use crate::machinst::helpers::align_to;
+use crate::machinst::regs::RegType;
 use crate::machinst::{MachInst, MachInstEmit, Reg, RegClass, RelocDistance, ValueRegs};
 use crate::settings;
 use crate::{CodegenError, CodegenResult};
@@ -319,7 +320,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         }
     }
 
-    fn gen_load_stack(mem: StackAMode, into_reg: Reg, ty: Type) -> Self::I {
+    fn gen_load_stack<R: RegType>(mem: StackAMode, into_reg: R, ty: Type) -> Self::I {
         let ext_kind = match ty {
             types::B1
             | types::B8
@@ -335,7 +336,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         Inst::load(ty, mem, into_reg, ext_kind)
     }
 
-    fn gen_store_stack(mem: StackAMode, from_reg: Reg, ty: Type) -> Self::I {
+    fn gen_store_stack<R: RegType>(mem: StackAMode, from_reg: R, ty: Type) -> Self::I {
         Inst::store(ty, from_reg, mem)
     }
 
@@ -351,45 +352,38 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let mut ret = smallvec![];
 
         if ty == types::I64 {
-            ret.push(Inst::push64(Reg::preg_use(tmp)));
+            ret.push(Inst::push64(tmp));
         } else {
             ret.push(Inst::alu_rmi_r(
                 OperandSize::Size64,
                 AluRmiROpcode::Sub,
                 RegMemImm::imm(offset),
-                Reg::preg_def(regs::rsp()),
+                regs::rsp(),
+                regs::rsp(),
             ));
-            ret.push(Inst::store(
-                ty,
-                Reg::preg_use(tmp),
-                Amode::imm_reg(0, Reg::preg_use(regs::rsp())),
-            ));
+            ret.push(Inst::store(ty, tmp, Amode::imm_reg(0, regs::rsp())));
         }
 
         let to_mem = to_mem.offset_sp(offset);
         let from_mem = from_mem.offset_sp(offset);
-        ret.push(Inst::load(
-            ty,
-            from_mem.into(),
-            Reg::preg_def(tmp),
-            ExtKind::None,
-        ));
-        ret.push(Inst::store(ty, Reg::preg_use(tmp), to_mem.into()));
+        ret.push(Inst::load(ty, from_mem.into(), tmp, ExtKind::None));
+        ret.push(Inst::store(ty, tmp, to_mem.into()));
 
         if ty == types::I64 {
-            ret.push(Inst::pop64(Reg::preg_def(tmp)));
+            ret.push(Inst::pop64(tmp));
         } else {
             ret.push(Inst::load(
                 ty,
-                Amode::imm_reg(0, Reg::preg_use(regs::rsp())),
-                Reg::preg_def(tmp),
+                Amode::imm_reg(0, regs::rsp()),
+                tmp,
                 ExtKind::None,
             ));
             ret.push(Inst::alu_rmi_r(
                 OperandSize::Size64,
                 AluRmiROpcode::Add,
                 RegMemImm::imm(offset),
-                Reg::preg_def(regs::rsp()),
+                regs::rsp(),
+                regs::rsp(),
             ));
         }
 
@@ -397,9 +391,9 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     }
 
     /// Generate an integer-extend operation.
-    fn gen_extend(
-        to_reg: Reg,
-        from_reg: Reg,
+    fn gen_extend<R: RegType>(
+        to_reg: R,
+        from_reg: R,
         is_signed: bool,
         from_bits: u8,
         to_bits: u8,
@@ -413,19 +407,19 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         }
     }
 
-    fn gen_add_imm(into_reg: Reg, from_reg: Reg, imm: u32) -> SmallInstVec<Self::I> {
+    fn gen_add_imm<R: RegType>(into_reg: R, from_reg: R, imm: u32) -> SmallInstVec<Self::I> {
         let mut ret = smallvec![];
-        ret.push(Inst::AluRmiR {
-            size: OperandSize::Size64,
-            op: AluRmiROpcode::Add,
-            src1: RegMemImm::imm(imm),
-            src2: from_reg,
-            dst: into_reg,
-        });
+        ret.push(Inst::alu_rmi_r(
+            OperandSize::Size64,
+            AluRmiROpcode::Add,
+            RegMemImm::imm(imm),
+            from_reg,
+            into_reg,
+        ));
         ret
     }
 
-    fn gen_stack_lower_bound_trap(limit_reg: Reg) -> SmallInstVec<Self::I> {
+    fn gen_stack_lower_bound_trap<R: RegType>(limit_reg: R) -> SmallInstVec<Self::I> {
         smallvec![
             Inst::cmp_rmi_r(OperandSize::Size64, RegMemImm::reg(regs::rsp()), limit_reg),
             Inst::TrapIf {
@@ -436,12 +430,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         ]
     }
 
-    fn gen_get_stack_addr(mem: StackAMode, into_reg: Reg, _ty: Type) -> Self::I {
+    fn gen_get_stack_addr(mem: StackAMode, into_reg: R, _ty: Type) -> Self::I {
         let mem: SyntheticAmode = mem.into();
         Inst::lea(mem, into_reg)
     }
 
-    fn get_stacklimit_reg() -> Reg {
+    fn get_stacklimit_reg() -> PReg {
         debug_assert!(
             !is_callee_save_systemv(regs::r10().to_real_reg())
                 && !is_callee_save_baldrdash(regs::r10().to_real_reg())
@@ -452,7 +446,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         regs::r10()
     }
 
-    fn gen_load_base_offset(into_reg: Reg, base: Reg, offset: i32, ty: Type) -> Self::I {
+    fn gen_load_base_offset<R: RegType>(into_reg: R, base: R, offset: i32, ty: Type) -> Self::I {
         // Only ever used for I64s; if that changes, see if the ExtKind below needs to be changed.
         assert_eq!(ty, I64);
         let simm32 = offset as u32;
@@ -460,7 +454,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         Inst::load(ty, mem, into_reg, ExtKind::None)
     }
 
-    fn gen_store_base_offset(base: Reg, offset: i32, from_reg: Reg, ty: Type) -> Self::I {
+    fn gen_store_base_offset<R: RegType>(base: R, offset: i32, from_reg: R, ty: Type) -> Self::I {
         let simm32 = offset as u32;
         let mem = Amode::imm_reg(simm32, base);
         Inst::store(ty, from_reg, mem)
@@ -480,6 +474,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             alu_op,
             RegMemImm::imm(amount),
             regs::rsp(),
+            regs::rsp(),
         )]
     }
 
@@ -490,13 +485,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     }
 
     fn gen_prologue_frame_setup(flags: &settings::Flags) -> SmallInstVec<Self::I> {
-        let r_rsp = Reg::preg_use(regs::rsp());
-        let r_rbp = Reg::preg_use(regs::rbp());
-        let w_rbp = Reg::preg_def(regs::rbp());
+        let rsp = regs::rsp();
+        let rbp = regs::rbp();
         let mut insts = smallvec![];
         // `push %rbp`
         // RSP before the call will be 0 % 16.  So here, it is 8 % 16.
-        insts.push(Inst::push64(RegMemImm::reg(r_rbp)));
+        insts.push(Inst::push64(RegMemImm::reg(rbp)));
 
         if flags.unwind_info() {
             insts.push(Inst::Unwind {
@@ -508,20 +502,16 @@ impl ABIMachineSpec for X64ABIMachineSpec {
 
         // `mov %rsp, %rbp`
         // RSP is now 0 % 16
-        insts.push(Inst::mov_r_r(OperandSize::Size64, r_rsp, w_rbp));
+        insts.push(Inst::mov_r_r(OperandSize::Size64, rsp, rbp));
         insts
     }
 
     fn gen_epilogue_frame_restore(_: &settings::Flags) -> SmallInstVec<Self::I> {
         let mut insts = smallvec![];
         // `mov %rbp, %rsp`
-        insts.push(Inst::mov_r_r(
-            OperandSize::Size64,
-            Reg::preg_use(regs::rbp()),
-            Reg::preg_def(regs::rsp()),
-        ));
+        insts.push(Inst::mov_r_r(OperandSize::Size64, regs::rbp(), regs::rsp()));
         // `pop %rbp`
-        insts.push(Inst::pop64(Reg::preg_def(regs::rbp())));
+        insts.push(Inst::pop64(regs::rbp()));
         insts
     }
 
@@ -530,7 +520,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         insts.push(Inst::imm(
             OperandSize::Size32,
             frame_size as u64,
-            Reg::preg_def(regs::rax()),
+            regs::rax(),
         ));
         insts.push(Inst::CallKnown {
             dest: ExternalName::LibCall(LibCall::Probestack),
@@ -573,7 +563,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 OperandSize::Size64,
                 AluRmiROpcode::Sub,
                 RegMemImm::imm(stack_size),
-                Reg::preg_def(regs::rsp()),
+                regs::rsp(),
+                regs::rsp(),
             ));
         }
         // Store each clobbered register in order at offsets from RSP,
@@ -585,8 +576,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 RegClass::Int => {
                     insts.push(Inst::store(
                         types::I64,
-                        Reg::preg_use(reg),
-                        Amode::imm_reg(cur_offset, Reg::preg_use(regs::rsp())),
+                        reg,
+                        Amode::imm_reg(cur_offset, regs::rsp()),
                     ));
                     cur_offset += 8;
                 }
@@ -594,8 +585,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                     cur_offset = align_to(cur_offset, 16);
                     insts.push(Inst::store(
                         types::I8X16,
-                        Reg::preg_use(reg),
-                        Amode::imm_reg(cur_offset, Reg::preg_use(regs::rsp())),
+                        reg,
+                        Amode::imm_reg(cur_offset, regs::rsp()),
                     ));
                     cur_offset += 16;
                 }
@@ -633,8 +624,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             match reg.class() {
                 RegClass::Int => {
                     insts.push(Inst::mov64_m_r(
-                        Amode::imm_reg(cur_offset, Reg::preg_use(regs::rsp())),
-                        Reg::preg_def(reg),
+                        Amode::imm_reg(cur_offset, regs::rsp()),
+                        reg,
                     ));
                     cur_offset += 8;
                 }
@@ -642,8 +633,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                     cur_offset = align_to(cur_offset, 16);
                     insts.push(Inst::load(
                         types::I8X16,
-                        Amode::imm_reg(cur_offset, Reg::preg_use(regs::rsp())),
-                        Reg::preg_def(reg),
+                        Amode::imm_reg(cur_offset, regs::rsp()),
+                        reg,
                         ExtKind::None,
                     ));
                     cur_offset += 16;
@@ -657,7 +648,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 OperandSize::Size64,
                 AluRmiROpcode::Add,
                 RegMemImm::imm(stack_size),
-                Reg::preg_def(regs::rsp()),
+                regs::rsp(),
+                regs::rsp(),
             ));
         }
 
@@ -667,8 +659,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         if call_conv == isa::CallConv::Baldrdash2020 {
             let off = BALDRDASH_CALLEE_TLS_OFFSET + Self::fp_to_arg_offset(call_conv, flags);
             insts.push(Inst::mov64_m_r(
-                Amode::imm_reg(off as u32, Reg::preg_use(regs::rbp())),
-                Reg::preg_def(regs::r14()),
+                Amode::imm_reg(off as u32, regs::rbp()),
+                regs::r14(),
             ));
         }
 
@@ -764,9 +756,9 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     fn get_number_of_spillslots_for_value(rc: RegClass, ty: Type) -> u32 {
         // We allocate in terms of 8-byte slots.
         match (rc, ty) {
-            (RegClass::I64, _) => 1,
-            (RegClass::V128, types::F32) | (RegClass::V128, types::F64) => 1,
-            (RegClass::V128, _) => 2,
+            (RegClass::Int, _) => 1,
+            (RegClass::Float, types::F32) | (RegClass::V128, types::F64) => 1,
+            (RegClass::Float, _) => 2,
             _ => panic!("Unexpected register class!"),
         }
     }
@@ -882,11 +874,7 @@ impl From<StackAMode> for SyntheticAmode {
                 let off = i32::try_from(off)
                     .expect("Offset in FPOffset is greater than 2GB; should hit impl limit first");
                 let simm32 = off as u32;
-                SyntheticAmode::Real(Amode::ImmReg {
-                    simm32,
-                    base: regs::rbp(),
-                    flags: MemFlags::trusted(),
-                })
+                SyntheticAmode::Real(Amode::imm_reg(simm32, regs::rbp()))
             }
             StackAMode::NominalSPOffset(off, _ty) => {
                 let off = i32::try_from(off).expect(
@@ -1017,11 +1005,11 @@ fn get_fltreg_for_retval(
 fn is_callee_save_systemv(r: PReg) -> bool {
     use regs::*;
     match r.class() {
-        RegClass::I64 => match r.hw_enc() as u8 {
+        RegClass::Int => match r.hw_enc() as u8 {
             ENC_RBX | ENC_RBP | ENC_R12 | ENC_R13 | ENC_R14 | ENC_R15 => true,
             _ => false,
         },
-        RegClass::V128 => false,
+        RegClass::Float => false,
         _ => unimplemented!(),
     }
 }

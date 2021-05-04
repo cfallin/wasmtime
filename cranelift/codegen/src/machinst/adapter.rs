@@ -153,7 +153,7 @@ impl TargetIsa for TargetIsaAdapter {
 
     #[cfg(feature = "unwind")]
     fn map_regalloc_reg_to_dwarf(&self, r: Reg) -> Result<u16, RegisterMappingError> {
-        self.backend.map_reg_to_dwarf(r)
+        self.backend.map_reg_to_dwarf(r.as_preg().unwrap())
     }
 
     fn as_any(&self) -> &dyn Any {

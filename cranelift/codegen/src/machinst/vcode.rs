@@ -436,8 +436,8 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let ty = I::type_for_rc(class);
                 if from.is_reg() && to.is_reg() {
                     smallvec![I::gen_move(
-                        Reg::preg_def(to.as_reg().unwrap()),
-                        Reg::preg_use(from.as_reg().unwrap()),
+                        to.as_reg().unwrap(),
+                        from.as_reg().unwrap(),
                         ty,
                     )]
                 } else if from.is_reg() && to.is_stack() {

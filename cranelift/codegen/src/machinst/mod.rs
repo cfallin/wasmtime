@@ -154,7 +154,7 @@ pub trait MachInst: Clone + Debug {
     }
 
     /// Generate a move.
-    fn gen_move(to_reg: Reg, from_reg: Reg, ty: Type) -> Self;
+    fn gen_move<R: RegType>(to_reg: R, from_reg: R, ty: Type) -> Self;
 
     /// Generate a register-constraint pseudoinst. This pseudoinst can
     /// be used to constrain certain vregs to certain locations (e.g.,
@@ -189,7 +189,7 @@ pub trait MachInst: Clone + Debug {
 
     /// Generate a jump to another target. Used during lowering of
     /// control flow.
-    fn gen_jump(target: MachLabel, args: Vec<Reg>) -> Self;
+    fn gen_jump<R: RegType>(target: MachLabel, args: Vec<R>) -> Self;
 
     /// Generate a NOP. The `preferred_size` parameter allows the caller to
     /// request a NOP of that size, or as close to it as possible. The machine
@@ -221,7 +221,7 @@ pub trait MachInst: Clone + Debug {
     }
 
     /// Create a marker instruction that defines a value label.
-    fn gen_value_label_marker(_label: ValueLabel, _reg: Reg) -> Self {
+    fn gen_value_label_marker<R: RegType>(_label: ValueLabel, _reg: R) -> Self {
         Self::gen_nop(0)
     }
 
@@ -434,7 +434,7 @@ pub trait MachBackend {
     }
     /// Maps a regalloc::Reg to a DWARF register number.
     #[cfg(feature = "unwind")]
-    fn map_reg_to_dwarf(&self, _: Reg) -> Result<u16, RegisterMappingError> {
+    fn map_reg_to_dwarf(&self, _: PReg) -> Result<u16, RegisterMappingError> {
         Err(RegisterMappingError::UnsupportedArchitecture)
     }
 }

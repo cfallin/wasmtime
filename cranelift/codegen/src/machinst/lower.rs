@@ -5,7 +5,6 @@
 // TODO: separate the IR-query core of `LowerCtx` from the lowering logic built
 // on top of it, e.g. the side-effect/coloring analysis and the scan support.
 
-use super::Reg;
 use crate::data_value::DataValue;
 use crate::entity::SecondaryMap;
 use crate::fx::{FxHashMap, FxHashSet};
@@ -601,7 +600,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                     "value labeling: defines val {:?} -> reg {:?} -> label {:?}",
                     val, reg, label,
                 );
-                markers.push(I::gen_value_label_marker(label, Reg::reg_use(reg)));
+                markers.push(I::gen_value_label_marker(label, reg));
             }
         }
         for marker in markers {
@@ -788,7 +787,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 for &param in self.f.dfg.inst_variable_args(orig_branch) {
                     let vregs = self.put_value_in_regs(param);
                     for &vreg in vregs.regs() {
-                        param_operands.push(Reg::reg_use(vreg));
+                        param_operands.push(vreg);
                     }
                 }
                 self.emit(I::gen_jump(MachLabel::from_block(succ), param_operands));

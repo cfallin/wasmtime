@@ -1,6 +1,6 @@
 //! ABI definitions.
 
-use super::{Reg, SpillSlot};
+use super::SpillSlot;
 use crate::binemit::StackMap;
 use crate::ir::{Function, Signature, StackSlot};
 use crate::isa::CallConv;
@@ -79,7 +79,7 @@ pub trait ABICallee: Sized {
     ) -> SmallInstVec<Self::I>;
 
     /// Get the address of a stackslot.
-    fn gen_stackslot_addr(&self, slot: StackSlot, offset: u32, into: Reg) -> Self::I;
+    fn gen_stackslot_addr<R: RegType>(&self, slot: StackSlot, offset: u32, into: R) -> Self::I;
 
     // -----------------------------------------------------------------
     // Every function above this line may only be called pre-regalloc.

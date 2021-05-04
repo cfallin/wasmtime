@@ -3,7 +3,7 @@
 use crate::binemit::{CodeOffset, StackMap};
 use crate::ir::{types, ExternalName, Opcode, SourceLoc, TrapCode, Type, ValueLabel};
 use crate::isa::unwind::UnwindInst;
-use crate::isa::x64::abi::{X64ABICallee, X64ABIMachineSpec};
+use crate::isa::x64::abi::X64ABIMachineSpec;
 use crate::isa::x64::settings as x64_settings;
 use crate::isa::CallConv;
 use crate::machinst::*;
@@ -44,6 +44,14 @@ pub enum Inst {
         op: AluRmiROpcode,
         src1: RegMemImm,
         src2: Reg,
+        dst: Reg,
+    },
+
+    /// Variant of AluRmiR that is used only for const-producing
+    /// (source-invariant) instructions, like xor A, A -> B.
+    AluRmiRConst {
+        size: OperandSize,
+        op: AluRmiROpcode,
         dst: Reg,
     },
 
@@ -224,6 +232,10 @@ pub enum Inst {
         dst: Reg,
     },
 
+    /// Variant of XmmRmR that is used only for const-producing
+    /// (source-invariant) instructions, like pxor A, A -> B.
+    XmmRmRConst { op: SseOpcode, dst: Reg },
+
     /// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg, sqrt,
     /// etc.
     ///
@@ -328,6 +340,15 @@ pub enum Inst {
         op: SseOpcode,
         src1: RegMem,
         src2: Reg,
+        dst: Reg,
+        imm: u8,
+        size: OperandSize, // 4 or 8
+    },
+
+    /// A variant of XmmRmRImmConst that produces a constant value,
+    /// i.e., is input-invariant.
+    XmmRmRImmConst {
+        op: SseOpcode,
         dst: Reg,
         imm: u8,
         size: OperandSize, // 4 or 8
@@ -509,6 +530,7 @@ impl Inst {
             // These instructions are part of SSE2, which is a basic requirement in Cranelift, and
             // don't have to be checked.
             Inst::AluRmiR { .. }
+            | Inst::AluRmiRConst { .. }
             | Inst::AtomicRmwSeq { .. }
             | Inst::CallKnown { .. }
             | Inst::CallUnknown { .. }
@@ -519,7 +541,6 @@ impl Inst {
             | Inst::CvtFloatToUintSeq { .. }
             | Inst::CvtUint64ToFloatSeq { .. }
             | Inst::Div { .. }
-            | Inst::EpiloguePlaceholder
             | Inst::Fence { .. }
             | Inst::Hlt
             | Inst::Imm { .. }
@@ -536,7 +557,7 @@ impl Inst {
             | Inst::MovRR { .. }
             | Inst::MovsxRmR { .. }
             | Inst::MovzxRmR { .. }
-            | Inst::MulHi { .. }
+            | Inst::Mul { .. }
             | Inst::Neg { .. }
             | Inst::Not { .. }
             | Inst::Nop { .. }
@@ -567,7 +588,9 @@ impl Inst {
             | Inst::XmmMovRM { op, .. }
             | Inst::XmmRmiReg { opcode: op, .. }
             | Inst::XmmRmR { op, .. }
+            | Inst::XmmRmRConst { op, .. }
             | Inst::XmmRmRImm { op, .. }
+            | Inst::XmmRmRImmConst { op, .. }
             | Inst::XmmToGpr { op, .. }
             | Inst::XmmUnaryRmR { op, .. } => smallvec![op.available_from()],
         }
@@ -582,21 +605,20 @@ impl Inst {
         Self::Nop { len }
     }
 
-    pub(crate) fn alu_rmi_r(
+    pub(crate) fn alu_rmi_r<R: RegType>(
         size: OperandSize,
         op: AluRmiROpcode,
         src1: RegMemImm,
-        src2: VReg,
-        dst: VReg,
+        src2: R,
+        dst: R,
     ) -> Self {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let src2 = Reg::reg_use(src2);
+        let src2 = src2.mk_use();
         // `src2` always comes first when presenting operands to the
         // regalloc so that we can know its index for sure, because
         // `src1` may or may not contain a `VReg`. This allows us to
         // name the reused register operand index correctly here.
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let dst = dst.mk_reuse_def(0);
         Self::AluRmiR {
             size,
             op,
@@ -606,48 +628,56 @@ impl Inst {
         }
     }
 
-    pub(crate) fn unary_rm_r(
+    pub(crate) fn alu_rmi_r_const<R: RegType>(
+        size: OperandSize,
+        op: AluRmiROpcode,
+        dst: R,
+    ) -> Self {
+        debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
+        let dst = dst.mk_def();
+        Self::AluRmiRConst { size, op, dst }
+    }
+
+    pub(crate) fn unary_rm_r<R: RegType>(
         size: OperandSize,
         op: UnaryRmROpcode,
         src: RegMem,
-        dst: VReg,
+        dst: R,
     ) -> Self {
         debug_assert!(size.is_one_of(&[
             OperandSize::Size16,
             OperandSize::Size32,
             OperandSize::Size64
         ]));
-        let src = src.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let dst = Reg::reg_def(dst);
+        let dst = dst.mk_def();
         Self::UnaryRmR { size, op, src, dst }
     }
 
-    pub(crate) fn not(size: OperandSize, src: VReg, dst: VReg) -> Inst {
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_reuse_def(dst, 0);
+    pub(crate) fn not<R: RegType>(size: OperandSize, src: R, dst: R) -> Inst {
+        let src = src.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::Not { size, src, dst }
     }
 
-    pub(crate) fn neg(size: OperandSize, src: VReg, dst: VReg) -> Inst {
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_reuse_def(dst, 0);
+    pub(crate) fn neg<R: RegType>(size: OperandSize, src: R, dst: R) -> Inst {
+        let src = src.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::Neg { size, src, dst }
     }
 
-    pub(crate) fn div(
+    pub(crate) fn div<R: RegType>(
         size: OperandSize,
         signed: bool,
         divisor: RegMem,
-        in_lo: VReg,
-        in_hi: VReg,
-        out_div: VReg,
-        out_rem: VReg,
+        in_lo: R,
+        in_hi: R,
+        out_div: R,
+        out_rem: R,
     ) -> Inst {
-        let divisor = divisor.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let in_lo = Reg::reg_fixed_use(in_lo, regs::rax());
-        let in_hi = Reg::reg_fixed_use(in_hi, regs::rdx());
-        let out_div = Reg::reg_fixed_def(out_div, regs::rax());
-        let out_rem = Reg::reg_fixed_def(out_rem, regs::rdx());
+        let in_lo = in_lo.mk_fixed_use(regs::rax());
+        let in_hi = in_hi.mk_fixed_use(regs::rdx());
+        let out_div = out_div.mk_fixed_def(regs::rax());
+        let out_rem = out_rem.mk_fixed_def(regs::rdx());
         Inst::Div {
             size,
             signed,
@@ -659,23 +689,22 @@ impl Inst {
         }
     }
 
-    pub(crate) fn mul(
+    pub(crate) fn mul<R: RegType>(
         size: OperandSize,
         signed: bool,
         rhs: RegMem,
-        src: VReg,
-        out_lo: VReg,
-        out_hi: VReg,
+        src: R,
+        out_lo: R,
+        out_hi: R,
     ) -> Inst {
         debug_assert!(size.is_one_of(&[
             OperandSize::Size16,
             OperandSize::Size32,
             OperandSize::Size64
         ]));
-        let rhs = rhs.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let out_lo = Reg::reg_fixed_def(out_lo, regs::rax());
-        let out_hi = Reg::reg_fixed_def(out_hi, regs::rdx());
-        let src = Reg::reg_fixed_use(src, regs::rax());
+        let out_lo = out_lo.mk_fixed_def(regs::rax());
+        let out_hi = out_hi.mk_fixed_def(regs::rdx());
+        let src = src.mk_fixed_use(regs::rax());
         Inst::Mul {
             size,
             signed,
@@ -686,21 +715,20 @@ impl Inst {
         }
     }
 
-    pub(crate) fn checked_div_or_rem_seq(
+    pub(crate) fn checked_div_or_rem_seq<R: RegType>(
         kind: DivOrRemKind,
         size: OperandSize,
-        divisor: VReg,
-        dividend: VReg,
-        tmp: VReg,
-        out_lo: VReg,
-        out_hi: VReg,
+        divisor: R,
+        dividend: R,
+        tmp: R,
+        out_lo: R,
+        out_hi: R,
     ) -> Inst {
-        let divisor = Reg::reg_use(divisor);
-        let dividend = Reg::reg_fixed_use(dividend, regs::rax());
-        let divisor = Reg::reg_use(divisor);
-        let tmp = Reg::reg_temp(tmp);
-        let out_lo = Reg::reg_fixed_use(out_lo, regs::rax());
-        let out_hi = Reg::reg_fixed_use(out_hi, regs::rax());
+        let divisor = divisor.mk_use();
+        let dividend = dividend.mk_fixed_use(regs::rax());
+        let tmp = tmp.mk_temp();
+        let out_lo = out_lo.mk_fixed_use(regs::rax());
+        let out_hi = out_hi.mk_fixed_use(regs::rax());
 
         Inst::CheckedDivOrRemSeq {
             kind,
@@ -713,24 +741,24 @@ impl Inst {
         }
     }
 
-    pub(crate) fn sign_extend_data(size: OperandSize, src: VReg, dst: VReg) -> Inst {
-        let src = Reg::reg_fixed_use(src, regs::rax());
+    pub(crate) fn sign_extend_data<R: RegType>(size: OperandSize, src: R, dst: R) -> Inst {
+        let src = src.mk_fixed_use(regs::rax());
         let dst_reg = match size {
             OperandSize::Size8 => regs::rax(), // result into AH
             _ => regs::rdx(),
         };
-        let dst = Reg::reg_fixed_def(dst, dst_reg);
+        let dst = dst.mk_fixed_def(dst_reg);
         Inst::SignExtendData { size, src, dst }
     }
 
-    pub(crate) fn imm(dst_size: OperandSize, simm64: u64, dst: VReg) -> Inst {
+    pub(crate) fn imm<R: RegType>(dst_size: OperandSize, simm64: u64, dst: R) -> Inst {
         // Try to generate a 32-bit immediate when the upper high bits are zeroed (which matches
         // the semantics of movl).
         let dst_size = match dst_size {
             OperandSize::Size64 if simm64 > u32::max_value() as u64 => OperandSize::Size64,
             _ => OperandSize::Size32,
         };
-        let dst = Reg::reg_def(dst);
+        let dst = dst.mk_def();
         Inst::Imm {
             dst_size,
             simm64,
@@ -738,38 +766,35 @@ impl Inst {
         }
     }
 
-    pub(crate) fn mov_r_r(size: OperandSize, src: VReg, dst: VReg) -> Inst {
+    pub(crate) fn mov_r_r<R: RegType>(size: OperandSize, src: R, dst: R) -> Inst {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_def(dst);
+        let src = src.mk_use();
+        let dst = dst.mk_def();
         Inst::MovRR { size, src, dst }
     }
 
     // TODO Can be replaced by `Inst::move` (high-level) and `Inst::unary_rm_r` (low-level)
-    pub(crate) fn xmm_mov(op: SseOpcode, src: RegMem, dst: VReg) -> Inst {
-        let src = src.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn xmm_mov<R: RegType>(op: SseOpcode, src: RegMem, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::XmmUnaryRmR { op, src, dst }
     }
 
-    pub(crate) fn xmm_load_const(src: VCodeConstant, dst: VReg, ty: Type) -> Inst {
+    pub(crate) fn xmm_load_const<R: RegType>(src: VCodeConstant, dst: R, ty: Type) -> Inst {
         debug_assert!(ty.is_vector() && ty.bits() == 128);
-        let dst = Reg::reg_def(dst);
+        let dst = dst.mk_def();
         Inst::XmmLoadConst { src, dst, ty }
     }
 
     /// Convenient helper for unary float operations.
-    pub(crate) fn xmm_unary_rm_r(op: SseOpcode, src: RegMem, dst: VReg) -> Inst {
-        let src = src.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn xmm_unary_rm_r<R: RegType>(op: SseOpcode, src: RegMem, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::XmmUnaryRmR { op, src, dst }
     }
 
-    pub(crate) fn xmm_rm_r(op: SseOpcode, src1: RegMem, src2: VReg, dst: VReg) -> Self {
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(src1));
-        let src2 = Reg::reg_use(src2);
+    pub(crate) fn xmm_rm_r<R: RegType>(op: SseOpcode, src1: RegMem, src2: R, dst: R) -> Self {
+        let src2 = src2.mk_use();
         // as with alu_rmi_r case, src2 comes first so we can use `0` index here.
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let dst = dst.mk_reuse_def(0);
         Inst::XmmRmR {
             op,
             src1,
@@ -778,13 +803,22 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_uninit_value(dst: VReg) -> Self {
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn xmm_rm_r_const<R: RegType>(op: SseOpcode, dst: R) -> Self {
+        let dst = dst.mk_def();
+        Inst::XmmRmRConst { op, dst }
+    }
+
+    pub(crate) fn xmm_uninit_value<R: RegType>(dst: R) -> Self {
+        let dst = dst.mk_def();
         Inst::XmmUninitializedValue { dst }
     }
 
-    pub(crate) fn xmm_mov_r_m(op: SseOpcode, src: VReg, dst: impl Into<SyntheticAmode>) -> Inst {
-        let src = Reg::reg_use(src);
+    pub(crate) fn xmm_mov_r_m<R: RegType>(
+        op: SseOpcode,
+        src: R,
+        dst: impl Into<SyntheticAmode>,
+    ) -> Inst {
+        let src = src.mk_use();
         Inst::XmmMovRM {
             op,
             src,
@@ -792,10 +826,15 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_to_gpr(op: SseOpcode, src: VReg, dst: VReg, dst_size: OperandSize) -> Inst {
+    pub(crate) fn xmm_to_gpr<R: RegType>(
+        op: SseOpcode,
+        src: R,
+        dst: R,
+        dst_size: OperandSize,
+    ) -> Inst {
         debug_assert!(dst_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_def(dst);
+        let src = src.mk_use();
+        let dst = dst.mk_def();
         Inst::XmmToGpr {
             op,
             src,
@@ -804,9 +843,14 @@ impl Inst {
         }
     }
 
-    pub(crate) fn gpr_to_xmm(op: SseOpcode, src: RegMem, src_size: OperandSize, dst: VReg) -> Inst {
+    pub(crate) fn gpr_to_xmm<R: RegType>(
+        op: SseOpcode,
+        src: RegMem,
+        src_size: OperandSize,
+        dst: R,
+    ) -> Inst {
         debug_assert!(src_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let dst = Reg::reg_def(dst);
+        let dst = dst.mk_def();
         Inst::GprToXmm {
             op,
             src,
@@ -815,24 +859,24 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_cmp_rm_r(op: SseOpcode, src: RegMem, dst: VReg) -> Inst {
+    pub(crate) fn xmm_cmp_rm_r<R: RegType>(op: SseOpcode, src: RegMem, dst: R) -> Inst {
         // N.B.: a *use*, not def -- `dst` is actually a source.
-        let dst = Reg::reg_use(dst);
+        let dst = dst.mk_use();
         Inst::XmmCmpRmR { op, src, dst }
     }
 
-    pub(crate) fn cvt_u64_to_float_seq(
+    pub(crate) fn cvt_u64_to_float_seq<R: RegType>(
         dst_size: OperandSize,
-        src: VReg,
-        tmp_gpr1: VReg,
-        tmp_gpr2: VReg,
-        dst: VReg,
+        src: R,
+        tmp_gpr1: R,
+        tmp_gpr2: R,
+        dst: R,
     ) -> Inst {
         debug_assert!(dst_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_def(dst);
-        let tmp_gpr1 = Reg::reg_temp(tmp_gpr1);
-        let tmp_gpr2 = Reg::reg_temp(tmp_gpr2);
+        let src = src.mk_use();
+        let dst = dst.mk_def();
+        let tmp_gpr1 = tmp_gpr1.mk_temp();
+        let tmp_gpr2 = tmp_gpr2.mk_temp();
         Inst::CvtUint64ToFloatSeq {
             src,
             dst,
@@ -842,21 +886,21 @@ impl Inst {
         }
     }
 
-    pub(crate) fn cvt_float_to_sint_seq(
+    pub(crate) fn cvt_float_to_sint_seq<R: RegType>(
         src_size: OperandSize,
         dst_size: OperandSize,
         is_saturating: bool,
-        src: VReg,
-        dst: VReg,
-        tmp_gpr: VReg,
-        tmp_xmm: VReg,
+        src: R,
+        dst: R,
+        tmp_gpr: R,
+        tmp_xmm: R,
     ) -> Inst {
         debug_assert!(src_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
         debug_assert!(dst_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_def(dst);
-        let tmp_gpr = Reg::reg_temp(tmp_gpr);
-        let tmp_xmm = Reg::reg_temp(tmp_xmm);
+        let src = src.mk_use();
+        let dst = dst.mk_def();
+        let tmp_gpr = tmp_gpr.mk_temp();
+        let tmp_xmm = tmp_xmm.mk_temp();
         Inst::CvtFloatToSintSeq {
             src_size,
             dst_size,
@@ -868,21 +912,21 @@ impl Inst {
         }
     }
 
-    pub(crate) fn cvt_float_to_uint_seq(
+    pub(crate) fn cvt_float_to_uint_seq<R: RegType>(
         src_size: OperandSize,
         dst_size: OperandSize,
         is_saturating: bool,
-        src: VReg,
-        dst: VReg,
-        tmp_gpr: VReg,
-        tmp_xmm: VReg,
+        src: R,
+        dst: R,
+        tmp_gpr: R,
+        tmp_xmm: R,
     ) -> Inst {
         debug_assert!(src_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
         debug_assert!(dst_size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_def(dst);
-        let tmp_gpr = Reg::reg_temp(tmp_gpr);
-        let tmp_xmm = Reg::reg_temp(tmp_xmm);
+        let src = src.mk_use();
+        let dst = dst.mk_def();
+        let tmp_gpr = tmp_gpr.mk_temp();
+        let tmp_xmm = tmp_xmm.mk_temp();
         Inst::CvtFloatToUintSeq {
             src_size,
             dst_size,
@@ -894,17 +938,17 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_min_max_seq(
+    pub(crate) fn xmm_min_max_seq<R: RegType>(
         size: OperandSize,
         is_min: bool,
-        lhs: VReg,
-        rhs: VReg,
-        dst: VReg,
+        lhs: R,
+        rhs: R,
+        dst: R,
     ) -> Inst {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let lhs = Reg::reg_use(lhs);
-        let rhs = Reg::reg_use(rhs);
-        let dst = Reg::reg_reuse_def(dst, 1);
+        let lhs = lhs.mk_use();
+        let rhs = rhs.mk_use();
+        let dst = dst.mk_reuse_def(1);
         Inst::XmmMinMaxSeq {
             size,
             is_min,
@@ -914,18 +958,17 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_rm_r_imm(
+    pub(crate) fn xmm_rm_r_imm<R: RegType>(
         op: SseOpcode,
         src1: RegMem,
-        src2: VReg,
-        dst: VReg,
+        src2: R,
+        dst: R,
         imm: u8,
         size: OperandSize,
     ) -> Inst {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let src2 = Reg::reg_use(src2);
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let src2 = src2.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::XmmRmRImm {
             op,
             src1,
@@ -936,16 +979,30 @@ impl Inst {
         }
     }
 
-    pub(crate) fn movzx_rm_r(ext_mode: ExtMode, src: RegMem, dst: VReg) -> Inst {
-        let src = src.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn xmm_rm_r_imm_const<R: RegType>(
+        op: SseOpcode,
+        dst: R,
+        imm: u8,
+        size: OperandSize,
+    ) -> Inst {
+        debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
+        let dst = dst.mk_def();
+        Inst::XmmRmRImmConst { op, dst, imm, size }
+    }
+
+    pub(crate) fn movzx_rm_r<R: RegType>(ext_mode: ExtMode, src: RegMem, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::MovzxRmR { ext_mode, src, dst }
     }
 
-    pub(crate) fn xmm_rmi_reg(opcode: SseOpcode, src1: RegMemImm, src2: VReg, dst: VReg) -> Inst {
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let src2 = Reg::reg_use(src2);
-        let dst = Reg::reg_reuse_def(dst, 0);
+    pub(crate) fn xmm_rmi_reg<R: RegType>(
+        opcode: SseOpcode,
+        src1: RegMemImm,
+        src2: R,
+        dst: R,
+    ) -> Inst {
+        let src2 = src2.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::XmmRmiReg {
             opcode,
             src1,
@@ -954,14 +1011,13 @@ impl Inst {
         }
     }
 
-    pub(crate) fn movsx_rm_r(ext_mode: ExtMode, src: RegMem, dst: VReg) -> Inst {
-        let src = src.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn movsx_rm_r<R: RegType>(ext_mode: ExtMode, src: RegMem, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::MovsxRmR { ext_mode, src, dst }
     }
 
-    pub(crate) fn mov64_m_r(src: impl Into<SyntheticAmode>, dst: VReg) -> Inst {
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn mov64_m_r<R: RegType>(src: impl Into<SyntheticAmode>, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::Mov64MR {
             src: src.into(),
             dst,
@@ -969,15 +1025,19 @@ impl Inst {
     }
 
     /// A convenience function to be able to use a RegMem as the source of a move.
-    pub(crate) fn mov64_rm_r(src: RegMem, dst: VReg) -> Inst {
+    pub(crate) fn mov64_rm_r<R: RegType>(src: RegMem, dst: R) -> Inst {
         match src {
-            RegMem::Reg { reg } => Self::mov_r_r(OperandSize::Size64, reg, dst),
+            RegMem::Reg { reg } => Self::mov_r_r(OperandSize::Size64, R::from_reg(reg), dst),
             RegMem::Mem { addr } => Self::mov64_m_r(addr, dst),
         }
     }
 
-    pub(crate) fn mov_r_m(size: OperandSize, src: VReg, dst: impl Into<SyntheticAmode>) -> Inst {
-        let src = Reg::reg_use(src);
+    pub(crate) fn mov_r_m<R: RegType>(
+        size: OperandSize,
+        src: R,
+        dst: impl Into<SyntheticAmode>,
+    ) -> Inst {
+        let src = src.mk_use();
         Inst::MovRM {
             size,
             src,
@@ -985,24 +1045,24 @@ impl Inst {
         }
     }
 
-    pub(crate) fn lea(addr: impl Into<SyntheticAmode>, dst: VReg) -> Inst {
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn lea<R: RegType>(addr: impl Into<SyntheticAmode>, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::LoadEffectiveAddress {
             addr: addr.into(),
             dst,
         }
     }
 
-    pub(crate) fn shift_r_imm(
+    pub(crate) fn shift_r_imm<R: RegType>(
         size: OperandSize,
         kind: ShiftKind,
         num_bits: u8,
-        src: VReg,
-        dst: VReg,
+        src: R,
+        dst: R,
     ) -> Inst {
         debug_assert!(num_bits < size.to_bits());
-        let src = Reg::reg_use(src);
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let src = src.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::ShiftRImm {
             size,
             kind,
@@ -1012,16 +1072,16 @@ impl Inst {
         }
     }
 
-    pub(crate) fn shift_r_var(
+    pub(crate) fn shift_r_var<R: RegType>(
         size: OperandSize,
         kind: ShiftKind,
-        src: VReg,
-        count: VReg,
-        dst: VReg,
+        src: R,
+        count: R,
+        dst: R,
     ) -> Inst {
-        let src = Reg::reg_use(src);
-        let count = Reg::reg_fixed_use(count, regs::rcx());
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let src = src.mk_use();
+        let count = count.mk_fixed_use(regs::rcx());
+        let dst = dst.mk_reuse_def(0);
         Inst::ShiftRVar {
             size,
             kind,
@@ -1033,8 +1093,8 @@ impl Inst {
 
     /// Does a comparison of dst - src for operands of size `size`, as stated by the machine
     /// instruction semantics. Be careful with the order of parameters!
-    pub(crate) fn cmp_rmi_r(size: OperandSize, src: RegMemImm, dst: VReg) -> Inst {
-        let dst = Reg::reg_use(dst); // `dst` is actually a source.
+    pub(crate) fn cmp_rmi_r<R: RegType>(size: OperandSize, src: RegMemImm, dst: R) -> Inst {
+        let dst = dst.mk_use(); // `dst` is actually a source.
         Inst::CmpRmiR {
             size,
             src,
@@ -1044,8 +1104,8 @@ impl Inst {
     }
 
     /// Does a comparison of dst & src for operands of size `size`.
-    pub(crate) fn test_rmi_r(size: OperandSize, src: RegMemImm, dst: VReg) -> Inst {
-        let dst = Reg::reg_use(dst); // `dst` is actually a source.
+    pub(crate) fn test_rmi_r<R: RegType>(size: OperandSize, src: RegMemImm, dst: R) -> Inst {
+        let dst = dst.mk_use(); // `dst` is actually a source.
         Inst::CmpRmiR {
             size,
             src,
@@ -1060,20 +1120,25 @@ impl Inst {
         }
     }
 
-    pub(crate) fn setcc(cc: CC, dst: VReg) -> Inst {
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn setcc<R: RegType>(cc: CC, dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::Setcc { cc, dst }
     }
 
-    pub(crate) fn cmove(size: OperandSize, cc: CC, src1: RegMem, src2: VReg, dst: VReg) -> Inst {
+    pub(crate) fn cmove<R: RegType>(
+        size: OperandSize,
+        cc: CC,
+        src1: RegMem,
+        src2: R,
+        dst: R,
+    ) -> Inst {
         debug_assert!(size.is_one_of(&[
             OperandSize::Size16,
             OperandSize::Size32,
             OperandSize::Size64
         ]));
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let src2 = Reg::reg_use(src2);
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let src2 = src2.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::Cmove {
             size,
             cc,
@@ -1083,16 +1148,15 @@ impl Inst {
         }
     }
 
-    pub(crate) fn xmm_cmove(
+    pub(crate) fn xmm_cmove<R: RegType>(
         size: OperandSize,
         cc: CC,
         src1: RegMem,
-        src2: VReg,
-        dst: VReg,
+        src2: R,
+        dst: R,
     ) -> Inst {
-        let src1 = src1.adjust_operand(|vreg| Reg::reg_use(vreg));
-        let src2 = Reg::reg_use(src2);
-        let dst = Reg::reg_reuse_def(dst, 0);
+        let src2 = src2.mk_use();
+        let dst = dst.mk_reuse_def(0);
         Inst::XmmCmove {
             size,
             cc,
@@ -1106,8 +1170,8 @@ impl Inst {
         Inst::Push64 { src }
     }
 
-    pub(crate) fn pop64(dst: VReg) -> Inst {
-        let dst = Reg::reg_def(dst);
+    pub(crate) fn pop64<R: RegType>(dst: R) -> Inst {
+        let dst = dst.mk_def();
         Inst::Pop64 { dst }
     }
 
@@ -1117,6 +1181,7 @@ impl Inst {
         operands: Vec<Operand>,
         clobbers: &'static [PReg],
     ) -> Inst {
+        let operands = operands.into_iter().map(|op| Reg::operand(op)).collect();
         Inst::CallKnown {
             dest,
             opcode,
@@ -1131,7 +1196,7 @@ impl Inst {
         operands: Vec<Operand>,
         clobbers: &'static [PReg],
     ) -> Inst {
-        dest.assert_regclass_is(RegClass::I64);
+        let operands = operands.into_iter().map(|op| Reg::operand(op)).collect();
         Inst::CallUnknown {
             dest,
             opcode,
@@ -1144,25 +1209,22 @@ impl Inst {
         Inst::Ret
     }
 
-    pub(crate) fn epilogue_placeholder() -> Inst {
-        Inst::EpiloguePlaceholder
-    }
-
-    pub(crate) fn jmp_known(dst: MachLabel) -> Inst {
-        Inst::JmpKnown { dst }
+    pub(crate) fn jmp_known<R: RegType>(dst: MachLabel, args: Vec<R>) -> Inst {
+        let args = args.into_iter().map(|r| r.mk_use_after()).collect();
+        Inst::JmpKnown { dst, args }
     }
 
     pub(crate) fn jmp_if(cc: CC, taken: MachLabel) -> Inst {
         Inst::JmpIf { cc, taken }
     }
 
-    pub(crate) fn jmp_cond(
+    pub(crate) fn jmp_cond<R: RegType>(
         cc: CC,
         taken: MachLabel,
         not_taken: MachLabel,
-        args: Vec<VReg>,
+        args: Vec<R>,
     ) -> Inst {
-        let args = args.map(|vreg| Reg::reg_use_at_end(vreg)).collect();
+        let args = args.into_iter().map(|r| r.mk_use_after()).collect();
         Inst::JmpCond {
             cc,
             taken,
@@ -1171,9 +1233,9 @@ impl Inst {
         }
     }
 
-    pub(crate) fn jmp_unknown(target: RegMem) -> Inst {
-        target.assert_regclass_is(RegClass::I64);
-        Inst::JmpUnknown { target }
+    pub(crate) fn jmp_unknown<R: RegType>(target: RegMem, args: Vec<R>) -> Inst {
+        let args = args.into_iter().map(|r| r.mk_use_after()).collect();
+        Inst::JmpUnknown { target, args }
     }
 
     pub(crate) fn trap_if(cc: CC, trap_code: TrapCode) -> Inst {
@@ -1183,15 +1245,15 @@ impl Inst {
     /// Choose which instruction to use for loading a register value from memory. For loads smaller
     /// than 64 bits, this method expects a way to extend the value (i.e. [ExtKind::SignExtend],
     /// [ExtKind::ZeroExtend]); loads with no extension necessary will ignore this.
-    pub(crate) fn load(
+    pub(crate) fn load<R: RegType>(
         ty: Type,
         from_addr: impl Into<SyntheticAmode>,
-        to_reg: VReg,
+        to_reg: R,
         ext_kind: ExtKind,
     ) -> Inst {
-        let rc = to_reg.to_reg().get_class();
+        let rc = to_reg.class();
         match rc {
-            RegClass::I64 => {
+            RegClass::Int => {
                 let ext_mode = match ty.bytes() {
                     1 => Some(ExtMode::BQ),
                     2 => Some(ExtMode::WQ),
@@ -1218,7 +1280,7 @@ impl Inst {
                     Inst::mov64_m_r(from_addr, to_reg)
                 }
             }
-            RegClass::V128 => {
+            RegClass::Float => {
                 let opcode = match ty {
                     types::F32 => SseOpcode::Movss,
                     types::F64 => SseOpcode::Movsd,
@@ -1234,10 +1296,14 @@ impl Inst {
     }
 
     /// Choose which instruction to use for storing a register value to memory.
-    pub(crate) fn store(ty: Type, from_reg: VReg, to_addr: impl Into<SyntheticAmode>) -> Inst {
-        let rc = from_reg.get_class();
+    pub(crate) fn store<R: RegType>(
+        ty: Type,
+        from_reg: R,
+        to_addr: impl Into<SyntheticAmode>,
+    ) -> Inst {
+        let rc = from_reg.class();
         match rc {
-            RegClass::I64 => Inst::mov_r_m(
+            RegClass::Int => Inst::mov_r_m(
                 match ty {
                     types::B1 => OperandSize::Size8,
                     types::I32 | types::R32 => OperandSize::Size32,
@@ -1247,7 +1313,7 @@ impl Inst {
                 from_reg,
                 to_addr,
             ),
-            RegClass::V128 => {
+            RegClass::Float => {
                 let opcode = match ty {
                     types::F32 => SseOpcode::Movss,
                     types::F64 => SseOpcode::Movsd,
@@ -1283,7 +1349,7 @@ impl Inst {
                 dst,
                 ..
             } => {
-                src1.to_reg() == Some(src2.to_reg())
+                src1.to_reg() == Some(*src2)
                     && (*op == AluRmiROpcode::Xor || *op == AluRmiROpcode::Sub)
             }
 
@@ -1294,7 +1360,7 @@ impl Inst {
                 dst,
                 ..
             } => {
-                src1.to_reg() == Some(src2.to_reg())
+                src1.to_reg() == Some(*src2)
                     && (*op == SseOpcode::Xorps
                         || *op == SseOpcode::Xorpd
                         || *op == SseOpcode::Pxor
@@ -1312,7 +1378,7 @@ impl Inst {
                 imm,
                 ..
             } => {
-                src1.to_reg() == Some(src2.to_reg())
+                src1.to_reg() == Some(*src2)
                     && (*op == SseOpcode::Cmppd || *op == SseOpcode::Cmpps)
                     && *imm == FcmpImm::Equal.encode()
             }
@@ -1322,15 +1388,16 @@ impl Inst {
     }
 
     /// Choose which instruction to use for comparing two values for equality.
-    pub(crate) fn equals(ty: Type, from: RegMem, to: VReg) -> Inst {
+    pub(crate) fn equals<R: RegType>(ty: Type, from: RegMem, src2: R, to: R) -> Inst {
         match ty {
-            types::I8X16 | types::B8X16 => Inst::xmm_rm_r(SseOpcode::Pcmpeqb, from, to),
-            types::I16X8 | types::B16X8 => Inst::xmm_rm_r(SseOpcode::Pcmpeqw, from, to),
-            types::I32X4 | types::B32X4 => Inst::xmm_rm_r(SseOpcode::Pcmpeqd, from, to),
-            types::I64X2 | types::B64X2 => Inst::xmm_rm_r(SseOpcode::Pcmpeqq, from, to),
+            types::I8X16 | types::B8X16 => Inst::xmm_rm_r(SseOpcode::Pcmpeqb, from, src2, to),
+            types::I16X8 | types::B16X8 => Inst::xmm_rm_r(SseOpcode::Pcmpeqw, from, src2, to),
+            types::I32X4 | types::B32X4 => Inst::xmm_rm_r(SseOpcode::Pcmpeqd, from, src2, to),
+            types::I64X2 | types::B64X2 => Inst::xmm_rm_r(SseOpcode::Pcmpeqq, from, src2, to),
             types::F32X4 => Inst::xmm_rm_r_imm(
                 SseOpcode::Cmpps,
                 from,
+                src2,
                 to,
                 FcmpImm::Equal.encode(),
                 OperandSize::Size32,
@@ -1338,6 +1405,7 @@ impl Inst {
             types::F64X2 => Inst::xmm_rm_r_imm(
                 SseOpcode::Cmppd,
                 from,
+                src2,
                 to,
                 FcmpImm::Equal.encode(),
                 OperandSize::Size32,
@@ -1347,7 +1415,7 @@ impl Inst {
     }
 
     /// Choose which instruction to use for computing a bitwise AND on two values.
-    pub(crate) fn and(ty: Type, src1: RegMem, src2: VReg, dst: VReg) -> Inst {
+    pub(crate) fn and<R: RegType>(ty: Type, src1: RegMem, src2: R, dst: R) -> Inst {
         match ty {
             types::F32X4 => Inst::xmm_rm_r(SseOpcode::Andps, src1, src2, dst),
             types::F64X2 => Inst::xmm_rm_r(SseOpcode::Andpd, src1, src2, dst),
@@ -1359,7 +1427,7 @@ impl Inst {
     }
 
     /// Choose which instruction to use for computing a bitwise AND NOT on two values.
-    pub(crate) fn and_not(ty: Type, src1: RegMem, src2: VReg, dst: VReg) -> Inst {
+    pub(crate) fn and_not<R: RegType>(ty: Type, src1: RegMem, src2: R, dst: R) -> Inst {
         match ty {
             types::F32X4 => Inst::xmm_rm_r(SseOpcode::Andnps, src1, src2, dst),
             types::F64X2 => Inst::xmm_rm_r(SseOpcode::Andnpd, src1, src2, dst),
@@ -1371,7 +1439,7 @@ impl Inst {
     }
 
     /// Choose which instruction to use for computing a bitwise OR on two values.
-    pub(crate) fn or(ty: Type, src1: RegMem, src2: VReg, dst: VReg) -> Inst {
+    pub(crate) fn or<R: RegType>(ty: Type, src1: RegMem, src2: R, dst: R) -> Inst {
         match ty {
             types::F32X4 => Inst::xmm_rm_r(SseOpcode::Orps, src1, src2, dst),
             types::F64X2 => Inst::xmm_rm_r(SseOpcode::Orpd, src1, src2, dst),
@@ -1383,7 +1451,7 @@ impl Inst {
     }
 
     /// Choose which instruction to use for computing a bitwise XOR on two values.
-    pub(crate) fn xor(ty: Type, src1: RegMem, src2: VReg, dst: VReg) -> Inst {
+    pub(crate) fn xor<R: RegType>(ty: Type, src1: RegMem, src2: R, dst: R) -> Inst {
         match ty {
             types::F32X4 => Inst::xmm_rm_r(SseOpcode::Xorps, src1, src2, dst),
             types::F64X2 => Inst::xmm_rm_r(SseOpcode::Xorpd, src1, src2, dst),
@@ -1398,13 +1466,15 @@ impl Inst {
 //=============================================================================
 // Instructions: printing
 
-fn show_reg(reg: Reg, size: u8) -> String {
+pub(crate) fn show_x64_reg(reg: Reg, size: u8) -> String {
     if let Some(preg) = reg.as_preg() {
         Inst::reg_name(preg, size).to_string()
     } else if let Some(slot) = reg.as_spillslot() {
         format!("{}", slot)
     } else if let Some(op) = reg.as_operand() {
         format!("{}", op)
+    } else {
+        unreachable!()
     }
 }
 
@@ -1456,10 +1526,20 @@ impl fmt::Debug for Inst {
                 f,
                 "{:?}{} {}, {}, {}",
                 op,
+                suffix_bwlq(*size),
                 src1,
-                show_reg(*src1, size_lqb(*size, op.is_8bit())),
-                show_reg(*src2, size_lqb(*size, op.is_8bit())),
-                show_reg(*dst, size_lqb(*size, op.is_8bit())),
+                show_x64_reg(*src2, size_lqb(*size, op.is_8bit())),
+                show_x64_reg(*dst, size_lqb(*size, op.is_8bit())),
+            ),
+
+            Inst::AluRmiRConst { size, op, dst } => write!(
+                f,
+                "{:?}{} {}, {}, {}",
+                op,
+                suffix_bwlq(*size),
+                show_x64_reg(*dst, size_lqb(*size, op.is_8bit())),
+                show_x64_reg(*dst, size_lqb(*size, op.is_8bit())),
+                show_x64_reg(*dst, size_lqb(*size, op.is_8bit())),
             ),
 
             Inst::UnaryRmR { src, dst, op, size } => write!(
@@ -1468,23 +1548,23 @@ impl fmt::Debug for Inst {
                 op,
                 suffix_bwlq(*size),
                 src,
-                show_reg(*dst, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes()),
             ),
 
             Inst::Not { size, src, dst } => write!(
                 f,
                 "not{} {}, {}",
                 suffix_bwlq(*size),
-                show_reg(*src, size.to_bytes()),
-                show_reg(*dst, size.to_bytes()),
+                show_x64_reg(*src, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes()),
             ),
 
             Inst::Neg { size, src, dst } => write!(
                 f,
                 "neg{} {}, {}",
                 suffix_bwlq(*size),
-                show_reg(*src, size.to_bytes()),
-                show_reg(*dst, size.to_bytes()),
+                show_x64_reg(*src, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes()),
             ),
 
             Inst::Div {
@@ -1501,10 +1581,10 @@ impl fmt::Debug for Inst {
                 "{} divisor={}, in_lo={} in_hi={} out_div={} out_rem={}",
                 if *signed { "idiv" } else { "div" },
                 divisor,
-                show_reg(*in_lo, size.to_bytes()),
-                show_reg(*in_hi, size.to_bytes()),
-                show_reg(*out_div, size.to_bytes()),
-                show_reg(*out_rem, size.to_bytes()),
+                show_x64_reg(*in_lo, size.to_bytes()),
+                show_x64_reg(*in_hi, size.to_bytes()),
+                show_x64_reg(*out_div, size.to_bytes()),
+                show_x64_reg(*out_rem, size.to_bytes()),
             ),
 
             Inst::Mul {
@@ -1520,9 +1600,9 @@ impl fmt::Debug for Inst {
                 "{} {}, {}, out_lo={}, out_hi={}",
                 if *signed { "imul" } else { "mul" },
                 rhs,
-                show_reg(*src, size.to_bytes()),
-                show_reg(*out_lo, size.to_bytes()),
-                show_reg(*out_hi, size.to_bytes()),
+                show_x64_reg(*src, size.to_bytes()),
+                show_x64_reg(*out_lo, size.to_bytes()),
+                show_x64_reg(*out_hi, size.to_bytes()),
             ),
 
             Inst::CheckedDivOrRemSeq {
@@ -1543,11 +1623,11 @@ impl fmt::Debug for Inst {
                     DivOrRemKind::SignedRem => "srem",
                     DivOrRemKind::UnsignedRem => "urem",
                 },
-                show_reg(*dividend, size.to_bytes()),
-                show_reg(*divisor, size.to_bytes()),
-                show_reg(*out_lo, size.to_bytes()),
-                show_reg(*out_hi, size.to_bytes()),
-                show_reg(*tmp, size.to_bytes()),
+                show_x64_reg(*dividend, size.to_bytes()),
+                show_x64_reg(*divisor, size.to_bytes()),
+                show_x64_reg(*out_lo, size.to_bytes()),
+                show_x64_reg(*out_hi, size.to_bytes()),
+                show_x64_reg(*tmp, size.to_bytes()),
             ),
 
             Inst::SignExtendData { size, src, dst } => write!(
@@ -1559,16 +1639,16 @@ impl fmt::Debug for Inst {
                     OperandSize::Size32 => "cdq",
                     OperandSize::Size64 => "cqo",
                 },
-                show_reg(*src, size.to_bytes()),
-                show_reg(*dst, size.to_bytes()),
+                show_x64_reg(*src, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes()),
             ),
 
             Inst::XmmUnaryRmR { op, src, dst, .. } => {
-                write!(f, "{:?} {}, {}", op, src, show_reg(*dst, 0),)
+                write!(f, "{:?} {}, {}", op, src, show_x64_reg(*dst, 0),)
             }
 
             Inst::XmmMovRM { op, src, dst, .. } => {
-                write!(f, "{:?} {}, {}", op, show_reg(*src, 0), dst)
+                write!(f, "{:?} {}, {}", op, show_x64_reg(*src, 0), dst)
             }
 
             Inst::XmmRmR {
@@ -1583,8 +1663,19 @@ impl fmt::Debug for Inst {
                     "{:?} {}, {}, {}",
                     op,
                     src1,
-                    show_reg(*src2, 0),
-                    show_reg(*dst, 0),
+                    show_x64_reg(*src2, 0),
+                    show_x64_reg(*dst, 0),
+                )
+            }
+
+            Inst::XmmRmRConst { op, dst, .. } => {
+                write!(
+                    f,
+                    "{:?} {}, {}, {}",
+                    op,
+                    show_x64_reg(*dst, 0),
+                    show_x64_reg(*dst, 0),
+                    show_x64_reg(*dst, 0),
                 )
             }
 
@@ -1602,10 +1693,10 @@ impl fmt::Debug for Inst {
                 } else {
                     "xmm max seq "
                 },
-                size,
-                show_reg(*lhs, 0),
-                show_reg(*rhs, 0),
-                show_reg(*dst, 0),
+                size.to_bits(),
+                show_x64_reg(*lhs, 0),
+                show_x64_reg(*rhs, 0),
+                show_x64_reg(*dst, 0),
             ),
 
             Inst::XmmRmRImm {
@@ -1627,16 +1718,33 @@ impl fmt::Debug for Inst {
                 },
                 imm,
                 src1,
-                show_reg(*src2, 0),
-                show_reg(*dst, 0),
+                show_x64_reg(*src2, 0),
+                show_x64_reg(*dst, 0),
+            ),
+
+            Inst::XmmRmRImm {
+                op, dst, imm, size, ..
+            } => write!(
+                f,
+                "{:?}{} ${}, {}, {}, {}",
+                op,
+                if *size == OperandSize::Size64 {
+                    ".w"
+                } else {
+                    ""
+                },
+                imm,
+                show_x64_reg(*dst, 0),
+                show_x64_reg(*dst, 0),
+                show_x64_reg(*dst, 0),
             ),
 
             Inst::XmmUninitializedValue { dst } => {
-                write!(f, "uninit {}", show_reg(*dst, 0))
+                write!(f, "uninit {}", show_x64_reg(*dst, 0))
             }
 
             Inst::XmmLoadConst { src, dst, .. } => {
-                write!(f, "load_const {:?}, {}", src, show_reg(*dst, 0))
+                write!(f, "load_const {:?}, {}", src, show_x64_reg(*dst, 0))
             }
 
             Inst::XmmToGpr {
@@ -1650,8 +1758,8 @@ impl fmt::Debug for Inst {
                     f,
                     "{:?} {}, {}",
                     op,
-                    show_reg(*src, 0),
-                    show_reg(*dst, dst_size),
+                    show_x64_reg(*src, 0),
+                    show_x64_reg(*dst, dst_size),
                 )
             }
 
@@ -1660,16 +1768,10 @@ impl fmt::Debug for Inst {
                 src,
                 src_size,
                 dst,
-            } => write!(
-                f,
-                "{:?} {}, {}",
-                op,
-                show_reg(*src, src_size.to_bytes()),
-                show_reg(*dst, 0),
-            ),
+            } => write!(f, "{:?} {}, {}", op, src, show_x64_reg(*dst, 0),),
 
             Inst::XmmCmpRmR { op, src, dst } => {
-                write!(f, "{:?} {}, {}", op, show_reg(*src, 0), show_reg(*dst, 0),)
+                write!(f, "{:?} {}, {}", op, src, show_x64_reg(*dst, 0),)
             }
 
             Inst::CvtUint64ToFloatSeq {
@@ -1682,8 +1784,8 @@ impl fmt::Debug for Inst {
                 } else {
                     "f32"
                 },
-                show_reg(*src, 0),
-                show_reg(*dst, 0),
+                show_x64_reg(*src, 0),
+                show_x64_reg(*dst, 0),
             ),
 
             Inst::CvtFloatToSintSeq {
@@ -1697,8 +1799,8 @@ impl fmt::Debug for Inst {
                 "cvt_float{}_to_sint{}_seq {}, {}",
                 src_size.to_bits(),
                 dst_size.to_bits(),
-                show_reg(*src, 0),
-                show_reg(*dst, 0),
+                show_x64_reg(*src, 0),
+                show_x64_reg(*dst, 0),
             ),
 
             Inst::CvtFloatToUintSeq {
@@ -1712,8 +1814,8 @@ impl fmt::Debug for Inst {
                 "cvt_float{}_to_uint{}_seq {}, {}",
                 src_size.to_bits(),
                 dst_size.to_bits(),
-                show_reg(*src, 8),
-                show_reg(*dst, dst_size.to_bytes()),
+                show_x64_reg(*src, 8),
+                show_x64_reg(*dst, dst_size.to_bytes()),
             ),
 
             Inst::Imm {
@@ -1722,13 +1824,13 @@ impl fmt::Debug for Inst {
                 dst,
             } => {
                 if *dst_size == OperandSize::Size64 {
-                    write!(f, "movabsq ${}, {}", *simm64 as i64, show_reg(*dst, 8))
+                    write!(f, "movabsq ${}, {}", *simm64 as i64, show_x64_reg(*dst, 8))
                 } else {
                     write!(
                         f,
                         "movl ${}, {}",
                         (*simm64 as u32) as i32,
-                        show_reg(*dst, 4)
+                        show_x64_reg(*dst, 4)
                     )
                 }
             }
@@ -1737,36 +1839,31 @@ impl fmt::Debug for Inst {
                 f,
                 "mov{} {}, {}",
                 suffix_lq(*size),
-                show_reg(*src, size.to_bytes()),
-                show_reg(*dst, size.to_bytes())
+                show_x64_reg(*src, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes())
             ),
 
             Inst::MovzxRmR {
                 ext_mode, src, dst, ..
             } => {
                 if *ext_mode == ExtMode::LQ {
-                    write!(
-                        f,
-                        "movl {}, {}",
-                        show_reg(*src, ext_mode.src_size()),
-                        show_reg(*dst, 4),
-                    )
+                    write!(f, "movl {}, {}", src, show_x64_reg(*dst, 4),)
                 } else {
                     write!(
                         f,
                         "movz {}, {}",
-                        show_reg(*src, ext_mode.src_size()),
-                        show_reg(*dst, ext_mode.dst_size()),
+                        src,
+                        show_x64_reg(*dst, ext_mode.dst_size()),
                     )
                 }
             }
 
             Inst::Mov64MR { src, dst, .. } => {
-                write!(f, "movq {}, {}", show_reg(*src, 0), show_reg(*dst, 0),)
+                write!(f, "movq {}, {}", src, show_x64_reg(*dst, 0),)
             }
 
             Inst::LoadEffectiveAddress { addr, dst } => {
-                write!(f, "lea {:?}, {}", addr, show_reg(*dst, 0),)
+                write!(f, "lea {:?}, {}", addr, show_x64_reg(*dst, 0),)
             }
 
             Inst::MovsxRmR {
@@ -1775,15 +1872,15 @@ impl fmt::Debug for Inst {
                 f,
                 "movs{:?} {}, {}",
                 ext_mode,
-                show_reg(*src, ext_mode.src_size()),
-                show_reg(*dst, ext_mode.dst_size())
+                src,
+                show_x64_reg(*dst, ext_mode.dst_size())
             ),
 
             Inst::MovRM { size, src, dst, .. } => write!(
                 f,
                 "mov{} {}, {:?}",
                 suffix_bwlq(*size),
-                show_reg(*src, size.to_bytes()),
+                show_x64_reg(*src, size.to_bytes()),
                 dst,
             ),
 
@@ -1800,8 +1897,8 @@ impl fmt::Debug for Inst {
                     kind,
                     suffix_bwlq(*size),
                     num_bits,
-                    show_reg(src, size.to_bytes()),
-                    show_reg(dst, size.to_bytes())
+                    show_x64_reg(*src, size.to_bytes()),
+                    show_x64_reg(*dst, size.to_bytes())
                 )
             }
 
@@ -1817,9 +1914,9 @@ impl fmt::Debug for Inst {
                     "{:?}{} {}, {}, {}",
                     kind,
                     suffix_bwlq(*size),
-                    show_reg(*src, size.to_bytes()),
-                    show_reg(*count, size.to_bytes()),
-                    show_reg(*dst, size.to_bytes()),
+                    show_x64_reg(*src, size.to_bytes()),
+                    show_x64_reg(*count, size.to_bytes()),
+                    show_x64_reg(*dst, size.to_bytes()),
                 )
             }
 
@@ -1834,8 +1931,8 @@ impl fmt::Debug for Inst {
                     "{:?} {:?}, {}, {}",
                     opcode,
                     src1,
-                    show_reg(*src2, 0),
-                    show_reg(*dst, 0),
+                    show_x64_reg(*src2, 0),
+                    show_x64_reg(*dst, 0),
                 )
             }
 
@@ -1854,12 +1951,12 @@ impl fmt::Debug for Inst {
                     "{:?}{} {}, {}",
                     op,
                     suffix_bwlq(*size),
-                    show_reg(*src, size.to_bytes()),
-                    show_reg(*dst, size.to_bytes())
+                    src,
+                    show_x64_reg(*dst, size.to_bytes())
                 )
             }
 
-            Inst::Setcc { cc, dst } => write!(f, "set{:?} {}", cc, show_reg(*dst, 1)),
+            Inst::Setcc { cc, dst } => write!(f, "set{:?} {}", cc, show_x64_reg(*dst, 1)),
 
             Inst::Cmove {
                 size,
@@ -1873,8 +1970,8 @@ impl fmt::Debug for Inst {
                 cc,
                 suffix_bwlq(*size),
                 src1,
-                show_reg(*src2, size.to_bytes()),
-                show_reg(*dst, size.to_bytes()),
+                show_x64_reg(*src2, size.to_bytes()),
+                show_x64_reg(*dst, size.to_bytes()),
             ),
 
             Inst::XmmCmove {
@@ -1887,7 +1984,7 @@ impl fmt::Debug for Inst {
                 write!(
                     f,
                     "use {}; j{:?} $next; mov{} {}, {}; $next: ",
-                    show_reg(*src2, size.to_bytes()),
+                    show_x64_reg(*src2, size.to_bytes()),
                     cc.invert(),
                     if *size == OperandSize::Size64 {
                         "sd"
@@ -1895,27 +1992,25 @@ impl fmt::Debug for Inst {
                         "ss"
                     },
                     src1,
-                    show_reg(*dst, size.to_bytes()),
+                    show_x64_reg(*dst, size.to_bytes()),
                 )
             }
 
             Inst::Push64 { src } => {
-                write!(f, "pushq {}", show_reg(*src, 0))
+                write!(f, "pushq {}", src)
             }
 
             Inst::Pop64 { dst } => {
-                write!(f, "popq {}", show_reg(*dst, 0))
+                write!(f, "popq {}", show_x64_reg(*dst, 0))
             }
 
             Inst::CallKnown { dest, .. } => write!(f, "call {:?}", dest),
 
-            Inst::CallUnknown { dest, .. } => write!(f, "call *{}", show_reg(*dest, 0),),
+            Inst::CallUnknown { dest, .. } => write!(f, "call *{}", dest),
 
             Inst::Ret => write!(f, "ret"),
 
-            Inst::EpiloguePlaceholder => write!(f, "epilogue placeholder"),
-
-            Inst::JmpKnown { dst } => {
+            Inst::JmpKnown { dst, .. } => {
                 write!(f, "jmp {:?}", dst)
             }
 
@@ -1929,10 +2024,10 @@ impl fmt::Debug for Inst {
             } => write!(f, "j{} {:?}; j {:?}", cc, taken, not_taken,),
 
             Inst::JmpTableSeq { idx, .. } => {
-                write!(f, "br_table {}", show_reg(*idx, 0))
+                write!(f, "br_table {}", show_x64_reg(*idx, 0))
             }
 
-            Inst::JmpUnknown { target } => write!(f, "jmp *{}", show_reg(*target, 0),),
+            Inst::JmpUnknown { target, .. } => write!(f, "jmp *{}", target),
 
             Inst::TrapIf { cc, trap_code, .. } => {
                 write!(f, "j{:?} ; ud2 {} ;", cc.invert(), trap_code)
@@ -1945,7 +2040,7 @@ impl fmt::Debug for Inst {
                 "load_ext_name {}+{}, {}",
                 name,
                 offset,
-                show_reg(*dst, 8),
+                show_x64_reg(*dst, 8),
             ),
 
             Inst::LockCmpxchg {
@@ -1961,10 +2056,10 @@ impl fmt::Debug for Inst {
                     f,
                     "lock cmpxchg{} {}, {}, expected_in={}, actual_out={}",
                     suffix_bwlq(OperandSize::from_bytes(size as u32)),
-                    show_reg(*src, size),
-                    show_reg(*dst, size),
-                    show_reg(*expected, size),
-                    show_reg(*actual, size),
+                    show_x64_reg(*src, size),
+                    dst,
+                    show_x64_reg(*expected, size),
+                    show_x64_reg(*actual, size),
                 )
             }
 
@@ -1979,7 +2074,11 @@ impl fmt::Debug for Inst {
                 write!(
                     f,
                     "atomic_rmw_seq {:?} addr={} src={} scratch={} old_out={}",
-                    op, addr, src, scratch, old_out,
+                    op,
+                    show_x64_reg(*addr, ty.bytes() as u8),
+                    show_x64_reg(*src, ty.bytes() as u8),
+                    show_x64_reg(*scratch, ty.bytes() as u8),
+                    show_x64_reg(*old_out, ty.bytes() as u8),
                 )
             }
 
@@ -2000,15 +2099,25 @@ impl fmt::Debug for Inst {
             Inst::Ud2 { trap_code } => write!(f, "ud2 {}", trap_code),
 
             Inst::ElfTlsGetAddr { ref symbol, dst } => {
-                write!(f, "elf_tls_get_addr {:?}, {}", symbol, show_reg(*dst, 0))
+                write!(
+                    f,
+                    "elf_tls_get_addr {:?}, {}",
+                    symbol,
+                    show_x64_reg(*dst, 0)
+                )
             }
 
             Inst::MachOTlsGetAddr { ref symbol, dst } => {
-                write!(f, "macho_tls_get_addr {:?}, {}", symbol, show_reg(*dst, 0))
+                write!(
+                    f,
+                    "macho_tls_get_addr {:?}, {}",
+                    symbol,
+                    show_x64_reg(*dst, 0)
+                )
             }
 
             Inst::ValueLabelMarker { label, reg } => {
-                write!(f, "value_label {:?}, {}", label, show_reg(reg, 0))
+                write!(f, "value_label {:?}, {}", label, show_x64_reg(*reg, 0))
             }
 
             Inst::Unwind { inst } => {
@@ -2030,16 +2139,14 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ref mut dst,
             ..
         } => {
-            if inst.produces_const() {
-                // No need to account for src, since src == dst.
-                f(dst);
-            } else {
-                // src2 first, so that dst can refer to it with
-                // constant operand index 0 to reuse its register.
-                f(src2);
-                src1.visit_regs(&mut f);
-                f(dst);
-            }
+            // src2 first, so that dst can refer to it with
+            // constant operand index 0 to reuse its register.
+            f(src2);
+            src1.visit_regs(&mut f);
+            f(dst);
+        }
+        &mut Inst::AluRmiRConst { ref mut dst, .. } => {
+            f(dst);
         }
         &mut Inst::Not {
             ref mut src,
@@ -2124,14 +2231,12 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ref mut dst,
             ..
         } => {
-            if inst.produces_const() {
-                // No need to account for src, since src == dst.
-                f(dst);
-            } else {
-                f(src2);
-                src1.visit_regs(&mut f);
-                f(dst);
-            }
+            f(src2);
+            src1.visit_regs(&mut f);
+            f(dst);
+        }
+        &mut Inst::XmmRmRConst { ref mut dst, .. } => {
+            f(dst);
         }
         &mut Inst::XmmRmRImm {
             op,
@@ -2140,14 +2245,14 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ref mut dst,
             ..
         } => {
-            if inst.produces_const() {
-                // No need to account for src, since src == dst.
-                f(dst);
-            } else {
-                f(src2);
-                src1.visit_regs(&mut f);
-                f(dst);
-            }
+            f(src2);
+            src1.visit_regs(&mut f);
+            f(dst);
+        }
+        &mut Inst::XmmRmRImmConst {
+            op, ref mut dst, ..
+        } => {
+            f(dst);
         }
         &mut Inst::XmmUninitializedValue { ref mut dst } => {
             f(dst);
@@ -2188,7 +2293,7 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ref mut dst,
             ..
         } => {
-            f(src);
+            src.visit_regs(&mut f);
             f(dst);
         }
         &mut Inst::Imm { ref mut dst, .. } => {
@@ -2305,7 +2410,7 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ref mut dst,
             ..
         } => {
-            f(src);
+            src.visit_regs(&mut f);
             f(dst);
         }
         &mut Inst::Setcc { ref mut dst, .. } => {
@@ -2328,13 +2433,15 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             f(dst);
         }
         &mut Inst::Push64 { ref mut src } => {
-            f(src);
+            src.visit_regs(&mut f);
         }
         &mut Inst::Pop64 { ref mut dst } => {
             f(dst);
         }
 
-        &mut Inst::CallKnown { ref mut operands } => {
+        &mut Inst::CallKnown {
+            ref mut operands, ..
+        } => {
             for op in operands {
                 f(op);
             }
@@ -2419,7 +2526,6 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
         }
 
         &mut Inst::Ret
-        | &mut Inst::EpiloguePlaceholder
         | &mut Inst::JmpIf { .. }
         | &mut Inst::Nop { .. }
         | &mut Inst::TrapIf { .. }
@@ -2524,8 +2630,8 @@ impl MachInst for Inst {
     fn is_term<'a>(&'a self) -> MachTerminator<'a> {
         match self {
             // Interesting cases.
-            &Self::Ret | &Self::EpiloguePlaceholder => MachTerminator::Ret,
-            &Self::JmpKnown { dst } => MachTerminator::Uncond(dst),
+            &Self::Ret => MachTerminator::Ret,
+            &Self::JmpKnown { dst, .. } => MachTerminator::Uncond(dst),
             &Self::JmpCond {
                 taken, not_taken, ..
             } => MachTerminator::Cond(taken, not_taken),
@@ -2581,15 +2687,14 @@ impl MachInst for Inst {
             Self::Mov64MR {
                 src: SyntheticAmode::NominalSPOffset { simm32 },
                 dst,
-            } => Some(MachInstStackOpInfo::LoadNomSPOff(
-                dst.to_reg(),
-                *simm32 as i64,
-            )),
+            } => Some(MachInstStackOpInfo::LoadNomSPOff(*dst, *simm32 as i64)),
             _ => None,
         }
     }
 
-    fn gen_move(dst_reg: Reg, src_reg: Reg, ty: Type) -> Inst {
+    fn gen_move<R: RegType>(dst_reg: R, src_reg: R, ty: Type) -> Inst {
+        let dst_reg = dst_reg.mk_def();
+        let src_reg = src_reg.mk_use();
         let rc_dst = dst_reg.class();
         let rc_src = src_reg.class();
         // If this isn't true, we have gone way off the rails.
@@ -2613,7 +2718,7 @@ impl MachInst for Inst {
                 };
                 Inst::XmmUnaryRmR {
                     op,
-                    src: src_reg,
+                    src: RegMem::Reg { reg: src_reg },
                     dst: dst_reg,
                 }
             }
@@ -2626,31 +2731,32 @@ impl MachInst for Inst {
     }
 
     fn gen_reg_constraint_inst(args: Vec<Operand>) -> Inst {
+        let args = args.into_iter().map(|op| Reg::operand(op)).collect();
         Inst::RegConstraints { args }
     }
 
     fn rc_for_type(ty: Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
         match ty {
-            types::I8 => Ok((&[RegClass::I64], &[types::I8])),
-            types::I16 => Ok((&[RegClass::I64], &[types::I16])),
-            types::I32 => Ok((&[RegClass::I64], &[types::I32])),
-            types::I64 => Ok((&[RegClass::I64], &[types::I64])),
-            types::B1 => Ok((&[RegClass::I64], &[types::B1])),
-            types::B8 => Ok((&[RegClass::I64], &[types::B8])),
-            types::B16 => Ok((&[RegClass::I64], &[types::B16])),
-            types::B32 => Ok((&[RegClass::I64], &[types::B32])),
-            types::B64 => Ok((&[RegClass::I64], &[types::B64])),
+            types::I8 => Ok((&[RegClass::Int], &[types::I8])),
+            types::I16 => Ok((&[RegClass::Int], &[types::I16])),
+            types::I32 => Ok((&[RegClass::Int], &[types::I32])),
+            types::I64 => Ok((&[RegClass::Int], &[types::I64])),
+            types::B1 => Ok((&[RegClass::Int], &[types::B1])),
+            types::B8 => Ok((&[RegClass::Int], &[types::B8])),
+            types::B16 => Ok((&[RegClass::Int], &[types::B16])),
+            types::B32 => Ok((&[RegClass::Int], &[types::B32])),
+            types::B64 => Ok((&[RegClass::Int], &[types::B64])),
             types::R32 => panic!("32-bit reftype pointer should never be seen on x86-64"),
-            types::R64 => Ok((&[RegClass::I64], &[types::R64])),
-            types::F32 => Ok((&[RegClass::V128], &[types::F32])),
-            types::F64 => Ok((&[RegClass::V128], &[types::F64])),
-            types::I128 => Ok((&[RegClass::I64, RegClass::I64], &[types::I64, types::I64])),
-            types::B128 => Ok((&[RegClass::I64, RegClass::I64], &[types::B64, types::B64])),
+            types::R64 => Ok((&[RegClass::Int], &[types::R64])),
+            types::F32 => Ok((&[RegClass::Float], &[types::F32])),
+            types::F64 => Ok((&[RegClass::Float], &[types::F64])),
+            types::I128 => Ok((&[RegClass::Int, RegClass::Int], &[types::I64, types::I64])),
+            types::B128 => Ok((&[RegClass::Int, RegClass::Int], &[types::B64, types::B64])),
             _ if ty.is_vector() => {
                 assert!(ty.bits() <= 128);
-                Ok((&[RegClass::V128], &[types::I8X16]))
+                Ok((&[RegClass::Float], &[types::I8X16]))
             }
-            types::IFLAGS | types::FFLAGS => Ok((&[RegClass::I64], &[types::I64])),
+            types::IFLAGS | types::FFLAGS => Ok((&[RegClass::Int], &[types::I64])),
             _ => Err(CodegenError::Unsupported(format!(
                 "Unexpected SSA-value type: {}",
                 ty
@@ -2658,8 +2764,8 @@ impl MachInst for Inst {
         }
     }
 
-    fn gen_jump(label: MachLabel) -> Inst {
-        Inst::jmp_known(label)
+    fn gen_jump<R: RegType>(label: MachLabel, args: Vec<R>) -> Inst {
+        Inst::jmp_known(label, args)
     }
 
     fn gen_constant<F: FnMut(Type) -> VReg>(
@@ -2681,16 +2787,10 @@ impl MachInst for Inst {
                 to_regs.regs()[1],
             ));
         } else {
-            let to_reg = to_regs
-                .only_reg()
-                .expect("multi-reg values not supported on x64");
+            let to_reg = to_regs.only_reg().unwrap();
             if ty == types::F32 {
                 if value == 0 {
-                    ret.push(Inst::xmm_rm_r(
-                        SseOpcode::Xorps,
-                        RegMem::reg(to_reg),
-                        to_reg,
-                    ));
+                    ret.push(Inst::xmm_rm_r_const(SseOpcode::Xorps, to_reg));
                 } else {
                     let tmp = alloc_tmp(types::I32);
                     ret.push(Inst::imm(OperandSize::Size32, value as u64, tmp));
@@ -2704,11 +2804,7 @@ impl MachInst for Inst {
                 }
             } else if ty == types::F64 {
                 if value == 0 {
-                    ret.push(Inst::xmm_rm_r(
-                        SseOpcode::Xorpd,
-                        RegMem::reg(to_reg),
-                        to_reg,
-                    ));
+                    ret.push(Inst::xmm_rm_r_const(SseOpcode::Xorpd, to_reg));
                 } else {
                     let tmp = alloc_tmp(types::I64);
                     ret.push(Inst::imm(OperandSize::Size64, value as u64, tmp));
@@ -2742,12 +2838,7 @@ impl MachInst for Inst {
                     _ => OperandSize::Size32,
                 };
                 if value == 0 {
-                    ret.push(Inst::alu_rmi_r(
-                        size,
-                        AluRmiROpcode::Xor,
-                        RegMemImm::reg(to_reg),
-                        to_reg,
-                    ));
+                    ret.push(Inst::alu_rmi_r_const(size, AluRmiROpcode::Xor, to_reg));
                 } else {
                     let value = value as u64;
                     ret.push(Inst::imm(size, value.into(), to_reg));
@@ -2762,11 +2853,14 @@ impl MachInst for Inst {
     }
 
     fn ref_type_regclass(_: &settings::Flags) -> RegClass {
-        RegClass::I64
+        RegClass::Int
     }
 
-    fn gen_value_label_marker(label: ValueLabel, reg: Reg) -> Self {
-        Inst::ValueLabelMarker { label, reg }
+    fn gen_value_label_marker<R: RegType>(label: ValueLabel, reg: R) -> Self {
+        Inst::ValueLabelMarker {
+            label,
+            reg: reg.mk_use(),
+        }
     }
 
     fn defines_value_label(&self) -> Option<(ValueLabel, Reg)> {
@@ -2774,6 +2868,17 @@ impl MachInst for Inst {
             Inst::ValueLabelMarker { label, reg } => Some((*label, *reg)),
             _ => None,
         }
+    }
+
+    fn type_for_rc(rc: RegClass) -> Type {
+        match rc {
+            RegClass::Int => types::I64,
+            RegClass::Float => types::I8X16,
+        }
+    }
+
+    fn gen_ret() -> Self {
+        Inst::ret()
     }
 
     type LabelUse = LabelUse;

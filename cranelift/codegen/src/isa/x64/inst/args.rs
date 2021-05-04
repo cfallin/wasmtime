@@ -4,10 +4,10 @@ use super::regs;
 use super::EmitState;
 use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::{MemFlags, Type};
-use crate::isa::x64::inst::Inst;
+use crate::isa::x64::inst::{show_x64_reg, Inst};
 use crate::machinst::Reg;
 use crate::machinst::*;
-use regalloc2::{Operand, RegClass, VReg};
+use regalloc2::{RegClass, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 
@@ -133,7 +133,7 @@ impl std::fmt::Debug for Amode {
                 ..
             } => write!(
                 f,
-                "{}({},{:?},{:?})",
+                "{}({:?},{:?},{:?})",
                 *simm32 as i32,
                 base,
                 index,
@@ -141,6 +141,12 @@ impl std::fmt::Debug for Amode {
             ),
             Amode::RipRelative { ref target } => write!(f, "label{}(%rip)", target.get()),
         }
+    }
+}
+
+impl std::fmt::Display for Amode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
@@ -185,7 +191,11 @@ impl SyntheticAmode {
                     off <= u32::max_value() as i64,
                     "amode finalize: add sequence NYI"
                 );
-                Amode::imm_reg(off as u32, regs::rsp())
+                Amode::ImmReg {
+                    simm32: off as u32,
+                    base: Reg::preg_use(regs::rsp()),
+                    flags: MemFlags::trusted(),
+                }
             }
             SyntheticAmode::ConstantOffset(c) => {
                 Amode::rip_relative(buffer.get_label_for_constant(*c))
@@ -212,6 +222,12 @@ impl std::fmt::Debug for SyntheticAmode {
     }
 }
 
+impl std::fmt::Display for SyntheticAmode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
 /// An operand which is either an integer Register, a value in Memory or an Immediate.  This can
 /// denote an 8, 16, 32 or 64 bit value.  For the Immediate form, in the 8- and 16-bit case, only
 /// the lower 8 or 16 bits of `simm32` is relevant.  In the 64-bit case, the value denoted by
@@ -224,10 +240,8 @@ pub enum RegMemImm {
 }
 
 impl RegMemImm {
-    pub(crate) fn reg(reg: VReg) -> Self {
-        Self::Reg {
-            reg: Reg::reg_use(reg),
-        }
+    pub(crate) fn reg<R: RegType>(reg: R) -> Self {
+        Self::Reg { reg: reg.mk_use() }
     }
     pub(crate) fn mem(addr: impl Into<SyntheticAmode>) -> Self {
         Self::Mem { addr: addr.into() }
@@ -250,27 +264,21 @@ impl RegMemImm {
             _ => None,
         }
     }
-
-    /// Apply a mapper only to the register case. Can be used to
-    /// adjust the Operand params when this operand is passed into an
-    /// instruction constructor as a carrier for a VReg.
-    pub(crate) fn adjust_operand<F: Fn(VReg) -> Operand>(self, f: F) -> Self {
-        match self {
-            Self::Reg { reg } if reg.is_operand() => Self::Reg {
-                reg: f(reg.as_operand().unwrap().vreg()),
-            },
-            _ => self,
-        }
-    }
 }
 
 impl std::fmt::Debug for RegMemImm {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Reg { reg } => write!(f, "{}", Inst::reg_name(*reg, 8)),
+            Self::Reg { reg } => write!(f, "{}", show_x64_reg(*reg, 8)),
             Self::Mem { addr } => write!(f, "{:?}", addr),
             Self::Imm { simm32 } => write!(f, "${}", *simm32 as i32),
         }
+    }
+}
+
+impl std::fmt::Display for RegMemImm {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
@@ -283,10 +291,8 @@ pub enum RegMem {
 }
 
 impl RegMem {
-    pub(crate) fn reg(reg: VReg) -> Self {
-        Self::Reg {
-            reg: Reg::reg_use(reg),
-        }
+    pub(crate) fn reg<R: RegType>(reg: R) -> Self {
+        Self::Reg { reg: reg.mk_use() }
     }
     pub(crate) fn mem(addr: impl Into<SyntheticAmode>) -> Self {
         Self::Mem { addr: addr.into() }
@@ -305,32 +311,26 @@ impl RegMem {
             _ => None,
         }
     }
-
-    /// Apply a mapper only to the register case. Can be used to
-    /// adjust the Operand params when this operand is passed into an
-    /// instruction constructor as a carrier for a VReg.
-    pub(crate) fn adjust_operand<F: Fn(VReg) -> Operand>(self, f: F) -> Self {
-        match self {
-            Self::Reg { reg } if reg.is_operand() => Self::Reg {
-                reg: f(reg.as_operand().unwrap().vreg()),
-            },
-            _ => self,
-        }
-    }
 }
 
 impl From<Reg> for RegMem {
     fn from(r: Reg) -> Self {
-        RegMem::reg(r)
+        RegMem::Reg { reg: r }
     }
 }
 
 impl std::fmt::Debug for RegMem {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            RegMem::Reg { reg } => write!(f, "{:?}", Inst::reg_name(*reg, 8)),
+            RegMem::Reg { reg } => write!(f, "{:?}", show_x64_reg(*reg, 8)),
             RegMem::Mem { addr, .. } => write!(f, "{:?}", addr),
         }
+    }
+}
+
+impl std::fmt::Display for RegMem {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
     }
 }
 
