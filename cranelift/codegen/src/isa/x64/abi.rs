@@ -1,7 +1,7 @@
 //! Implementation of the standard x64 ABI.
 
 use crate::ir::types::*;
-use crate::ir::{self, types, ExternalName, LibCall, MemFlags, Opcode, TrapCode, Type};
+use crate::ir::{self, types, ExternalName, LibCall, Opcode, TrapCode, Type};
 use crate::isa;
 use crate::isa::x64::inst::regs;
 use crate::isa::{unwind::UnwindInst, x64::inst::*, CallConv};
@@ -36,7 +36,7 @@ fn try_fill_baldrdash_reg(call_conv: CallConv, param: &ir::AbiParam) -> Option<A
             &ir::ArgumentPurpose::VMContext => {
                 // This is SpiderMonkey's `WasmTlsReg`.
                 Some(ABIArg::reg(
-                    regs::r14().to_real_reg(),
+                    regs::r14(),
                     types::I64,
                     param.extension,
                     param.purpose,
@@ -45,7 +45,7 @@ fn try_fill_baldrdash_reg(call_conv: CallConv, param: &ir::AbiParam) -> Option<A
             &ir::ArgumentPurpose::SignatureId => {
                 // This is SpiderMonkey's `WasmTableCallSigReg`.
                 Some(ABIArg::reg(
-                    regs::r10().to_real_reg(),
+                    regs::r10(),
                     types::I64,
                     param.extension,
                     param.purpose,
@@ -236,7 +236,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                         next_vreg += 1;
                     }
                     slots.push(ABIArgSlot::Reg {
-                        reg: reg.to_real_reg(),
+                        reg,
                         ty: *reg_ty,
                         extension: param.extension,
                     });
@@ -281,7 +281,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             debug_assert!(args_or_rets == ArgsOrRets::Args);
             if let Some(reg) = get_intreg_for_arg(&call_conv, next_gpr, next_param_idx) {
                 ret.push(ABIArg::reg(
-                    reg.to_real_reg(),
+                    reg,
                     types::I64,
                     ir::ArgumentExtension::None,
                     ir::ArgumentPurpose::Normal,
@@ -352,7 +352,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let mut ret = smallvec![];
 
         if ty == types::I64 {
-            ret.push(Inst::push64(tmp));
+            ret.push(Inst::push64(RegMemImm::reg(tmp)));
         } else {
             ret.push(Inst::alu_rmi_r(
                 OperandSize::Size64,
@@ -364,10 +364,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             ret.push(Inst::store(ty, tmp, Amode::imm_reg(0, regs::rsp())));
         }
 
-        let to_mem = to_mem.offset_sp(offset);
-        let from_mem = from_mem.offset_sp(offset);
-        ret.push(Inst::load(ty, from_mem.into(), tmp, ExtKind::None));
-        ret.push(Inst::store(ty, tmp, to_mem.into()));
+        let to_mem = to_mem.offset_sp(offset as i64);
+        let from_mem = from_mem.offset_sp(offset as i64);
+        let to_mem: SyntheticAmode = to_mem.into();
+        let from_mem: SyntheticAmode = from_mem.into();
+        ret.push(Inst::load(ty, from_mem, tmp, ExtKind::None));
+        ret.push(Inst::store(ty, tmp, to_mem));
 
         if ty == types::I64 {
             ret.push(Inst::pop64(tmp));
@@ -430,15 +432,14 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         ]
     }
 
-    fn gen_get_stack_addr(mem: StackAMode, into_reg: R, _ty: Type) -> Self::I {
+    fn gen_get_stack_addr<R: RegType>(mem: StackAMode, into_reg: R, _ty: Type) -> Self::I {
         let mem: SyntheticAmode = mem.into();
         Inst::lea(mem, into_reg)
     }
 
     fn get_stacklimit_reg() -> PReg {
         debug_assert!(
-            !is_callee_save_systemv(regs::r10().to_real_reg())
-                && !is_callee_save_baldrdash(regs::r10().to_real_reg())
+            !is_callee_save_systemv(regs::r10()) && !is_callee_save_baldrdash(regs::r10())
         );
 
         // As per comment on trait definition, we must return a caller-save
@@ -526,7 +527,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             dest: ExternalName::LibCall(LibCall::Probestack),
             opcode: Opcode::Call,
             operands: vec![],
-            clobbers: vec![],
+            clobbers: &[],
         });
         insts
     }
@@ -675,7 +676,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         _callee_conv: isa::CallConv,
         _caller_conv: isa::CallConv,
         operands: Vec<Operand>,
-        clobbers: Vec<PReg>,
+        clobbers: &'static [PReg],
     ) -> SmallVec<[Self::I; 2]> {
         let mut insts = smallvec![];
         match dest {
@@ -684,12 +685,12 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             }
             &CallDest::ExtName(ref name, RelocDistance::Far) => {
                 insts.push(Inst::LoadExtName {
-                    dst: tmp,
+                    dst: Reg::reg_def(tmp),
                     name: Box::new(name.clone()),
                     offset: 0,
                 });
                 insts.push(Inst::call_unknown(
-                    RegMem::reg(tmp.to_reg()),
+                    RegMem::reg(tmp),
                     opcode,
                     operands,
                     clobbers,
@@ -721,15 +722,13 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let arg0 = get_intreg_for_arg(&call_conv, 0, 0).unwrap();
         let arg1 = get_intreg_for_arg(&call_conv, 1, 1).unwrap();
         let arg2 = get_intreg_for_arg(&call_conv, 2, 2).unwrap();
-        let dst_arg = Reg::reg_fixed_use(dst, arg0);
-        let src_arg = Reg::reg_fixed_use(src, arg1);
-        let size_def = Reg::reg_def(tmp1);
-        let size_arg = Reg::reg_fixed_use(tmp1, arg2);
+        let dst_arg = Operand::reg_fixed_use(dst, arg0);
+        let src_arg = Operand::reg_fixed_use(src, arg1);
+        let size_arg = Operand::reg_fixed_use(tmp1, arg2);
         let memcpy_addr_def = Reg::reg_def(tmp2);
-        let memcpy_addr_use = Reg::reg_use(tmp2);
 
         insts.extend(
-            Inst::gen_constant(ValueRegs::one(size_def), size as u128, I64, |_| {
+            Inst::gen_constant(ValueRegs::one(tmp1), size as u128, I64, |_| {
                 panic!("tmp should not be needed")
             })
             .into_iter(),
@@ -745,7 +744,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             offset: 0,
         });
         insts.push(Inst::call_unknown(
-            RegMem::reg(memcpy_addr_use),
+            RegMem::reg(tmp2),
             Opcode::Call,
             /* operands = */ vec![dst_arg, src_arg, size_arg],
             /* clobbers = */ Self::get_clobbers(call_conv),
@@ -757,7 +756,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         // We allocate in terms of 8-byte slots.
         match (rc, ty) {
             (RegClass::Int, _) => 1,
-            (RegClass::Float, types::F32) | (RegClass::V128, types::F64) => 1,
+            (RegClass::Float, types::F32) | (RegClass::Float, types::F64) => 1,
             (RegClass::Float, _) => 2,
             _ => panic!("Unexpected register class!"),
         }
@@ -887,11 +886,7 @@ impl From<StackAMode> for SyntheticAmode {
                 let off = i32::try_from(off)
                     .expect("Offset in SPOffset is greater than 2GB; should hit impl limit first");
                 let simm32 = off as u32;
-                SyntheticAmode::Real(Amode::ImmReg {
-                    simm32,
-                    base: regs::rsp(),
-                    flags: MemFlags::trusted(),
-                })
+                SyntheticAmode::Real(Amode::imm_reg(simm32, regs::rsp()))
             }
         }
     }

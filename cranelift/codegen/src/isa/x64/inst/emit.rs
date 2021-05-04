@@ -13,12 +13,12 @@ use encoding::rex::{
 use log::debug;
 
 /// A small helper to generate a signed conversion instruction.
-fn emit_signed_cvt(
+fn emit_signed_cvt<R: RegType>(
     sink: &mut MachBuffer<Inst>,
     info: &EmitInfo,
     state: &mut EmitState,
-    src: Reg,
-    dst: Reg,
+    src: R,
+    dst: R,
     to_f64: bool,
 ) {
     // Handle an unsigned int, which is the "easy" case: a signed conversion will do the
@@ -142,21 +142,23 @@ pub(crate) fn emit(
         Inst::AluRmiR {
             size,
             op,
-            src,
+            src1,
+            src2,
             dst: reg_g,
         } => {
             let mut rex = RexFlags::from(*size);
+            assert_eq!(src2.as_preg().unwrap(), reg_g.as_preg().unwrap());
             if *op == AluRmiROpcode::Mul {
                 // We kinda freeloaded Mul into RMI_R_Op, but it doesn't fit the usual pattern, so
                 // we have to special-case it.
-                match src {
+                match src1 {
                     RegMemImm::Reg { reg: reg_e } => {
                         emit_std_reg_reg(
                             sink,
                             LegacyPrefixes::None,
                             0x0FAF,
                             2,
-                            reg_g.to_reg(),
+                            reg_g,
                             *reg_e,
                             rex,
                         );
@@ -171,7 +173,7 @@ pub(crate) fn emit(
                             LegacyPrefixes::None,
                             0x0FAF,
                             2,
-                            reg_g.to_reg(),
+                            reg_g,
                             &amode,
                             rex,
                         );
@@ -186,8 +188,8 @@ pub(crate) fn emit(
                             LegacyPrefixes::None,
                             opcode,
                             1,
-                            reg_g.to_reg(),
-                            reg_g.to_reg(),
+                            reg_g,
+                            reg_g,
                             rex,
                         );
                         emit_simm(sink, if use_imm8 { 1 } else { 4 }, *simm32);
@@ -208,7 +210,7 @@ pub(crate) fn emit(
                 };
                 assert!(!(is_8bit && *size == OperandSize::Size64));
 
-                match src {
+                match src1 {
                     RegMemImm::Reg { reg: reg_e } => {
                         if is_8bit {
                             rex.always_emit_if_8bit_needed(*reg_e);
@@ -223,7 +225,7 @@ pub(crate) fn emit(
                             opcode_r,
                             1,
                             *reg_e,
-                            reg_g.to_reg(),
+                            reg_g,
                             rex,
                         );
                     }
@@ -241,7 +243,7 @@ pub(crate) fn emit(
                             LegacyPrefixes::None,
                             opcode_m,
                             1,
-                            reg_g.to_reg(),
+                            reg_g,
                             &amode,
                             rex,
                         );
@@ -297,7 +299,7 @@ pub(crate) fn emit(
                     prefix,
                     opcode,
                     num_opcodes,
-                    dst.to_reg(),
+                    dst,
                     *src,
                     rex_flags,
                 ),
@@ -310,7 +312,7 @@ pub(crate) fn emit(
                         prefix,
                         opcode,
                         num_opcodes,
-                        dst.to_reg(),
+                        dst,
                         &amode,
                         rex_flags,
                     );
@@ -318,8 +320,9 @@ pub(crate) fn emit(
             }
         }
 
-        Inst::Not { size, src } => {
-            let rex_flags = RexFlags::from((*size, src.to_reg()));
+        Inst::Not { size, src, dst } => {
+            assert_eq!(src.as_preg().unwrap(), dst.as_preg().unwrap());
+            let rex_flags = RexFlags::from((*size, src));
             let (opcode, prefix) = match size {
                 OperandSize::Size8 => (0xF6, LegacyPrefixes::None),
                 OperandSize::Size16 => (0xF7, LegacyPrefixes::_66),
@@ -328,12 +331,13 @@ pub(crate) fn emit(
             };
 
             let subopcode = 2;
-            let enc_src = int_reg_enc(src.to_reg());
+            let enc_src = int_reg_enc(src);
             emit_std_enc_enc(sink, prefix, opcode, 1, subopcode, enc_src, rex_flags)
         }
 
-        Inst::Neg { size, src } => {
-            let rex_flags = RexFlags::from((*size, src.to_reg()));
+        Inst::Neg { size, src, dst } => {
+            assert_eq!(src.as_preg().unwrap(), dst.as_preg().unwrap());
+            let rex_flags = RexFlags::from((*size, src));
             let (opcode, prefix) = match size {
                 OperandSize::Size8 => (0xF6, LegacyPrefixes::None),
                 OperandSize::Size16 => (0xF7, LegacyPrefixes::_66),
@@ -342,7 +346,7 @@ pub(crate) fn emit(
             };
 
             let subopcode = 3;
-            let enc_src = int_reg_enc(src.to_reg());
+            let enc_src = int_reg_enc(src);
             emit_std_enc_enc(sink, prefix, opcode, 1, subopcode, enc_src, rex_flags)
         }
 

@@ -6,6 +6,7 @@ use crate::isa::unwind::UnwindInst;
 use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use gimli::write::{Address, FrameDescriptionEntry};
+use regalloc2::PReg;
 use thiserror::Error;
 
 #[cfg(feature = "enable-serde")]
@@ -144,7 +145,7 @@ pub struct UnwindInfo {
     len: u32,
 }
 
-pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
+pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<PReg>>(
     insts: &[(CodeOffset, UnwindInst)],
     code_len: usize,
     mr: &MR,
@@ -202,7 +203,7 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
                 reg,
             } => {
                 let reg = mr
-                    .map(reg.to_reg())
+                    .map(reg)
                     .map_err(|e| CodegenError::RegisterMappingError(e))?;
                 let off = (clobber_offset as i32) - (clobber_offset_to_cfa as i32);
                 instructions.push((instruction_offset, CallFrameInstruction::Offset(reg, off)));

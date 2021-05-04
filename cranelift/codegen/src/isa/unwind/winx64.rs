@@ -5,6 +5,7 @@ use crate::result::{CodegenError, CodegenResult};
 use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
 use log::warn;
+use regalloc2::PReg;
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
@@ -334,7 +335,7 @@ impl UnwindInfo {
 
 const UNWIND_RBP_REG: u8 = 5;
 
-pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
+pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<PReg>>(
     insts: &[(CodeOffset, UnwindInst)],
 ) -> CodegenResult<UnwindInfo> {
     let mut unwind_codes = vec![];
@@ -359,7 +360,7 @@ pub(crate) fn create_unwind_info_from_insts<MR: RegisterMapper<regalloc::Reg>>(
             &UnwindInst::SaveReg {
                 clobber_offset,
                 reg,
-            } => match MR::map(reg.to_reg()) {
+            } => match MR::map(reg) {
                 MappedRegister::Int(reg) => {
                     unwind_codes.push(UnwindCode::SaveReg {
                         instruction_offset,

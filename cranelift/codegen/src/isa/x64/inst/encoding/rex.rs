@@ -47,16 +47,16 @@ pub(crate) fn encode_sib(shift: u8, enc_index: u8, enc_base: u8) -> u8 {
 /// Get the encoding number of a GPR.
 #[inline(always)]
 pub(crate) fn int_reg_enc(reg: Reg) -> u8 {
-    debug_assert!(reg.is_real());
-    debug_assert_eq!(reg.get_class(), RegClass::I64);
-    reg.get_hw_encoding()
+    let preg = reg.as_preg().unwrap();
+    debug_assert_eq!(preg.class(), RegClass::Int);
+    preg.hw_enc()
 }
 
 /// Get the encoding number of any register.
 #[inline(always)]
 pub(crate) fn reg_enc(reg: Reg) -> u8 {
-    debug_assert!(reg.is_real());
-    reg.get_hw_encoding()
+    let preg = reg.as_preg().unwrap();
+    reg.hw_enc()
 }
 
 /// A small bit field to record a REX prefix specification:

@@ -456,7 +456,7 @@ pub trait ABIMachineSpec {
         callee_conv: isa::CallConv,
         callee_conv: isa::CallConv,
         operands: Vec<Operand>,
-        clobbers: Vec<PReg>,
+        clobbers: &'static [PReg],
     ) -> SmallVec<[Self::I; 2]>;
 
     /// Generate a memcpy invocation. Used to set up struct args. May clobber
@@ -1482,7 +1482,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             self.sig.call_conv,
             self.caller_conv,
             operands,
-            clobbers.to_vec(),
+            clobbers,
         )
         .into_iter()
         {

@@ -7,7 +7,7 @@ use crate::ir::{MemFlags, Type};
 use crate::isa::x64::inst::{show_x64_reg, Inst};
 use crate::machinst::Reg;
 use crate::machinst::*;
-use regalloc2::{RegClass, VReg};
+use regalloc2::RegClass;
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 
@@ -37,23 +37,23 @@ pub enum Amode {
 }
 
 impl Amode {
-    pub(crate) fn imm_reg(simm32: u32, base: VReg) -> Self {
+    pub(crate) fn imm_reg<R: RegType>(simm32: u32, base: R) -> Self {
         debug_assert!(base.class() == RegClass::Int);
         Self::ImmReg {
             simm32,
-            base: Reg::reg_use(base),
+            base: base.mk_use(),
             flags: MemFlags::trusted(),
         }
     }
 
-    pub(crate) fn imm_reg_reg_shift(simm32: u32, base: VReg, index: VReg, shift: u8) -> Self {
+    pub(crate) fn imm_reg_reg_shift<R: RegType>(simm32: u32, base: R, index: R, shift: u8) -> Self {
         debug_assert!(base.class() == RegClass::Int);
         debug_assert!(index.class() == RegClass::Int);
         debug_assert!(shift <= 3);
         Self::ImmRegRegShift {
             simm32,
-            base: Reg::reg_use(base),
-            index: Reg::reg_use(index),
+            base: base.mk_use(),
+            index: index.mk_use(),
             shift,
             flags: MemFlags::trusted(),
         }
