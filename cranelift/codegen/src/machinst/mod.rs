@@ -198,6 +198,9 @@ pub trait MachInst: Clone + Debug {
     /// the instruction must have a nonzero size if preferred_size is nonzero.
     fn gen_nop(preferred_size: usize) -> Self;
 
+    /// Generate a return instruction.
+    fn gen_ret() -> Self;
+
     /// Align a basic block offset (from start of function).  By default, no
     /// alignment occurs.
     fn align_basic_block(offset: CodeOffset) -> CodeOffset {
@@ -337,9 +340,9 @@ pub trait MachInstEmitInfo {
 
 /// A trait describing the emission state carried between MachInsts when
 /// emitting a function body.
-pub trait MachInstEmitState<I: MachInst, A: ABICallee<I = I>>: Default + Clone + Debug {
+pub trait MachInstEmitState<I: MachInst>: Default + Clone + Debug {
     /// Create a new emission state given the ABI object.
-    fn new(abi: &A) -> Self;
+    fn new<A: ABICallee<I = I>>(abi: &A) -> Self;
     /// Update the emission state before emitting an instruction that is a
     /// safepoint.
     fn pre_safepoint(&mut self, _stack_map: StackMap) {}

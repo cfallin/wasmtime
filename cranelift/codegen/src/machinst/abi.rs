@@ -2,9 +2,10 @@
 
 use super::{Reg, SpillSlot};
 use crate::binemit::StackMap;
-use crate::ir::{Signature, StackSlot};
+use crate::ir::{Signature, StackSlot, Function};
 use crate::isa::CallConv;
 use crate::machinst::*;
+use crate::result::CodegenResult;
 use crate::settings;
 use smallvec::SmallVec;
 
@@ -14,9 +15,12 @@ pub type SmallInstVec<I> = SmallVec<[I; 4]>;
 
 /// Trait implemented by an object that tracks ABI-related state (e.g., stack
 /// layout) and can generate code while emitting the *body* of a function.
-pub trait ABICallee {
+pub trait ABICallee: Sized {
     /// The instruction type for the ISA associated with this ABI.
     type I: VCodeInst;
+
+    /// Create a new ABI instance.
+    fn new(f: &Function, flags: settings::Flags) -> CodegenResult<Self>;
 
     /// Access the (possibly legalized) signature.
     fn signature(&self) -> &Signature;
@@ -132,7 +136,7 @@ pub trait ABICallee {
     /// This returns the instruction (rather than emitting to the
     /// context) because it is used post-regalloc to implement edits,
     /// rather than during lowering itself.
-    fn gen_spill(&self, to_slot: SpillSlot, from_reg: Reg) -> SmallInstVec<Self::I>;
+    fn gen_spill(&self, to_slot: SpillSlot, from_reg: PReg) -> SmallInstVec<Self::I>;
 
     /// Generate a reload (fill). As for spills, the type may be given to allow
     /// a more optimized load instruction to be generated.

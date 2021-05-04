@@ -17,8 +17,8 @@ use crate::ir::{
     ValueLabelAssignments, ValueLabelStart,
 };
 use crate::machinst::{
-    ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode, VCodeBuilder,
-    VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
+    ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachInstEmitInfo, MachLabel, VCode,
+    VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
 };
 use crate::CodegenResult;
 use alloc::vec::Vec;
@@ -196,7 +196,6 @@ pub trait LowerBackend {
 /// whether it is a safepoint.
 struct InstTuple<I: VCodeInst> {
     loc: SourceLoc,
-    is_safepoint: bool,
     inst: I,
 }
 
@@ -244,7 +243,7 @@ pub struct Lower<'func, I: VCodeInst, A: ABICallee<I = I>> {
     inst_sunk: FxHashSet<Inst>,
 
     /// Next virtual register number to allocate.
-    next_vreg: u32,
+    next_vreg: usize,
 
     /// Insts in reverse block order, before final copy to vcode.
     block_insts: Vec<InstTuple<I>>,
@@ -278,12 +277,12 @@ pub enum RelocDistance {
 
 fn alloc_vregs<I: VCodeInst, A: ABICallee<I = I>>(
     ty: Type,
-    next_vreg: &mut u32,
+    next_vreg: &mut usize,
     vcode: &mut VCodeBuilder<I, A>,
-) -> CodegenResult<ValueRegs<Reg>> {
+) -> CodegenResult<ValueRegs<VReg>> {
     let v = *next_vreg;
     let (regclasses, tys) = I::rc_for_type(ty)?;
-    *next_vreg += regclasses.len() as u32;
+    *next_vreg += regclasses.len();
     let regs = match regclasses {
         &[rc0] => ValueRegs::one(VReg::new(v, rc0)),
         &[rc0, rc1] => ValueRegs::two(VReg::new(v, rc0), VReg::new(v + 1, rc1)),
@@ -297,7 +296,7 @@ fn alloc_vregs<I: VCodeInst, A: ABICallee<I = I>>(
         _ => panic!("Value must reside in 1, 2 or 4 registers"),
     };
     for (&reg_ty, &reg) in tys.iter().zip(regs.regs().iter()) {
-        vcode.set_vreg_type(reg.to_virtual_reg(), reg_ty);
+        vcode.set_vreg_type(reg, reg_ty);
     }
     Ok(regs)
 }
@@ -315,10 +314,10 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         block_order: BlockLoweringOrder,
     ) -> CodegenResult<Lower<'func, I, A>> {
         let constants = VCodeConstants::with_capacity(f.dfg.constants.len());
-        let abi = A::create();
+        let abi = A::new(f, *emit_info.flags())?;
         let mut vcode = VCodeBuilder::new(abi, emit_info, block_order, constants);
 
-        let mut next_vreg: u32 = 0;
+        let mut next_vreg: usize = 0;
 
         let mut value_regs = SecondaryMap::with_default(ValueRegs::invalid());
 
@@ -421,15 +420,15 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 self.f.dfg.block_params(entry_bb)
             );
             // Collect arg vregs.
-            let arg_regs: Vec<VReg> = self
+            let arg_regs: Vec<ValueRegs<VReg>> = self
                 .f
                 .dfg
                 .block_params(entry_bb)
                 .iter()
                 .map(|param| self.value_regs[*param])
                 .collect();
-            // Generate whatever sequence is necessary to
-            for inst in self.vcode.abi().gen_arg_seq(arg_regs) {
+            // Generate whatever sequence is necessary to get args in place.
+            for inst in self.vcode.abi().gen_arg_seq(self, arg_regs) {
                 self.emit(inst);
             }
         }
@@ -445,15 +444,15 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         }
 
         // Collect return values.
-        let mut retvals: SmallVec<[ValueRegs<Reg>; 4]> = smallvec![];
-        for val in self.f.dfg.inst_args(inst) {
+        let mut retvals = vec![];
+        for &val in self.f.dfg.inst_args(inst) {
             let regs = self.put_value_in_regs(val);
             retvals.push(regs);
         }
 
         // Call ABI impl to emit a return-value sequence; this copies
         // values and/or adds constraint pseudoinsts as needed.
-        for inst in self.vcode.abi().gen_ret_seq(retvals) {
+        for inst in self.vcode.abi().gen_ret_seq(self, retvals) {
             self.emit(inst);
         }
 
@@ -602,7 +601,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                     "value labeling: defines val {:?} -> reg {:?} -> label {:?}",
                     val, reg, label,
                 );
-                markers.push(I::gen_value_label_marker(label, reg));
+                markers.push(I::gen_value_label_marker(label, Reg::reg_use(reg)));
             }
         }
         for marker in markers {
@@ -659,12 +658,11 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         for &(start, end) in self.block_ranges.iter().rev() {
             for &InstTuple {
                 loc,
-                is_safepoint,
                 ref inst,
             } in &self.block_insts[start..end]
             {
                 self.vcode.set_srcloc(loc);
-                self.vcode.push(inst.clone(), is_safepoint);
+                self.vcode.push(inst.clone());
             }
             self.vcode.end_bb();
         }
@@ -717,9 +715,6 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
     pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> CodegenResult<VCode<I, A>> {
         debug!("about to lower function: {:?}", self.f);
 
-        // Initialize the ABI object.
-        self.vcode.abi().init(&mut self);
-
         self.vcode.set_entry(0);
 
         // Reused vectors for branch lowering.
@@ -741,7 +736,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
             let params: SmallVec<[VReg; 16]> = smallvec![];
             if let Some(bb) = lb.orig_block() {
                 for blockparam in self.f.dfg.block_params(bb) {
-                    for vreg in self.value_regs[blockparam].regs() {
+                    for &vreg in self.value_regs[blockparam].regs() {
                         params.push(vreg);
                     }
                 }
@@ -758,8 +753,8 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                 } else {
                     panic!("Empty lowered block: {}", bindex);
                 };
-                for blockparam in self.f.dfg.block_params(param_block) {
-                    for vreg in self.value_regs[blockparam].regs() {
+                for &blockparam in self.f.dfg.block_params(param_block) {
+                    for &vreg in self.value_regs[blockparam].regs() {
                         params.push(vreg);
                     }
                 }
@@ -823,10 +818,10 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         self.copy_bbs_to_vcode();
 
         // Now that we've emitted all instructions into the VCodeBuilder, let's build the VCode.
-        let (vcode, stack_map_info) = self.vcode.build();
+        let vcode = self.vcode.build();
         debug!("built vcode: {:?}", vcode);
 
-        Ok((vcode, stack_map_info))
+        Ok(vcode)
     }
 
     fn put_value_in_regs(&mut self, val: Value) -> ValueRegs<VReg> {
@@ -911,6 +906,10 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
 
 impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     type I = I;
+
+    fn get_vm_context(&self) -> Option<Reg> {
+        self.vm_context
+    }
 
     fn data(&self, ir_inst: Inst) -> &InstructionData {
         &self.f.dfg[ir_inst]
@@ -1013,7 +1012,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     fn input_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg> {
         let val = self.f.dfg.inst_args(ir_inst)[idx];
         let val = self.f.dfg.resolve_aliases(val);
-        self.put_value_in_vregs(val)
+        self.put_value_in_regs(val)
     }
 
     fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg> {
@@ -1028,7 +1027,6 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     fn emit(&mut self, mach_inst: I) {
         self.ir_insts.push(InstTuple {
             loc: SourceLoc::default(),
-            is_safepoint: false,
             inst: mach_inst,
         });
     }
@@ -1036,7 +1034,6 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     fn emit_safepoint(&mut self, mach_inst: I) {
         self.ir_insts.push(InstTuple {
             loc: SourceLoc::default(),
-            is_safepoint: true,
             inst: mach_inst,
         });
     }

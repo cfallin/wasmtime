@@ -741,7 +741,7 @@ impl Inst {
     pub(crate) fn mov_r_r(size: OperandSize, src: VReg, dst: VReg) -> Inst {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
         let src = Reg::reg_use(src);
-        let dst = Reg::reg_dst(dst);
+        let dst = Reg::reg_def(dst);
         Inst::MovRR { size, src, dst }
     }
 
@@ -2828,8 +2828,8 @@ impl MachInstEmit for Inst {
     }
 }
 
-impl MachInstEmitState<Inst, X64ABICallee> for EmitState {
-    fn new(abi: &X64ABICallee) -> Self {
+impl MachInstEmitState<Inst> for EmitState {
+    fn new<A: ABICallee<I = Inst>>(abi: &A) -> Self {
         EmitState {
             virtual_sp_offset: 0,
             nominal_sp_to_fp: abi.frame_size() as i64,

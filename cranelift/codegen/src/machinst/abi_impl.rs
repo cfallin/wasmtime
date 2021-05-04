@@ -258,16 +258,6 @@ pub enum ArgsOrRets {
     Rets,
 }
 
-/// Is an instruction returned by an ABI machine-specific backend a safepoint,
-/// or not?
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstIsSafepoint {
-    /// The instruction is a safepoint.
-    Yes,
-    /// The instruction is not a safepoint.
-    No,
-}
-
 /// Abstract location for a machine-specific ABI impl to translate into the
 /// appropriate addressing mode.
 #[derive(Clone, Copy, Debug)]
@@ -466,12 +456,12 @@ pub trait ABIMachineSpec {
     fn gen_call(
         dest: &CallDest,
         opcode: ir::Opcode,
-        tmp: Reg,
+        tmp: VReg,
         callee_conv: isa::CallConv,
         callee_conv: isa::CallConv,
         operands: Vec<Operand>,
         clobbers: Vec<PReg>,
-    ) -> SmallVec<[(InstIsSafepoint, Self::I); 2]>;
+    ) -> SmallVec<[Self::I; 2]>;
 
     /// Generate a memcpy invocation. Used to set up struct args. May clobber
     /// caller-save registers; we only memcpy before we start to set up args for
@@ -674,79 +664,6 @@ fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
 }
 
 impl<M: ABIMachineSpec> ABICalleeImpl<M> {
-    /// Create a new body ABI instance.
-    pub fn new(f: &ir::Function, flags: settings::Flags) -> CodegenResult<Self> {
-        debug!("ABI: func signature {:?}", f.signature);
-
-        let ir_sig = ensure_struct_return_ptr_is_returned(&f.signature);
-        let sig = ABISig::from_func_sig::<M>(&ir_sig, &flags)?;
-
-        let call_conv = f.signature.call_conv;
-        // Only these calling conventions are supported.
-        debug_assert!(
-            call_conv == isa::CallConv::SystemV
-                || call_conv == isa::CallConv::Fast
-                || call_conv == isa::CallConv::Cold
-                || call_conv.extends_baldrdash()
-                || call_conv.extends_windows_fastcall()
-                || call_conv == isa::CallConv::AppleAarch64
-                || call_conv == isa::CallConv::WasmtimeSystemV,
-            "Unsupported calling convention: {:?}",
-            call_conv
-        );
-
-        // Compute stackslot locations and total stackslot size.
-        let mut stack_offset: u32 = 0;
-        let mut stackslots = PrimaryMap::new();
-        for (stackslot, data) in f.stack_slots.iter() {
-            let off = stack_offset;
-            stack_offset += data.size;
-            let mask = M::word_bytes() - 1;
-            stack_offset = (stack_offset + mask) & !mask;
-            debug_assert_eq!(stackslot.as_u32() as usize, stackslots.len());
-            stackslots.push(off);
-        }
-
-        // Figure out what instructions, if any, will be needed to check the
-        // stack limit. This can either be specified as a special-purpose
-        // argument or as a global value which often calculates the stack limit
-        // from the arguments.
-        let stack_limit =
-            get_special_purpose_param_register(f, &sig, ir::ArgumentPurpose::StackLimit)
-                .map(|reg| (reg, smallvec![]))
-                .or_else(|| f.stack_limit.map(|gv| gen_stack_limit::<M>(f, &sig, gv)));
-
-        // Determine whether a probestack call is required for large enough
-        // frames (and the minimum frame size if so).
-        let probestack_min_frame = if flags.enable_probestack() {
-            assert!(
-                !flags.probestack_func_adjusts_sp(),
-                "SP-adjusting probestack not supported in new backends"
-            );
-            Some(1 << flags.probestack_size_log2())
-        } else {
-            None
-        };
-
-        Ok(Self {
-            ir_sig,
-            sig,
-            stackslots,
-            stackslots_size: stack_offset,
-            clobbered: vec![],
-            spillslots: None,
-            fixed_frame_storage_size: 0,
-            total_frame_size: None,
-            ret_area_ptr: None,
-            call_conv,
-            flags,
-            is_leaf: f.is_leaf(),
-            stack_limit,
-            probestack_min_frame,
-            _mach: PhantomData,
-        })
-    }
-
     /// Inserts instructions necessary for checking the stack limit into the
     /// prologue.
     ///
@@ -934,6 +851,79 @@ fn ensure_struct_return_ptr_is_returned(sig: &ir::Signature) -> ir::Signature {
 
 impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     type I = M::I;
+
+    /// Create a new body ABI instance.
+    fn new(f: &ir::Function, flags: settings::Flags) -> CodegenResult<Self> {
+        debug!("ABI: func signature {:?}", f.signature);
+
+        let ir_sig = ensure_struct_return_ptr_is_returned(&f.signature);
+        let sig = ABISig::from_func_sig::<M>(&ir_sig, &flags)?;
+
+        let call_conv = f.signature.call_conv;
+        // Only these calling conventions are supported.
+        debug_assert!(
+            call_conv == isa::CallConv::SystemV
+                || call_conv == isa::CallConv::Fast
+                || call_conv == isa::CallConv::Cold
+                || call_conv.extends_baldrdash()
+                || call_conv.extends_windows_fastcall()
+                || call_conv == isa::CallConv::AppleAarch64
+                || call_conv == isa::CallConv::WasmtimeSystemV,
+            "Unsupported calling convention: {:?}",
+            call_conv
+        );
+
+        // Compute stackslot locations and total stackslot size.
+        let mut stack_offset: u32 = 0;
+        let mut stackslots = PrimaryMap::new();
+        for (stackslot, data) in f.stack_slots.iter() {
+            let off = stack_offset;
+            stack_offset += data.size;
+            let mask = M::word_bytes() - 1;
+            stack_offset = (stack_offset + mask) & !mask;
+            debug_assert_eq!(stackslot.as_u32() as usize, stackslots.len());
+            stackslots.push(off);
+        }
+
+        // Figure out what instructions, if any, will be needed to check the
+        // stack limit. This can either be specified as a special-purpose
+        // argument or as a global value which often calculates the stack limit
+        // from the arguments.
+        let stack_limit =
+            get_special_purpose_param_register(f, &sig, ir::ArgumentPurpose::StackLimit)
+                .map(|reg| (reg, smallvec![]))
+                .or_else(|| f.stack_limit.map(|gv| gen_stack_limit::<M>(f, &sig, gv)));
+
+        // Determine whether a probestack call is required for large enough
+        // frames (and the minimum frame size if so).
+        let probestack_min_frame = if flags.enable_probestack() {
+            assert!(
+                !flags.probestack_func_adjusts_sp(),
+                "SP-adjusting probestack not supported in new backends"
+            );
+            Some(1 << flags.probestack_size_log2())
+        } else {
+            None
+        };
+
+        Ok(Self {
+            ir_sig,
+            sig,
+            stackslots,
+            stackslots_size: stack_offset,
+            clobbered: vec![],
+            spillslots: None,
+            fixed_frame_storage_size: 0,
+            total_frame_size: None,
+            ret_area_ptr: None,
+            call_conv,
+            flags,
+            is_leaf: f.is_leaf(),
+            stack_limit,
+            probestack_min_frame,
+            _mach: PhantomData,
+        })
+    }
 
     fn signature(&self) -> &ir::Signature {
         &self.ir_sig
@@ -1201,7 +1191,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         insts
     }
 
-    fn gen_epilogue(&self, retinst: Self::I) -> SmallInstVec<Self::I> {
+    fn gen_epilogue(&self) -> SmallInstVec<Self::I> {
         let mut insts = smallvec![];
 
         // Restore clobbered registers.
@@ -1516,7 +1506,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         let word_type = M::word_type();
         let tmp = ctx.alloc_tmp(word_type).only_reg().unwrap();
         let clobbers = M::get_clobbers(self.sig.call_conv);
-        for (is_safepoint, inst) in M::gen_call(
+        for inst in M::gen_call(
             &self.dest,
             self.opcode,
             tmp,
@@ -1527,10 +1517,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
         )
         .into_iter()
         {
-            match is_safepoint {
-                InstIsSafepoint::Yes => ctx.emit_safepoint(inst),
-                InstIsSafepoint::No => ctx.emit(inst),
-            }
+            ctx.emit(inst);
         }
 
         // Load any stack-passed return values from the stack return area.

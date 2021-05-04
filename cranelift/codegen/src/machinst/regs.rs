@@ -35,7 +35,7 @@ impl Reg {
 
     /// Create a `Reg` that represents an invalid value.
     pub fn invalid() -> Self {
-        Reg::alloc(Allocation::none())
+        Reg::alloc(Allocation::none(), OperandKind::Use)
     }
 
     /// Create a `Reg` that wraps a `VReg` as a use (at the
@@ -126,7 +126,7 @@ impl Reg {
 
     /// Is this an Allocation (a post-regalloc location)?
     pub fn is_alloc(self) -> bool {
-        self.inner.as_alloc().is_some()
+        self.inner.as_allocation().is_some()
     }
 
     /// Convert to and return the inner `Operand`, if in that mode.
@@ -136,34 +136,46 @@ impl Reg {
 
     /// Convert to and return the inner `Allocation`, if in that mode.
     pub fn as_alloc(self) -> Option<Allocation> {
-        self.inner.as_alloc()
+        self.inner.as_allocation()
     }
 
     pub fn is_def(self) -> bool {
         self.inner.kind() == OperandKind::Def
     }
 
+    pub fn class(self) -> RegClass {
+        if let Some(op) = self.as_operand() {
+            op.class()
+        } else if let Some(alloc) = self.as_alloc() {
+            alloc.class()
+        } else {
+            unreachable!()
+        }
+    }
+
     /// Convert to and return the inner `PReg` inside an `Allocation`,
     /// if in that mode.
     pub fn as_preg(self) -> Option<PReg> {
-        self.as_alloc().filter_map(|a| a.as_reg())
+        self.as_alloc().and_then(|a| a.as_reg())
     }
 
     /// Convert to and return the inner `SpillSlot` inside an
     /// `Allocation`, if in that mode.
     pub fn as_spillslot(self) -> Option<SpillSlot> {
-        self.as_alloc().filter_map(|a| a.as_spillslot())
+        self.as_alloc().and_then(|a| a.as_stack())
     }
 }
 
 impl std::fmt::Debug for Reg {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if let Some(preg) = self.as_reg() {
+        if let Some(preg) = self.as_preg() {
             write!(f, "{}", preg)
         } else if let Some(slot) = self.as_spillslot() {
             write!(f, "{}", slot)
         } else if let Some(op) = self.as_operand() {
             write!(f, "{}", op)
+        } else {
+            Ok(())
         }
     }
 }

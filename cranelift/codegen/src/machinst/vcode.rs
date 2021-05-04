@@ -209,13 +209,13 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
         }
         self.vcode.vreg_types[vreg.vreg()] = ty;
         if is_reftype(ty) {
-            self.reftype_vregs.push(vreg);
+            self.vcode.reftype_vregs.push(vreg);
         }
     }
 
     /// Are there any reference-typed values at all among the vregs?
     pub fn have_ref_values(&self) -> bool {
-        self.reftype_vregs.len() > 0
+        self.vcode.reftype_vregs.len() > 0
     }
 
     /// Set the current block as the entry block.
@@ -240,27 +240,27 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
     }
 
     /// Push an instruction for the current BB and current IR inst within the BB.
-    pub fn push(&mut self, mut insn: I, is_safepoint: bool) {
+    pub fn push(&mut self, mut insn: I) {
         match insn.is_term() {
             MachTerminator::None | MachTerminator::Ret => {}
             MachTerminator::Uncond(target) => {
                 self.vcode
                     .block_succs
-                    .push(regalloc2::Block::new(target.get()));
+                    .push(regalloc2::Block::new(target.get() as usize));
             }
             MachTerminator::Cond(true_branch, false_branch) => {
                 self.vcode
                     .block_succs
-                    .push(regalloc2::Block::new(true_branch.get()));
+                    .push(regalloc2::Block::new(true_branch.get() as usize));
                 self.vcode
                     .block_succs
-                    .push(regalloc2::Block::new(false_branch.get()));
+                    .push(regalloc2::Block::new(false_branch.get() as usize));
             }
             MachTerminator::Indirect(targets) => {
                 for target in targets {
                     self.vcode
                         .block_succs
-                        .push(regalloc2::Block::new(target.get()));
+                        .push(regalloc2::Block::new(target.get() as usize));
                 }
             }
         }
@@ -329,6 +329,10 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
         self.compute_preds();
         self.vcode
     }
+
+    pub fn abi(&mut self) -> &mut A {
+        &mut self.vcode.abi
+    }
 }
 
 fn is_redundant_move<I: VCodeInst>(insn: &I) -> bool {
@@ -357,7 +361,6 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
             abi,
             vreg_types: vec![],
             reftype_vregs: vec![],
-            have_ref_values: false,
             insts: vec![],
             operands: vec![],
             operand_ranges: vec![],
@@ -370,9 +373,6 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
             block_preds: vec![],
             block_params: vec![],
             block_param_range: vec![],
-            branch_args: vec![],
-            branch_arg_range: vec![],
-            branch_arg_offset: vec![],
             block_order,
             emit_info,
             safepoint_insns: vec![],
@@ -753,8 +753,13 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
         }
     }
 
-    fn is_move(&self, insn: &regalloc2::Inst) -> Option<(Reg, Reg)> {
-        self.insts[insn.index()].is_move()
+    fn is_move(&self, insn: regalloc2::Inst) -> Option<(VReg, VReg)> {
+        match self.insts[insn.index()].is_move() {
+            Some((r1, r2)) if r1.is_operand() && r2.is_operand() => {
+                Some((r1.as_operand().vreg(), r2.as_operand().vreg()))
+            }
+            _ => None,
+        }
     }
 
     fn is_branch(&self, insn: regalloc2::Inst) -> bool {
@@ -787,9 +792,9 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
         self.insts[insn.index()].clobbers()
     }
 
-    fn spillslot_size(&self, regclass: RegClass, vreg: VReg) -> u32 {
+    fn spillslot_size(&self, regclass: RegClass, vreg: VReg) -> usize {
         let ty = self.vreg_type(vreg);
-        self.abi.get_spillslot_size(regclass, ty)
+        self.abi.get_spillslot_size(regclass, ty) as usize
     }
 
     fn reftype_vregs(&self) -> &[VReg] {

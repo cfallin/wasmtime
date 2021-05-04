@@ -415,15 +415,13 @@ impl ABIMachineSpec for X64ABIMachineSpec {
 
     fn gen_add_imm(into_reg: Reg, from_reg: Reg, imm: u32) -> SmallInstVec<Self::I> {
         let mut ret = smallvec![];
-        if from_reg != into_reg.to_reg() {
-            ret.push(Inst::gen_move(into_reg, from_reg, I64));
-        }
-        ret.push(Inst::alu_rmi_r(
-            OperandSize::Size64,
-            AluRmiROpcode::Add,
-            RegMemImm::imm(imm),
-            into_reg,
-        ));
+        ret.push(Inst::AluRmiR {
+            size: OperandSize::Size64,
+            op: AluRmiROpcode::Add,
+            src1: RegMemImm::imm(imm),
+            src2: from_reg,
+            dst: into_reg,
+        });
         ret
     }
 
@@ -681,38 +679,36 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     fn gen_call(
         dest: &CallDest,
         opcode: ir::Opcode,
-        tmp: Reg,
+        tmp: VReg,
         _callee_conv: isa::CallConv,
         _caller_conv: isa::CallConv,
         operands: Vec<Operand>,
         clobbers: Vec<PReg>,
-    ) -> SmallVec<[(InstIsSafepoint, Self::I); 2]> {
+    ) -> SmallVec<[Self::I; 2]> {
         let mut insts = smallvec![];
         match dest {
             &CallDest::ExtName(ref name, RelocDistance::Near) => {
-                insts.push((
-                    InstIsSafepoint::Yes,
-                    Inst::call_known(name.clone(), opcode, operands, clobbers),
-                ));
+                insts.push(Inst::call_known(name.clone(), opcode, operands, clobbers));
             }
             &CallDest::ExtName(ref name, RelocDistance::Far) => {
-                insts.push((
-                    InstIsSafepoint::No,
-                    Inst::LoadExtName {
-                        dst: tmp,
-                        name: Box::new(name.clone()),
-                        offset: 0,
-                    },
-                ));
-                insts.push((
-                    InstIsSafepoint::Yes,
-                    Inst::call_unknown(RegMem::reg(tmp.to_reg()), opcode, operands, clobbers),
+                insts.push(Inst::LoadExtName {
+                    dst: tmp,
+                    name: Box::new(name.clone()),
+                    offset: 0,
+                });
+                insts.push(Inst::call_unknown(
+                    RegMem::reg(tmp.to_reg()),
+                    opcode,
+                    operands,
+                    clobbers,
                 ));
             }
             &CallDest::Reg(reg) => {
-                insts.push((
-                    InstIsSafepoint::Yes,
-                    Inst::call_unknown(RegMem::reg(reg), opcode, operands, clobbers),
+                insts.push(Inst::call_unknown(
+                    RegMem::reg(reg),
+                    opcode,
+                    operands,
+                    clobbers,
                 ));
             }
         }
