@@ -2,7 +2,7 @@
 
 use super::{Reg, SpillSlot};
 use crate::binemit::StackMap;
-use crate::ir::{Signature, StackSlot, Function};
+use crate::ir::{Function, Signature, StackSlot};
 use crate::isa::CallConv;
 use crate::machinst::*;
 use crate::result::CodegenResult;

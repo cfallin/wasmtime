@@ -603,7 +603,7 @@ pub struct ABICalleeImpl<M: ABIMachineSpec> {
     /// need to be extremely careful with each instruction. The instructions are
     /// manually register-allocated and carefully only use caller-saved
     /// registers and keep nothing live after this sequence of instructions.
-    stack_limit: Option<(Reg, Vec<M::I>)>,
+    stack_limit: Option<(Reg, SmallInstVec<M::I>)>,
     /// Are we to invoke the probestack function in the prologue? If so,
     /// what is the minimum size at which we must invoke it?
     probestack_min_frame: Option<u32>,
@@ -683,7 +683,12 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
     /// No values can be live after the prologue, but in this case that's ok
     /// because we just need to perform a stack check before progressing with
     /// the rest of the function.
-    fn insert_stack_check(&self, stack_limit: Reg, stack_size: u32, insts: &mut Vec<M::I>) {
+    fn insert_stack_check(
+        &self,
+        stack_limit: Reg,
+        stack_size: u32,
+        insts: &mut SmallInstVec<M::I>,
+    ) {
         // With no explicit stack allocated we can just emit the simple check of
         // the stack registers against the stack limit register, and trap if
         // it's out of bounds.
@@ -736,7 +741,7 @@ fn gen_stack_limit<M: ABIMachineSpec>(
     f: &ir::Function,
     abi: &ABISig,
     gv: ir::GlobalValue,
-) -> (Reg, Vec<M::I>) {
+) -> (Reg, SmallInstVec<M::I>) {
     let mut insts = smallvec![];
     let reg = generate_gv::<M>(f, abi, gv, &mut insts);
     return (reg, insts);
@@ -956,7 +961,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
     ) -> SmallInstVec<Self::I> {
         if let Some(idx) = self.sig.stack_ret_arg {
             // Allocate the extra return-area-ptr arg a vreg, if needed.
-            let tmp = ctx.alloc_tmp(M::word_type()).only_reg().unwrap().vreg();
+            let tmp = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
             self.ret_area_ptr = Some(tmp);
             args.insert(idx, ValueRegs::one(tmp));
         }
@@ -976,9 +981,9 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
             match arg {
                 &ABIArg::Slots { ref slots, .. } => {
                     assert_eq!(slots.len(), vregs.len());
-                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                    for (&slot, &vreg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
-                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                            ABIArgSlot::Stack { offset, ty, .. } => {
                                 load_insts.push(M::gen_load_stack(
                                     StackAMode::FPOffset(
                                         M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
@@ -988,7 +993,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                                     ty,
                                 ));
                             }
-                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                            ABIArgSlot::Reg { reg, ty, .. } => {
                                 constraint_ops.push(Operand::reg_fixed_def(vreg, reg));
                             }
                         }
@@ -1002,7 +1007,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                             M::fp_to_arg_offset(self.call_conv, &self.flags) + offset,
                             I8,
                         ),
-                        Reg::ref_def(into_reg),
+                        Reg::reg_def(into_reg),
                         I8,
                     ));
                 }
@@ -1027,8 +1032,14 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         mut retvals: Vec<ValueRegs<VReg>>,
     ) -> SmallInstVec<Self::I> {
         // Extend any values as necessary, allocating new vregs.
-        let mut ret = smallvec![];
-        do_value_extensions(&self.sig.rets[..], &mut retvals[..], ctx, &mut ret);
+        let mut insts = smallvec![];
+        do_value_extensions::<M, C>(
+            self.sig.call_conv,
+            &self.sig.rets[..],
+            &mut retvals[..],
+            ctx,
+            &mut insts,
+        );
 
         // Create a constraint inst that constrains certain return
         // values to registers, and stores that place other values in
@@ -1039,12 +1050,12 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
             match ret {
                 &ABIArg::Slots { ref slots, .. } => {
                     assert_eq!(vregs.len(), slots.len());
-                    for (slot, from_reg) in slots.iter().zip(vregs.regs().iter()) {
+                    for (&slot, &from_reg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
-                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                            ABIArgSlot::Reg { reg, ty, .. } => {
                                 constraint_ops.push(Operand::reg_fixed_use(from_reg, reg));
                             }
-                            &ABIArgSlot::Stack {
+                            ABIArgSlot::Stack {
                                 offset,
                                 ty,
                                 extension,
@@ -1056,8 +1067,8 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
                                 let off = i32::try_from(offset).expect(
                                     "Argument stack offset greater than 2GB; should hit impl limit first",
                                 );
-                                ret.push(M::gen_store_base_offset(
-                                    Reg::reg_use(self.ret_area_ptr.unwrap().to_reg()),
+                                insts.push(M::gen_store_base_offset(
+                                    Reg::reg_use(self.ret_area_ptr.unwrap()),
                                     off,
                                     Reg::reg_use(from_reg),
                                     ty,
@@ -1073,9 +1084,9 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         }
 
         if constraint_ops.len() > 0 {
-            ret.push(Self::I::gen_reg_constraint_inst(constraint_ops));
+            insts.push(Self::I::gen_reg_constraint_inst(constraint_ops));
         }
-        ret
+        insts
     }
 
     /// Produce an instruction that computes a stackslot address.
@@ -1118,8 +1129,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
         let first_spillslot_word =
             ((self.stackslots_size + virtual_sp_offset as u32) / bytes) as usize;
         for &slot in slots {
-            let slot = slot.get() as usize;
-            bits[first_spillslot_word + slot] = true;
+            bits[first_spillslot_word + slot.index()] = true;
         }
 
         StackMap::from_slice(&bits[..])
@@ -1206,7 +1216,7 @@ impl<M: ABIMachineSpec> ABICallee for ABICalleeImpl<M> {
 
         if !self.call_conv.extends_baldrdash() {
             insts.extend(M::gen_epilogue_frame_restore(&self.flags));
-            insts.push(M::gen_ret());
+            insts.push(M::I::gen_ret());
         }
 
         debug!("Epilogue: {:?}", insts);
@@ -1397,7 +1407,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
 
         // Create the ret-area pointer if needed, and add to args.
         if let Some(i) = self.sig.stack_ret_arg {
-            let rd = ctx.alloc_tmp(M::word_type()).only_reg().unwrap().vreg();
+            let rd = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
             let ret_area_base = self.sig.stack_arg_space;
             ctx.emit(M::gen_get_stack_addr(
                 StackAMode::SPOffset(ret_area_base, I8),
@@ -1409,7 +1419,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
 
         // Extend any values that need to be extended.
         let mut exts = SmallInstVec::new();
-        do_value_extensions(
+        do_value_extensions::<M, C>(
             self.sig.call_conv,
             &self.sig.args[..],
             &mut self.args[..],
@@ -1428,12 +1438,12 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             match arg {
                 &ABIArg::Slots { ref slots, .. } => {
                     assert_eq!(vregs.len(), slots.len());
-                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                    for (&slot, &vreg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
-                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                            ABIArgSlot::Reg { reg, ty, .. } => {
                                 operands.push(Operand::reg_fixed_use(vreg, reg));
                             }
-                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                            ABIArgSlot::Stack { offset, ty, .. } => {
                                 ctx.emit(M::gen_store_stack(
                                     StackAMode::SPOffset(offset, ty),
                                     Reg::reg_use(vreg),
@@ -1445,12 +1455,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
                 }
                 &ABIArg::StructArg { offset, size, .. } => {
                     let src_ptr = vregs.only_reg().unwrap();
-                    let dst_ptr = ctx
-                        .alloc_tmp(M::word_type())
-                        .only_reg()
-                        .unwrap()
-                        .to_reg()
-                        .vreg();
+                    let dst_ptr = ctx.alloc_tmp(M::word_type()).only_reg().unwrap();
                     ctx.emit(M::gen_get_stack_addr(
                         StackAMode::SPOffset(offset, I8),
                         Reg::reg_def(dst_ptr),
@@ -1462,8 +1467,8 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
                     // arg regs.
                     let memcpy_call_conv =
                         isa::CallConv::for_libcall(&self.flags, self.sig.call_conv);
-                    let tmp1 = ctx.alloc_tmp(I64).only_reg().unwrap().to_reg().vreg();
-                    let tmp2 = ctx.alloc_tmp(I64).only_reg().unwrap().to_reg().vreg();
+                    let tmp1 = ctx.alloc_tmp(I64).only_reg().unwrap();
+                    let tmp2 = ctx.alloc_tmp(I64).only_reg().unwrap();
                     for insn in M::gen_memcpy(
                         memcpy_call_conv,
                         dst_ptr,
@@ -1485,9 +1490,9 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             match ret {
                 &ABIArg::Slots { ref slots, .. } => {
                     assert_eq!(slots.len(), vregs.len());
-                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                    for (&slot, &vreg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
-                            &ABIArgSlot::Reg { reg, ty, .. } => {
+                            ABIArgSlot::Reg { reg, ty, .. } => {
                                 operands.push(Operand::reg_fixed_def(vreg, reg));
                             }
                             _ => {}
@@ -1509,7 +1514,7 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             self.sig.call_conv,
             self.caller_conv,
             operands,
-            clobbers,
+            clobbers.to_vec(),
         )
         .into_iter()
         {
@@ -1521,9 +1526,9 @@ impl<M: ABIMachineSpec> ABICaller for ABICallerImpl<M> {
             match ret {
                 &ABIArg::Slots { ref slots, .. } => {
                     assert_eq!(slots.len(), vregs.len());
-                    for (slot, vreg) in slots.iter().zip(vregs.regs().iter()) {
+                    for (&slot, &vreg) in slots.iter().zip(vregs.regs().iter()) {
                         match slot {
-                            &ABIArgSlot::Stack { offset, ty, .. } => {
+                            ABIArgSlot::Stack { offset, ty, .. } => {
                                 let ret_area_base = self.sig.stack_arg_space;
                                 ctx.emit(M::gen_load_stack(
                                     StackAMode::SPOffset(offset + ret_area_base, ty),

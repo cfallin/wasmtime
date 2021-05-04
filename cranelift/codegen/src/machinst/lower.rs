@@ -656,11 +656,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
 
     fn copy_bbs_to_vcode(&mut self) {
         for &(start, end) in self.block_ranges.iter().rev() {
-            for &InstTuple {
-                loc,
-                ref inst,
-            } in &self.block_insts[start..end]
-            {
+            for &InstTuple { loc, ref inst } in &self.block_insts[start..end] {
                 self.vcode.set_srcloc(loc);
                 self.vcode.push(inst.clone());
             }

@@ -557,7 +557,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let after_pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i));
                 assert!(edit_idx >= out.edits.len() || out.edits[edit_idx].0 >= after_pos);
                 while edit_idx < out.edits.len() && out.edits[edit_idx].0 == after_pos {
-                    if let Some(edit_insn) = self.insns_for_edit(&out.edits[edit_idx]) {
+                    for edit_insn in self.insns_for_edit(&out.edits[edit_idx].1) {
                         final_insns.push(edit_insn);
                         final_srclocs.push(SourceLoc::default());
                     }

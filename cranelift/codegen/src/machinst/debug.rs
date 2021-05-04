@@ -205,7 +205,6 @@ impl AnalysisInfo {
             _ => {}
         }
         if let Some((to, from)) = inst.is_move() {
-            let to = to.to_reg();
             self.move_reg(to, from);
         }
     }
