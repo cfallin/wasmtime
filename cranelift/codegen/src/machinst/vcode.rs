@@ -123,9 +123,6 @@ pub struct VCode<I: VCodeInst, A: ABICallee<I = I>> {
     /// immutable across function compilations within the same module.
     emit_info: I::Info,
 
-    /// Safepoint flags for each instruction.
-    safepoint_insns: Vec<regalloc2::bitvec::BitVec>,
-
     /// A list of SpillSlots at instruction indices corresponding to
     /// safepoints that contain references.
     safepoint_slots: Vec<(InsnIndex, SpillSlot)>,
@@ -304,7 +301,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
         // Collect predecessors for each block.
         let mut preds: Vec<SmallVec<[regalloc2::Block; 4]>> =
             vec![smallvec![]; self.vcode.num_blocks()];
-        for (block, &(start, end)) in &self.vcode.block_succ_range.iter().enumerate() {
+        for (block, &(start, end)) in self.vcode.block_succ_range.iter().enumerate() {
             let block = regalloc2::Block::new(block);
             let succs = &self.vcode.block_succs[start..end];
             for &succ in succs {
@@ -337,7 +334,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCodeBuilder<I, A> {
 
 fn is_redundant_move<I: VCodeInst>(insn: &I) -> bool {
     if let Some((to, from)) = insn.is_move() {
-        to.to_reg() == from
+        to == from
     } else {
         false
     }
@@ -375,7 +372,6 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
             block_param_range: vec![],
             block_order,
             emit_info,
-            safepoint_insns: vec![],
             safepoint_slots: vec![],
             generate_debug_info,
             insts_layout: RefCell::new((vec![], vec![], 0)),
@@ -386,12 +382,12 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
 
     /// Get the IR-level type of a VReg.
     pub fn vreg_type(&self, vreg: VReg) -> Type {
-        self.vreg_types[vreg.get_index()]
+        self.vreg_types[vreg.vreg()]
     }
 
     /// Are there any reference-typed values at all among the vregs?
     pub fn have_ref_values(&self) -> bool {
-        self.have_ref_values
+        self.reftype_vregs.len() > 0
     }
 
     /// Get the entry block.
@@ -433,30 +429,30 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         &self.block_params[start..end]
     }
 
-    fn insns_for_edit(&self, edit: &regalloc2::Edit) -> Vec<I> {
+    fn insns_for_edit(&self, edit: &regalloc2::Edit) -> SmallInstVec<I> {
         match edit {
             regalloc2::Edit::Move { from, to } => {
                 let class = from.class();
                 let ty = I::type_for_rc(class);
                 if from.is_reg() && to.is_reg() {
-                    vec![I::gen_move(
+                    smallvec![I::gen_move(
                         Reg::preg_def(to.as_reg().unwrap()),
                         Reg::preg_use(from.as_reg().unwrap()),
                         ty,
                     )]
                 } else if from.is_reg() && to.is_stack() {
                     self.abi
-                        .gen_spill(to.as_stack().unwrap(), from.as_reg().unwrap(), Some(ty))
+                        .gen_spill(to.as_stack().unwrap(), from.as_reg().unwrap())
                 } else if from.is_stack() && to.is_reg() {
                     self.abi
-                        .gen_reload(to.as_reg().unwrap(), from.as_stack().unwrap(), Some(ty))
+                        .gen_reload(to.as_reg().unwrap(), from.as_stack().unwrap())
                 } else {
                     assert!(from.is_stack() && to.is_stack());
                     self.abi
                         .gen_stack_move(to.as_stack().unwrap(), from.as_stack().unwrap(), ty)
                 }
             }
-            regalloc2::Edit::BlockParams { .. } => vec![],
+            regalloc2::Edit::BlockParams { .. } => smallvec![],
         }
     }
 
@@ -473,8 +469,10 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 continue;
             }
             let (start, end) = self.operand_ranges[i];
-            for alloc in &out.allocs[start..end] {
-                if alloc.kind() == OperandKind::Def && alloc.is_reg() {
+            let allocs = &out.allocs[start..end];
+            let operands = &self.operands[start..end];
+            for (op, alloc) in operands.iter().zip(allocs.iter()) {
+                if op.kind() == OperandKind::Def && alloc.is_reg() {
                     let preg = alloc.as_reg().unwrap();
                     clobbered.set(preg.index(), true);
                 }
@@ -498,6 +496,8 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         let mut edit_idx = 0;
         for block in 0..self.num_blocks() {
             let (orig_start, orig_end) = self.block_ranges[block];
+            let orig_start = orig_start as usize;
+            let orig_end = orig_end as usize;
             // Make sure we stream through instructions in
             // order. Lowering should have ensured this.
             assert_eq!(orig_start, last_inst);
@@ -510,7 +510,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let before_pos = regalloc2::ProgPoint::before(regalloc2::Inst::new(i));
                 assert!(edit_idx >= out.edits.len() || out.edits[edit_idx].0 >= before_pos);
                 while edit_idx < out.edits.len() && out.edits[edit_idx].0 == before_pos {
-                    for edit_insn in self.insn_for_edit(&out.edits[edit_idx]) {
+                    for edit_insn in self.insns_for_edit(&out.edits[edit_idx].1) {
                         final_insns.push(edit_insn);
                         final_srclocs.push(SourceLoc::default());
                     }
@@ -518,24 +518,28 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 }
 
                 // Take the instruction; we won't be using `insns` again.
-                let mut insn = std::mem::replace(&mut self.insns[i], nop.clone());
+                let mut insn = std::mem::replace(&mut self.insts[i], nop.clone());
                 // Get the allocations from the regalloc result.
-                let allocs = &out.allocations[self.operand_ranges[i].0..self.operand_ranges[i].1];
+                let (start, end) = self.operand_ranges[i];
+                let allocs = &out.allocs[start..end];
                 // Rewrite the Operands in the instruction to Allocations.
                 let mut alloc_idx = 0;
                 insn.visit_regs(|reg| {
-                    reg.set_alloc(allocs[alloc_idx]);
+                    if let Some(op) = reg.as_operand() {
+                        *reg = Reg::alloc(allocs[alloc_idx], op.kind());
+                    }
                     alloc_idx += 1;
                 });
 
-                // If this is an {Args, Rets} pseudoinsn, generate the true {prologue, epilogue} now.
-                if insn.is_args() {
-                    for insn in self.abi.gen_prologue(insn) {
+                // If this is the entry-point or a return, generate
+                // the true {prologue, epilogue} now, respectively.
+                if block == self.entry as usize && i == orig_start {
+                    for insn in self.abi.gen_prologue() {
                         final_insns.push(insn);
                         final_srclocs.push(self.srclocs[i]);
                     }
                 } else if insn.is_ret() {
-                    for insn in self.abi.gen_epilogue(insn) {
+                    for insn in self.abi.gen_epilogue() {
                         final_insns.push(insn);
                         final_srclocs.push(self.srclocs[i]);
                     }
@@ -553,7 +557,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 let after_pos = regalloc2::ProgPoint::after(regalloc2::Inst::new(i));
                 assert!(edit_idx >= out.edits.len() || out.edits[edit_idx].0 >= after_pos);
                 while edit_idx < out.edits.len() && out.edits[edit_idx].0 == after_pos {
-                    if let Some(edit_insn) = self.insn_for_edit(&out.edits[edit_idx]) {
+                    if let Some(edit_insn) = self.insns_for_edit(&out.edits[edit_idx]) {
                         final_insns.push(edit_insn);
                         final_srclocs.push(SourceLoc::default());
                     }
@@ -561,7 +565,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 }
             }
             let block_end = final_insns.len() as InsnIndex;
-            final_block_ranges[block as usize] = (block_start, block_end);
+            final_block_ranges[block] = (block_start, block_end);
         }
 
         debug_assert!(final_insns.len() == final_srclocs.len());
@@ -572,7 +576,8 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
 
         self.safepoint_slots = out
             .safepoint_slots
-            .map(|(progpoint, slot)| (progpoint.inst, *slot))
+            .iter()
+            .map(|(progpoint, slot)| (progpoint.inst.index() as u32, *slot))
             .collect();
     }
 
@@ -584,7 +589,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
     {
         let _tt = timing::vcode_emit();
         let mut buffer = MachBuffer::new();
-        let mut state = I::State::new(&*self.abi);
+        let mut state = I::State::new(&self.abi);
 
         // The first M MachLabels are reserved for block indices, the next N MachLabels for
         // constants.
@@ -620,17 +625,18 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
                 }
                 state.pre_sourceloc(cur_srcloc.unwrap_or(SourceLoc::default()));
 
-                if safepoint_idx < self.safepoint_insns.len()
-                    && self.safepoint_insns[safepoint_idx] == iix
-                {
-                    if self.safepoint_slots[safepoint_idx].len() > 0 {
-                        let stack_map = self.abi.spillslots_to_stack_map(
-                            &self.safepoint_slots[safepoint_idx][..],
-                            &state,
-                        );
+                if self.insts[iix as usize].is_safepoint() {
+                    let mut slots = vec![];
+                    while safepoint_idx < self.safepoint_slots.len()
+                        && self.safepoint_slots[safepoint_idx].0 == iix
+                    {
+                        slots.push(self.safepoint_slots[safepoint_idx].1);
+                        safepoint_idx += 1;
+                    }
+                    if slots.len() > 0 {
+                        let stack_map = self.abi.spillslots_to_stack_map(&slots[..], &state);
                         state.pre_safepoint(stack_map);
                     }
-                    safepoint_idx += 1;
                 }
 
                 self.insts[iix as usize].emit(&mut buffer, &self.emit_info, &mut state);
@@ -719,12 +725,15 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
     }
 
     fn entry_block(&self) -> regalloc2::Block {
-        regalloc2::Block::new(self.entry)
+        regalloc2::Block::new(self.entry as usize)
     }
 
     fn block_insns(&self, block: regalloc2::Block) -> regalloc2::InstRange {
         let (start, end) = self.block_ranges[block.index()];
-        regalloc2::InstRange::new(regalloc2::Inst::new(start), regalloc2::Inst::new(end))
+        regalloc2::InstRange::forward(
+            regalloc2::Inst::new(start as usize),
+            regalloc2::Inst::new(end as usize),
+        )
     }
 
     fn block_succs(&self, block: regalloc2::Block) -> &[regalloc2::Block] {
@@ -755,9 +764,10 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
 
     fn is_move(&self, insn: regalloc2::Inst) -> Option<(VReg, VReg)> {
         match self.insts[insn.index()].is_move() {
-            Some((r1, r2)) if r1.is_operand() && r2.is_operand() => {
-                Some((r1.as_operand().vreg(), r2.as_operand().vreg()))
-            }
+            Some((r1, r2)) if r1.is_operand() && r2.is_operand() => Some((
+                r1.as_operand().unwrap().vreg(),
+                r2.as_operand().unwrap().vreg(),
+            )),
             _ => None,
         }
     }
@@ -772,7 +782,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> regalloc2::Function for VCode<I, A> {
     }
 
     fn branch_blockparam_arg_offset(&self, _: regalloc2::Block, inst: regalloc2::Inst) -> usize {
-        self.ints[inst.index()].blockparam_offset()
+        self.insts[inst.index()].blockparam_offset()
     }
 
     fn is_safepoint(&self, insn: regalloc2::Inst) -> bool {
@@ -822,18 +832,18 @@ impl<I: VCodeInst, A: ABICallee<I = I>> fmt::Debug for VCode<I, A> {
                 write!(f, "  (original IR block: {})\n", bb)?;
             }
             for succ in self.succs(block) {
-                write!(f, "  (successor: Block {})\n", succ.get())?;
+                write!(f, "  (successor: Block {})\n", succ.index())?;
             }
             let (start, end) = self.block_ranges[block as usize];
             write!(f, "  (instruction range: {} .. {})\n", start, end)?;
             for inst in start..end {
-                if safepoint_idx < self.safepoint_insns.len()
-                    && self.safepoint_insns[safepoint_idx] == inst
+                while safepoint_idx < self.safepoint_slots.len()
+                    && self.safepoint_slots[safepoint_idx].0 == inst
                 {
                     write!(
                         f,
-                        "      (safepoint: slots {:?} with EmitState {:?})\n",
-                        self.safepoint_slots[safepoint_idx], state,
+                        "      (safepoint: slot {})\n",
+                        self.safepoint_slots[safepoint_idx].1
                     )?;
                     safepoint_idx += 1;
                 }
@@ -841,7 +851,7 @@ impl<I: VCodeInst, A: ABICallee<I = I>> fmt::Debug for VCode<I, A> {
                     f,
                     "  Inst {}:   {}",
                     inst,
-                    self.insts[inst as usize].pretty_print(f, &mut state)
+                    self.insts[inst as usize].pretty_print(&mut state)
                 )?;
             }
         }

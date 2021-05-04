@@ -319,11 +319,7 @@ pub trait ABIMachineSpec {
 
     /// Returns word register class.
     fn word_reg_class() -> RegClass {
-        match Self::word_bits() {
-            32 => RegClass::I32,
-            64 => RegClass::I64,
-            _ => unreachable!(),
-        }
+        RegClass::Int
     }
 
     /// Returns required stack alignment in bytes.
@@ -623,7 +619,7 @@ fn get_special_purpose_param_register(
     let idx = f.signature.special_param_index(purpose)?;
     match &abi.args[idx] {
         &ABIArg::Slots { ref slots, .. } => match &slots[0] {
-            &ABIArgSlot::Reg { reg, .. } => Some(reg.to_reg()),
+            &ABIArgSlot::Reg { reg, .. } => Some(Reg::preg_use(reg)),
             _ => None,
         },
         _ => None,
@@ -644,7 +640,7 @@ fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
                     reg, ty, extension, ..
                 } if extension != ArgumentExtension::None => {
                     let from_reg = val.only_reg().unwrap();
-                    let new_vreg = ctx.alloc_tmp(ty).only_reg().unwrap().vreg();
+                    let new_vreg = ctx.alloc_tmp(ty).only_reg().unwrap();
                     let from_bits = ty_bits(ty) as u8;
                     let ext = M::get_ext_mode(call_conv, extension);
                     let signed = ext == ArgumentExtension::Sext;
@@ -653,7 +649,7 @@ fn do_value_extensions<M: ABIMachineSpec, C: LowerCtx<I = M::I>>(
                         Reg::reg_use(from_reg),
                         signed,
                         from_bits,
-                        /* to_bits = */ M::word_bits(),
+                        /* to_bits = */ M::word_bits() as u8,
                     ));
                     *val = ValueRegs::one(new_vreg);
                 }
@@ -713,7 +709,7 @@ impl<M: ABIMachineSpec> ABICalleeImpl<M> {
         // into a register.
         let scratch = M::get_stacklimit_reg();
         insts.extend(M::gen_add_imm(scratch, stack_limit, stack_size).into_iter());
-        insts.extend(M::gen_stack_lower_bound_trap(scratch.to_reg()));
+        insts.extend(M::gen_stack_lower_bound_trap(scratch));
     }
 }
 
@@ -750,7 +746,7 @@ fn generate_gv<M: ABIMachineSpec>(
     f: &ir::Function,
     abi: &ABISig,
     gv: ir::GlobalValue,
-    insts: &mut Vec<M::I>,
+    insts: &mut SmallInstVec<M::I>,
 ) -> Reg {
     match f.global_values[gv] {
         // Return the direct register the vmcontext is in
@@ -774,7 +770,7 @@ fn generate_gv<M: ABIMachineSpec>(
                 offset.into(),
                 M::word_type(),
             ));
-            return into_reg.to_reg();
+            return into_reg;
         }
         ref other => panic!("global value for stack limit not supported: {}", other),
     }
@@ -790,7 +786,7 @@ fn generate_gv<M: ABIMachineSpec>(
 /// ref-typed values, even those in real registers in the original vcode, to be
 /// in spillslots).
 fn ty_from_ty_hint_or_reg_class<M: ABIMachineSpec>(r: Reg, ty: Option<Type>) -> Type {
-    match (ty, r.get_class()) {
+    match (ty, r.class()) {
         // If the type is provided
         (Some(t), _) => t,
         // If no type is provided, this should be a register spill for a

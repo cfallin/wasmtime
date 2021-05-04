@@ -64,7 +64,7 @@ pub trait LowerCtx {
     // Function-level queries:
 
     /// Returns the vreg containing the VmContext parameter, if there is one.
-    fn get_vm_context(&self) -> Option<Reg>;
+    fn get_vm_context(&self) -> Option<VReg>;
 
     // General instruction queries:
 
@@ -260,7 +260,7 @@ pub struct Lower<'func, I: VCodeInst, A: ABICallee<I = I>> {
 
     /// The vreg containing the special VmContext parameter, if it is present in the current
     /// function's signature.
-    vm_context: Option<Reg>,
+    vm_context: Option<VReg>,
 }
 
 /// Notion of "relocation distance". This gives an estimate of how far away a symbol will be from a
@@ -735,7 +735,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         for (bindex, lb) in lowered_order.iter().enumerate() {
             let params: SmallVec<[VReg; 16]> = smallvec![];
             if let Some(bb) = lb.orig_block() {
-                for blockparam in self.f.dfg.block_params(bb) {
+                for &blockparam in self.f.dfg.block_params(bb) {
                     for &vreg in self.value_regs[blockparam].regs() {
                         params.push(vreg);
                     }
@@ -789,7 +789,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
                     panic!("Empty lowered block: {}", bindex);
                 };
                 let mut param_operands = vec![];
-                for param in self.f.dfg.inst_variable_args(orig_branch) {
+                for &param in self.f.dfg.inst_variable_args(orig_branch) {
                     let vregs = self.put_value_in_regs(param);
                     for &vreg in vregs.regs() {
                         param_operands.push(Reg::reg_use(vreg));
@@ -907,7 +907,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
 impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
     type I = I;
 
-    fn get_vm_context(&self) -> Option<Reg> {
+    fn get_vm_context(&self) -> Option<VReg> {
         self.vm_context
     }
 
