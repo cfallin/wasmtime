@@ -1,14 +1,25 @@
 //! Regalloc interface: layer of types that wrap regalloc concepts for use in MachInst backends.
 
 use regalloc2::{Allocation, Operand, OperandKind, OperandOrAllocation, OperandPolicy, OperandPos};
-use std::fmt::Debug;
 
 pub use regalloc2::{MachineEnv, PReg, RegClass, SpillSlot, VReg};
 
 /// A `Reg` encompasses everything that an instruction needs to record
 /// for a register mention. Internally, it contains either an
 /// `Operand` (before regalloc) or an `Allocation` (after regalloc).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Ordinarily, backend code should deal in `VReg`s when generating
+/// and lowering into VCode. `Reg` should appear only in in the
+/// instruction enum itself, so that we do not need separate types for
+/// before- and after-regalloc data.
+///
+/// Backends' instruction implementations will ordinarily provide two
+/// constructors for a given instruction: one that takes purely VRegs,
+/// and builds operands from them based on the usage characteristics
+/// (def/use, before/after/both, reuse of input, fixed reg, etc), and
+/// one that takes PRegs for use only when generating post-regalloc
+/// code (e.g. prologues and epilogues).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Reg {
     inner: OperandOrAllocation,
 }

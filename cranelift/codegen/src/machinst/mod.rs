@@ -163,8 +163,8 @@ pub trait MachInst: Clone + Debug {
     fn gen_reg_constraint_inst(args: Vec<Operand>) -> Self;
 
     /// Generate a constant into a reg.
-    fn gen_constant<F: FnMut(Type) -> Reg>(
-        to_regs: ValueRegs<Reg>,
+    fn gen_constant<F: FnMut(Type) -> VReg>(
+        to_regs: ValueRegs<VReg>,
         value: u128,
         ty: Type,
         alloc_tmp: F,
@@ -337,9 +337,9 @@ pub trait MachInstEmitInfo {
 
 /// A trait describing the emission state carried between MachInsts when
 /// emitting a function body.
-pub trait MachInstEmitState<I: MachInst>: Default + Clone + Debug {
+pub trait MachInstEmitState<I: MachInst, A: ABICallee<I = I>>: Default + Clone + Debug {
     /// Create a new emission state given the ABI object.
-    fn new(abi: &dyn ABICallee<I = I>) -> Self;
+    fn new(abi: &A) -> Self;
     /// Update the emission state before emitting an instruction that is a
     /// safepoint.
     fn pre_safepoint(&mut self, _stack_map: StackMap) {}

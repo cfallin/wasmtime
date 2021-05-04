@@ -4,7 +4,7 @@ use crate::ir::LibCall;
 use crate::ir::TrapCode;
 use crate::isa::x64::inst::args::*;
 use crate::isa::x64::inst::*;
-use crate::machinst::{inst_common, MachBuffer, MachInstEmit, MachLabel, Reg, Writable};
+use crate::machinst::{inst_common, MachBuffer, MachInstEmit, MachLabel, Reg};
 use core::convert::TryInto;
 use encoding::rex::{
     emit_simm, emit_std_enc_enc, emit_std_enc_mem, emit_std_reg_mem, emit_std_reg_reg, int_reg_enc,
@@ -18,7 +18,7 @@ fn emit_signed_cvt(
     info: &EmitInfo,
     state: &mut EmitState,
     src: Reg,
-    dst: Writable<Reg>,
+    dst: Reg,
     to_f64: bool,
 ) {
     // Handle an unsigned int, which is the "easy" case: a signed conversion will do the
@@ -488,7 +488,7 @@ pub(crate) fn emit(
                     // x % -1 = 0; put the result into the destination, $rdx.
                     let done_label = sink.get_label();
 
-                    let inst = Inst::imm(*size, 0, Writable::from_reg(regs::rdx()));
+                    let inst = Inst::imm(*size, 0, regs::rdx());
                     inst.emit(sink, info, state);
 
                     let inst = Inst::jmp_known(done_label);
@@ -540,7 +540,7 @@ pub(crate) fn emit(
                 inst.emit(sink, info, state);
             } else {
                 // zero for unsigned opcodes.
-                let inst = Inst::imm(OperandSize::Size64, 0, Writable::from_reg(regs::rdx()));
+                let inst = Inst::imm(OperandSize::Size64, 0, regs::rdx());
                 inst.emit(sink, info, state);
             }
 
@@ -2375,12 +2375,12 @@ pub(crate) fn emit(
             // In the case where the operation is 'xchg', the "`op`q" instruction is instead
             //   movq                    %r10, %r11
             // so that we simply write in the destination, the "2nd arg for `op`".
-            let rax = regs::rax();
-            let r9 = regs::r9();
-            let r10 = regs::r10();
-            let r11 = regs::r11();
-            let rax_w = Writable::from_reg(rax);
-            let r11_w = Writable::from_reg(r11);
+            let rax = Reg::preg_use(regs::rax());
+            let r9 = Reg::preg_use(regs::r9());
+            let r10 = Reg::preg_use(regs::r10());
+            let r11 = Reg::preg_use(regs::r11());
+            let rax_w = Reg::preg_def(regs::rax());
+            let r11_w = Reg::preg_def(regs::r11());
             let amode = Amode::imm_reg(0, r9);
             let again_label = sink.get_label();
 

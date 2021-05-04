@@ -468,10 +468,16 @@ impl<I: VCodeInst, A: ABICallee<I = I>> VCode<I, A> {
         // setup code.
         self.abi.set_num_spillslots(out.num_spillslots);
         let mut clobbered = regalloc2::bitvec::BitVec::new();
-        for (op, alloc) in self.operands.iter().zip(out.allocs.iter()) {
-            if op.kind() == OperandKind::Def && alloc.is_reg() {
-                let preg = alloc.as_reg().unwrap();
-                clobbered.set(preg.index(), true);
+        for i in 0..self.insts.len() {
+            if !self.insts[i].is_included_in_clobbers() {
+                continue;
+            }
+            let (start, end) = self.operand_ranges[i];
+            for alloc in &out.allocs[start..end] {
+                if alloc.kind() == OperandKind::Def && alloc.is_reg() {
+                    let preg = alloc.as_reg().unwrap();
+                    clobbered.set(preg.index(), true);
+                }
             }
         }
         let mut clobbered_vec: Vec<PReg> = vec![];

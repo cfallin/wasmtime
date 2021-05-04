@@ -17,14 +17,13 @@ use crate::ir::{
     ValueLabelAssignments, ValueLabelStart,
 };
 use crate::machinst::{
-    ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode,
-    VCodeBuilder, VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
+    ABICallee, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode, VCodeBuilder,
+    VCodeConstant, VCodeConstantData, VCodeConstants, VCodeInst, VReg, ValueRegs,
 };
 use crate::CodegenResult;
 use alloc::vec::Vec;
 use core::convert::TryInto;
 use log::debug;
-use regalloc2::Operand;
 use smallvec::{smallvec, SmallVec};
 use std::fmt::Debug;
 
@@ -118,40 +117,17 @@ pub trait LowerCtx {
     /// instruction's result(s) must have *no* uses remaining, because it will
     /// not be codegen'd (it has been integrated into the current instruction).
     fn get_input_as_source_or_const(&self, ir_inst: Inst, idx: usize) -> NonRegInput;
-    /// Get the `idx`th input as register(s) to be used at the
-    /// beginning of the instruction. (N.B.: this means that these
-    /// input register(s) may be reused by outputs that are defined at
-    /// the end of the instruction. If the input is read after the
-    /// lowering starts to write outputs, use `input_at_end_regs()`
-    /// instead.)
-    fn input_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
-    /// Get the `idx`th input as register(s) to be used at the end of the instruction.
-    fn input_at_end_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
-    /// Get the reg(s) for the `idx`th output of an instruction, to be
-    /// defined at the end of the instruction. (N.B.: this means that
-    /// these register(s) may overlap with inputs used at the
-    /// beginning of the instruction. If the output is written before
-    /// all inputs are read, use `output_at_start_regs()` instead.)
-    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
-    /// Get the reg(s) for the `idx`th output of an instruction, to be
-    /// defined at the beginning of the instruction.
-    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg>;
-    /// Get the reg(s) for the `idx_in`th input and `idx_out`th output
-    /// of an instruction, specifying that the output *must* reuse the
-    /// given input's registers. The input and output must have the
-    /// same type.
-    fn reused_input_output_regs(
-        &mut self,
-        ir_inst: Inst,
-        input_idx: usize,
-        output_idx: usize,
-    ) -> (Reg, Reg);
+    /// Get the `idx`th input as vreg(s).
+    fn input_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg>;
+    /// Get the vreg(s) for the `idx`th output of an instruction.
+    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg>;
 
     // Codegen primitives: allocate temps, emit instructions, set result registers,
     // ask for an input to be gen'd into a register.
 
-    /// Get a new temp. Because VCode is SSA, this can only be written once.
-    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Reg>;
+    /// Get a new temp vreg. Because VCode is SSA, this can only be
+    /// written once.
+    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<VReg>;
     /// Emit a machine instruction.
     fn emit(&mut self, mach_inst: Self::I);
     /// Emit a machine instruction that is a safepoint.
@@ -300,10 +276,10 @@ pub enum RelocDistance {
     Far,
 }
 
-fn alloc_vregs<I: VCodeInst>(
+fn alloc_vregs<I: VCodeInst, A: ABICallee<I = I>>(
     ty: Type,
     next_vreg: &mut u32,
-    vcode: &mut VCodeBuilder<I>,
+    vcode: &mut VCodeBuilder<I, A>,
 ) -> CodegenResult<ValueRegs<Reg>> {
     let v = *next_vreg;
     let (regclasses, tys) = I::rc_for_type(ty)?;
@@ -738,7 +714,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
     }
 
     /// Lower the function.
-    pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> CodegenResult<VCode<I>> {
+    pub fn lower<B: LowerBackend<MInst = I>>(mut self, backend: &B) -> CodegenResult<VCode<I, A>> {
         debug!("about to lower function: {:?}", self.f);
 
         // Initialize the ABI object.
@@ -928,7 +904,7 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> Lower<'func, I, A> {
         NonRegInput { inst, constant }
     }
 
-    fn abi(&mut self) -> &mut dyn ABICallee<I = I> {
+    fn abi(&mut self) -> &mut A {
         self.vcode.abi()
     }
 }
@@ -1034,59 +1010,19 @@ impl<'func, I: VCodeInst, A: ABICallee<I = I>> LowerCtx for Lower<'func, I, A> {
         self.get_value_as_source_or_const(val)
     }
 
-    fn input_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
+    fn input_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg> {
         let val = self.f.dfg.inst_args(ir_inst)[idx];
         let val = self.f.dfg.resolve_aliases(val);
-        let vregs = self.put_value_in_vregs(val);
-        vregs.map(|v| Reg::reg_use(v))
+        self.put_value_in_vregs(val)
     }
 
-    fn input_at_end_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
-        let val = self.f.dfg.inst_args(ir_inst)[idx];
-        let val = self.f.dfg.resolve_aliases(val);
-        let vregs = self.put_value_in_vregs(val);
-        vregs.map(|v| Reg::reg_use_at_end(v))
-    }
-
-    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
+    fn output_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<VReg> {
         let val = self.f.dfg.inst_results(ir_inst)[idx];
-        let vregs = self.value_regs[val];
-        vregs.map(|v| Operand::reg_def(v))
+        self.value_regs[val]
     }
 
-    fn output_at_start_regs(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Reg> {
-        let val = self.f.dfg.inst_results(ir_inst)[idx];
-        let vregs = self.value_regs[val];
-        vregs.map(|v| Operand::reg_def(v))
-    }
-
-    fn reused_input_output_regs(
-        &mut self,
-        ir_inst: Inst,
-        input_idx: usize,
-        output_idx: usize,
-    ) -> (Reg, Reg) {
-        let input_val = self.f.dfg.inst_args(ir_inst)[input_idx];
-        let input_val = self.f.dfg.resolve_aliases(input_val);
-        let input_vregs = self.put_value_in_vregs(input_val);
-        let input_vreg = input_vregs
-            .only_reg()
-            .expect("reuse semantics not well-defined for multi-reg case");
-        let output_val = self.f.dfg.inst_results(ir_inst)[output_idx];
-        let output_val = self.f.dfg.resolve_aliases(output_val);
-        let output_vregs = self.value_regs[output_val];
-        let output_vreg = output_vregs
-            .only_reg()
-            .expect("reuse semantics not well-defined for multi-reg case");
-        (
-            Reg::reg_use(input_vreg),
-            Reg::reg_reuse_def(output_vreg, input_idx),
-        )
-    }
-
-    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<Reg> {
-        let vregs = alloc_vregs(ty, &mut self.next_vreg, &mut self.vcode).unwrap();
-        vregs.map(|v| Reg::reg_temp(v))
+    fn alloc_tmp(&mut self, ty: Type) -> ValueRegs<VReg> {
+        alloc_vregs(ty, &mut self.next_vreg, &mut self.vcode).unwrap()
     }
 
     fn emit(&mut self, mach_inst: I) {

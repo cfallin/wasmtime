@@ -5,15 +5,15 @@ use super::EmitState;
 use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::{MemFlags, Type};
 use crate::isa::x64::inst::Inst;
+use crate::machinst::Reg;
 use crate::machinst::*;
-use crate::machinst::{Reg, Writable};
-use regalloc2::RegClass;
+use regalloc2::{Operand, RegClass, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 
 /// A possible addressing mode (amode) that can be used in instructions.
 /// These denote a 64-bit value only.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Amode {
     /// Immediate sign-extended and a Register.
     ImmReg {
@@ -37,23 +37,23 @@ pub enum Amode {
 }
 
 impl Amode {
-    pub(crate) fn imm_reg(simm32: u32, base: Reg) -> Self {
-        debug_assert!(base.get_class() == RegClass::I64);
+    pub(crate) fn imm_reg(simm32: u32, base: VReg) -> Self {
+        debug_assert!(base.class() == RegClass::Int);
         Self::ImmReg {
             simm32,
-            base,
+            base: Reg::reg_use(base),
             flags: MemFlags::trusted(),
         }
     }
 
-    pub(crate) fn imm_reg_reg_shift(simm32: u32, base: Reg, index: Reg, shift: u8) -> Self {
-        debug_assert!(base.get_class() == RegClass::I64);
-        debug_assert!(index.get_class() == RegClass::I64);
+    pub(crate) fn imm_reg_reg_shift(simm32: u32, base: VReg, index: VReg, shift: u8) -> Self {
+        debug_assert!(base.class() == RegClass::Int);
+        debug_assert!(index.class() == RegClass::Int);
         debug_assert!(shift <= 3);
         Self::ImmRegRegShift {
             simm32,
-            base,
-            index,
+            base: Reg::reg_use(base),
+            index: Reg::reg_use(index),
             shift,
             flags: MemFlags::trusted(),
         }
@@ -87,17 +87,20 @@ impl Amode {
         }
     }
 
-    /// Add the regs mentioned by `self` to `collector`.
-    pub(crate) fn get_regs_as_uses(&self, collector: &mut RegUsageCollector) {
+    pub(crate) fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: &mut F) {
         match self {
-            Amode::ImmReg { base, .. } => {
-                collector.add_use(*base);
+            &mut Amode::ImmReg { ref mut base, .. } => {
+                f(base);
             }
-            Amode::ImmRegRegShift { base, index, .. } => {
-                collector.add_use(*base);
-                collector.add_use(*index);
+            &mut Amode::ImmRegRegShift {
+                ref mut base,
+                ref mut index,
+                ..
+            } => {
+                f(base);
+                f(index);
             }
-            Amode::RipRelative { .. } => {
+            &mut Amode::RipRelative { .. } => {
                 // RIP isn't involved in regalloc.
             }
         }
@@ -144,7 +147,7 @@ impl std::fmt::Debug for Amode {
 /// A Memory Address. These denote a 64-bit value only.
 /// Used for usual addressing modes as well as addressing modes used during compilation, when the
 /// moving SP offset is not known.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SyntheticAmode {
     /// A real amode.
     Real(Amode),
@@ -162,24 +165,13 @@ impl SyntheticAmode {
         SyntheticAmode::NominalSPOffset { simm32 }
     }
 
-    /// Add the regs mentioned by `self` to `collector`.
-    pub(crate) fn get_regs_as_uses(&self, collector: &mut RegUsageCollector) {
+    pub(crate) fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: &mut F) {
         match self {
-            SyntheticAmode::Real(addr) => addr.get_regs_as_uses(collector),
-            SyntheticAmode::NominalSPOffset { .. } => {
+            &mut SyntheticAmode::Real(ref mut addr) => addr.visit_regs(f),
+            &mut SyntheticAmode::NominalSPOffset { .. } => {
                 // Nothing to do; the base is SP and isn't involved in regalloc.
             }
-            SyntheticAmode::ConstantOffset(_) => {}
-        }
-    }
-
-    pub(crate) fn map_uses<RUM: RegUsageMapper>(&mut self, map: &RUM) {
-        match self {
-            SyntheticAmode::Real(addr) => addr.map_uses(map),
-            SyntheticAmode::NominalSPOffset { .. } => {
-                // Nothing to do.
-            }
-            SyntheticAmode::ConstantOffset(_) => {}
+            &mut SyntheticAmode::ConstantOffset(_) => {}
         }
     }
 
@@ -232,9 +224,10 @@ pub enum RegMemImm {
 }
 
 impl RegMemImm {
-    pub(crate) fn reg(reg: Reg) -> Self {
-        debug_assert!(reg.get_class() == RegClass::I64 || reg.get_class() == RegClass::V128);
-        Self::Reg { reg }
+    pub(crate) fn reg(reg: VReg) -> Self {
+        Self::Reg {
+            reg: Reg::reg_use(reg),
+        }
     }
     pub(crate) fn mem(addr: impl Into<SyntheticAmode>) -> Self {
         Self::Mem { addr: addr.into() }
@@ -243,19 +236,11 @@ impl RegMemImm {
         Self::Imm { simm32 }
     }
 
-    /// Asserts that in register mode, the reg class is the one that's expected.
-    pub(crate) fn assert_regclass_is(&self, expected_reg_class: RegClass) {
-        if let Self::Reg { reg } = self {
-            debug_assert_eq!(reg.get_class(), expected_reg_class);
-        }
-    }
-
-    /// Add the regs mentioned by `self` to `collector`.
-    pub(crate) fn get_regs_as_uses(&self, collector: &mut RegUsageCollector) {
+    pub(crate) fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: &mut F) {
         match self {
-            Self::Reg { reg } => collector.add_use(*reg),
-            Self::Mem { addr } => addr.get_regs_as_uses(collector),
-            Self::Imm { .. } => {}
+            &mut Self::Reg { ref mut reg } => f(reg),
+            &mut Self::Mem { ref mut addr } => addr.visit_regs(f),
+            &mut Self::Imm { .. } => {}
         }
     }
 
@@ -265,12 +250,24 @@ impl RegMemImm {
             _ => None,
         }
     }
+
+    /// Apply a mapper only to the register case. Can be used to
+    /// adjust the Operand params when this operand is passed into an
+    /// instruction constructor as a carrier for a VReg.
+    pub(crate) fn adjust_operand<F: Fn(VReg) -> Operand>(self, f: F) -> Self {
+        match self {
+            Self::Reg { reg } if reg.is_operand() => Self::Reg {
+                reg: f(reg.as_operand().unwrap().vreg()),
+            },
+            _ => self,
+        }
+    }
 }
 
 impl std::fmt::Debug for RegMemImm {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Reg { reg } => write!(f, "{}", Inst::reg_name(*reg, size)),
+            Self::Reg { reg } => write!(f, "{}", Inst::reg_name(*reg, 8)),
             Self::Mem { addr } => write!(f, "{:?}", addr),
             Self::Imm { simm32 } => write!(f, "${}", *simm32 as i32),
         }
@@ -279,51 +276,59 @@ impl std::fmt::Debug for RegMemImm {
 
 /// An operand which is either an integer Register or a value in Memory.  This can denote an 8, 16,
 /// 32, 64, or 128 bit value.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum RegMem {
     Reg { reg: Reg },
     Mem { addr: SyntheticAmode },
 }
 
 impl RegMem {
-    pub(crate) fn reg(reg: Reg) -> Self {
-        debug_assert!(reg.get_class() == RegClass::I64 || reg.get_class() == RegClass::V128);
-        Self::Reg { reg }
+    pub(crate) fn reg(reg: VReg) -> Self {
+        Self::Reg {
+            reg: Reg::reg_use(reg),
+        }
     }
     pub(crate) fn mem(addr: impl Into<SyntheticAmode>) -> Self {
         Self::Mem { addr: addr.into() }
     }
-    /// Asserts that in register mode, the reg class is the one that's expected.
-    pub(crate) fn assert_regclass_is(&self, expected_reg_class: RegClass) {
-        if let Self::Reg { reg } = self {
-            debug_assert_eq!(reg.get_class(), expected_reg_class);
-        }
-    }
-    /// Add the regs mentioned by `self` to `collector`.
-    pub(crate) fn get_regs_as_uses(&self, collector: &mut RegUsageCollector) {
+
+    pub(crate) fn visit_regs<F: FnMut(&mut Reg)>(&mut self, f: &mut F) {
         match self {
-            RegMem::Reg { reg } => collector.add_use(*reg),
-            RegMem::Mem { addr, .. } => addr.get_regs_as_uses(collector),
+            &mut RegMem::Reg { ref mut reg } => f(reg),
+            &mut RegMem::Mem { ref mut addr, .. } => addr.visit_regs(f),
         }
     }
+
     pub(crate) fn to_reg(&self) -> Option<Reg> {
         match self {
             RegMem::Reg { reg } => Some(*reg),
             _ => None,
         }
     }
+
+    /// Apply a mapper only to the register case. Can be used to
+    /// adjust the Operand params when this operand is passed into an
+    /// instruction constructor as a carrier for a VReg.
+    pub(crate) fn adjust_operand<F: Fn(VReg) -> Operand>(self, f: F) -> Self {
+        match self {
+            Self::Reg { reg } if reg.is_operand() => Self::Reg {
+                reg: f(reg.as_operand().unwrap().vreg()),
+            },
+            _ => self,
+        }
+    }
 }
 
-impl From<Writable<Reg>> for RegMem {
-    fn from(r: Writable<Reg>) -> Self {
-        RegMem::reg(r.to_reg())
+impl From<Reg> for RegMem {
+    fn from(r: Reg) -> Self {
+        RegMem::reg(r)
     }
 }
 
 impl std::fmt::Debug for RegMem {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            RegMem::Reg { reg } => write!(f, "{:?}", reg),
+            RegMem::Reg { reg } => write!(f, "{:?}", Inst::reg_name(*reg, 8)),
             RegMem::Mem { addr, .. } => write!(f, "{:?}", addr),
         }
     }
