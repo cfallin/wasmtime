@@ -1592,6 +1592,23 @@ pub(crate) fn emit(
             i.emit(sink, info, state);
         }
 
+        Inst::XmmRmRXmm0 {
+            op,
+            src1,
+            src2,
+            dst,
+            xmm0,
+        } => {
+            assert_eq!(xmm0.as_preg().unwrap(), regs::xmm0());
+            let i = Inst::XmmRmR {
+                op,
+                src1,
+                src2,
+                dst,
+            };
+            i.emit(sink, info, state);
+        }
+
         Inst::XmmMinMaxSeq {
             size,
             is_min,
@@ -1700,6 +1717,45 @@ pub(crate) fn emit(
                 SseOpcode::Pinsrb => (LegacyPrefixes::_66, 0x0F3A20, 3),
                 SseOpcode::Pinsrw => (LegacyPrefixes::_66, 0x0FC4, 2),
                 SseOpcode::Pinsrd => (LegacyPrefixes::_66, 0x0F3A22, 3),
+                _ => unimplemented!("Opcode {:?} not implemented", op),
+            };
+            let rex = RexFlags::from(*size);
+            let regs_swapped = match *op {
+                // These opcodes (and not the SSE2 version of PEXTRW) flip the operand
+                // encoding: `dst` in ModRM's r/m, `src` in ModRM's reg field.
+                SseOpcode::Pextrb | SseOpcode::Pextrd => true,
+                // The rest of the opcodes have the customary encoding: `dst` in ModRM's reg,
+                // `src` in ModRM's r/m field.
+                _ => false,
+            };
+            match src1 {
+                RegMem::Reg { reg } => {
+                    if regs_swapped {
+                        emit_std_reg_reg(sink, prefix, opcode, len, *reg, *dst, rex);
+                    } else {
+                        emit_std_reg_reg(sink, prefix, opcode, len, *dst, *reg, rex);
+                    }
+                }
+                RegMem::Mem { addr } => {
+                    let addr = &addr.finalize(state, sink);
+                    assert!(
+                        !regs_swapped,
+                        "No existing way to encode a mem argument in the ModRM r/m field."
+                    );
+                    emit_std_reg_mem(sink, state, info, prefix, opcode, len, *dst, addr, rex);
+                }
+            }
+            sink.put1(*imm);
+        }
+
+        Inst::XmmUnaryRmRImm {
+            op,
+            src,
+            dst,
+            imm,
+            size,
+        } => {
+            let (prefix, opcode, len) = match op {
                 SseOpcode::Pextrb => (LegacyPrefixes::_66, 0x0F3A14, 3),
                 SseOpcode::Pextrw => (LegacyPrefixes::_66, 0x0FC5, 2),
                 SseOpcode::Pextrd => (LegacyPrefixes::_66, 0x0F3A16, 3),
@@ -1719,7 +1775,7 @@ pub(crate) fn emit(
                 // `src` in ModRM's r/m field.
                 _ => false,
             };
-            match src1 {
+            match src {
                 RegMem::Reg { reg } => {
                     if regs_swapped {
                         emit_std_reg_reg(sink, prefix, opcode, len, *reg, *dst, rex);

@@ -236,6 +236,15 @@ pub enum Inst {
     /// (source-invariant) instructions, like pxor A, A -> B.
     XmmRmRConst { op: SseOpcode, dst: Reg },
 
+    /// Variant of XmmRmR that also uses XMM) (e.g. BLENDVPD).
+    XmmRmRXmm0 {
+        op: SseOpcode,
+        src1: RegMem,
+        src2: Reg,
+        dst: Reg,
+        xmm0: Reg,
+    },
+
     /// XMM (scalar or vector) unary op: mov between XMM registers (32 64) (reg addr) reg, sqrt,
     /// etc.
     ///
@@ -340,6 +349,16 @@ pub enum Inst {
         op: SseOpcode,
         src1: RegMem,
         src2: Reg,
+        dst: Reg,
+        imm: u8,
+        size: OperandSize, // 4 or 8
+    },
+
+    /// A unary XMM instruction with an 8-bit immediate: e.g., pextr
+    /// (b w d) pshufd round (ps ss pd sd)
+    XmmUnaryRmRImm {
+        op: SseOpcode,
+        src: RegMem,
         dst: Reg,
         imm: u8,
         size: OperandSize, // 4 or 8
@@ -588,7 +607,9 @@ impl Inst {
             | Inst::XmmRmiReg { opcode: op, .. }
             | Inst::XmmRmR { op, .. }
             | Inst::XmmRmRConst { op, .. }
+            | Inst::XmmRmRXmm0 { op, .. }
             | Inst::XmmRmRImm { op, .. }
+            | Inst::XmmUnaryRmRImm { op, .. }
             | Inst::XmmRmRImmConst { op, .. }
             | Inst::XmmToGpr { op, .. }
             | Inst::XmmUnaryRmR { op, .. } => smallvec![op.available_from()],
@@ -617,14 +638,16 @@ impl Inst {
         // regalloc so that we can know its index for sure, because
         // `src1` may or may not contain a `VReg`. This allows us to
         // name the reused register operand index correctly here.
+        let non_reuse_dst = dst.mk_def();
         let dst = dst.mk_reuse_def(0);
-        Self::AluRmiR {
+        let i = Self::AluRmiR {
             size,
             op,
             src1,
             src2,
             dst,
-        }
+        };
+        i.transform_const_variant(non_reuse_dst)
     }
 
     pub(crate) fn alu_rmi_r_const<R: RegType>(
@@ -793,18 +816,40 @@ impl Inst {
     pub(crate) fn xmm_rm_r<R: RegType>(op: SseOpcode, src1: RegMem, src2: R, dst: R) -> Self {
         let src2 = src2.mk_use();
         // as with alu_rmi_r case, src2 comes first so we can use `0` index here.
+        let non_reuse_dst = dst.mk_def();
         let dst = dst.mk_reuse_def(0);
-        Inst::XmmRmR {
+        let i = Inst::XmmRmR {
             op,
             src1,
             src2,
             dst,
-        }
+        };
+        i.transform_const_variant(non_reuse_dst)
     }
 
     pub(crate) fn xmm_rm_r_const<R: RegType>(op: SseOpcode, dst: R) -> Self {
         let dst = dst.mk_def();
         Inst::XmmRmRConst { op, dst }
+    }
+
+    pub(crate) fn xmm_rm_r_xmm0<R: RegType>(
+        op: SseOpcode,
+        xmm0: R,
+        src1: RegMem,
+        src2: R,
+        dst: R,
+    ) -> Self {
+        let xmm0 = xmm0.mk_fixed_use(xmm0, regs::xmm0());
+        let src2 = src2.mk_use();
+        // as with alu_rmi_r case, src2 comes first so we can use `0` index here.
+        let dst = dst.mk_reuse_def(0);
+        Inst::XmmRmRXmm0 {
+            op,
+            src1,
+            src2,
+            dst,
+            xmm0,
+        }
     }
 
     pub(crate) fn xmm_uninit_value<R: RegType>(dst: R) -> Self {
@@ -967,11 +1012,31 @@ impl Inst {
     ) -> Inst {
         debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
         let src2 = src2.mk_use();
+        let non_reuse_dst = dst.mk_def();
         let dst = dst.mk_reuse_def(0);
-        Inst::XmmRmRImm {
+        let i = Inst::XmmRmRImm {
             op,
             src1,
             src2,
+            dst,
+            imm,
+            size,
+        };
+        i.transform_const_variant(non_reuse_def)
+    }
+
+    pub(crate) fn xmm_unary_rm_r_imm<R: RegType>(
+        op: SseOpcode,
+        src1: RegMem,
+        dst: R,
+        imm: u8,
+        size: OperandSize,
+    ) -> Inst {
+        debug_assert!(size.is_one_of(&[OperandSize::Size32, OperandSize::Size64]));
+        let dst = dst.mk_def();
+        Inst::XmmUnaryRmRImm {
+            op,
+            src,
             dst,
             imm,
             size,
@@ -1386,6 +1451,19 @@ impl Inst {
         }
     }
 
+    fn transform_const_variant(self, dst: Reg) -> Self {
+        if self.produces_const() {
+            match self {
+                Self::AluRmiR { size, op, .. } => Self::AluRmiRConst { size, op, dst },
+                Self::XmmRmR { op, .. } => Self::XmmRmRConst { op, dst },
+                Self::XmmRmRImm { op, imm, .. } => Self::XmmRmRImmConst { op, dst, imm },
+                _ => unreachable!(),
+            }
+        } else {
+            self
+        }
+    }
+
     /// Choose which instruction to use for comparing two values for equality.
     pub(crate) fn equals<R: RegType>(ty: Type, from: RegMem, src2: R, to: R) -> Inst {
         match ty {
@@ -1678,6 +1756,25 @@ impl fmt::Debug for Inst {
                 )
             }
 
+            Inst::XmmRmRXmm0 {
+                op,
+                src1,
+                src2,
+                dst,
+                xmm0,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{:?} {}, {}, {}, {}",
+                    op,
+                    show_x64_reg(*xmm0, 0),
+                    src1,
+                    show_x64_reg(*src2, 0),
+                    show_x64_reg(*dst, 0),
+                )
+            }
+
             Inst::XmmMinMaxSeq {
                 size,
                 is_min,
@@ -1718,6 +1815,27 @@ impl fmt::Debug for Inst {
                 imm,
                 src1,
                 show_x64_reg(*src2, 0),
+                show_x64_reg(*dst, 0),
+            ),
+
+            Inst::XmmUnaryRmRImm {
+                op,
+                src,
+                dst,
+                imm,
+                size,
+                ..
+            } => write!(
+                f,
+                "{:?}{} ${}, {}, {}",
+                op,
+                if *size == OperandSize::Size64 {
+                    ".w"
+                } else {
+                    ""
+                },
+                imm,
+                src,
                 show_x64_reg(*dst, 0),
             ),
 
@@ -2046,18 +2164,16 @@ impl fmt::Debug for Inst {
                 ty,
                 src,
                 dst,
-                expected,
                 actual,
                 ..
             } => {
                 let size = ty.bytes() as u8;
                 write!(
                     f,
-                    "lock cmpxchg{} {}, {}, expected_in={}, actual_out={}",
+                    "lock cmpxchg{} {}, {}, actual_out={}",
                     suffix_bwlq(OperandSize::from_bytes(size as u32)),
                     show_x64_reg(*src, size),
                     dst,
-                    show_x64_reg(*expected, size),
                     show_x64_reg(*actual, size),
                 )
             }
@@ -2237,6 +2353,18 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
         &mut Inst::XmmRmRConst { ref mut dst, .. } => {
             f(dst);
         }
+        &mut Inst::XmmRmRXmm0 {
+            ref mut src1,
+            ref mut src2,
+            ref mut dst,
+            ref mut xmm0,
+            ..
+        } => {
+            f(src2);
+            src1.visit_regs(&mut f);
+            f(dst);
+            f(xmm0);
+        }
         &mut Inst::XmmRmRImm {
             op,
             ref mut src1,
@@ -2245,6 +2373,15 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
             ..
         } => {
             f(src2);
+            src1.visit_regs(&mut f);
+            f(dst);
+        }
+        &mut Inst::XmmUnaryRmRImm {
+            op,
+            ref mut src,
+            ref mut dst,
+            ..
+        } => {
             src1.visit_regs(&mut f);
             f(dst);
         }
@@ -2489,13 +2626,11 @@ fn x64_visit_regs<F: FnMut(&mut Reg)>(inst: &mut Inst, mut f: F) {
         &mut Inst::LockCmpxchg {
             ref mut src,
             ref mut dst,
-            ref mut expected,
             ref mut actual,
             ..
         } => {
             f(src);
             dst.visit_regs(&mut f);
-            f(expected);
             f(actual);
         }
 
