@@ -50,6 +50,7 @@ where
             (true, Algorithm::LinearScan(Default::default()))
         }
     };
+    let algorithm = Algorithm::Regalloc2(Default::default());
 
     #[cfg(feature = "regalloc-snapshot")]
     {

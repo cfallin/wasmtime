@@ -1266,6 +1266,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fed34cd105917e91daa4da6b3728c47b068749d6a62c59811f06ed2ac71d9da7"
 
 [[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "gcc"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2458,12 +2467,20 @@ dependencies = [
 [[package]]
 name = "regalloc"
 version = "0.0.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "571f7f397d61c4755285cd37853fe8e03271c243424a907415909379659381c5"
 dependencies = [
  "log",
+ "regalloc2",
  "rustc-hash",
  "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "regalloc2"
+version = "0.0.1"
+dependencies = [
+ "fxhash",
+ "log",
  "smallvec",
 ]
 

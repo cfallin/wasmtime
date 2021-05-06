@@ -845,9 +845,12 @@ fn ty_from_ty_hint_or_reg_class<M: ABIMachineSpec>(r: Reg, ty: Option<Type>) -> 
     match (ty, r.get_class()) {
         // If the type is provided
         (Some(t), _) => t,
-        // If no type is provided, this should be a register spill for a
-        // safepoint, so we only expect I32/I64 (integer) registers.
-        (None, rc) if rc == M::word_reg_class() => M::word_type(),
+        // If no type is provided, use the regclass.
+        (None, RegClass::I32) => I32,
+        (None, RegClass::I64) => I64,
+        (None, RegClass::F32) => F32,
+        (None, RegClass::F64) => F64,
+        (None, RegClass::V128) => I8X16,
         _ => panic!("Unexpected register class!"),
     }
 }

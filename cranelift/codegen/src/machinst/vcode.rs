@@ -715,8 +715,18 @@ impl<I: VCodeInst> RegallocFunction for VCode<I> {
         self.vreg_types.len()
     }
 
-    fn get_spillslot_size(&self, regclass: RegClass, vreg: VirtualReg) -> u32 {
-        let ty = self.vreg_type(vreg);
+    fn get_spillslot_size(&self, regclass: RegClass, vreg: Option<VirtualReg>) -> u32 {
+        let ty = match vreg {
+            Some(vreg) => self.vreg_type(vreg),
+            None => match regclass {
+                RegClass::I32 => types::I32,
+                RegClass::I64 => types::I64,
+                RegClass::F32 => types::F32,
+                RegClass::F64 => types::F64,
+                RegClass::V128 => types::I8X16,
+                _ => unreachable!(),
+            },
+        };
         self.abi.get_spillslot_size(regclass, ty)
     }
 
@@ -735,8 +745,19 @@ impl<I: VCodeInst> RegallocFunction for VCode<I> {
         self.abi.gen_reload(to_reg, from_slot, ty)
     }
 
-    fn gen_move(&self, to_reg: Writable<RealReg>, from_reg: RealReg, vreg: VirtualReg) -> I {
-        let ty = self.vreg_type(vreg);
+    fn gen_move(&self, to_reg: Writable<RealReg>, from_reg: RealReg, vreg: Option<VirtualReg>) -> I {
+        let class = from_reg.get_class();
+        let ty = match vreg {
+            Some(vreg) => self.vreg_type(vreg),
+            None => match class {
+                RegClass::I32 => types::I32,
+                RegClass::I64 => types::I64,
+                RegClass::F32 => types::F32,
+                RegClass::F64 => types::F64,
+                RegClass::V128 => types::I8X16,
+                _ => unreachable!(),
+            },
+        };
         I::gen_move(to_reg.map(|r| r.to_reg()), from_reg.to_reg(), ty)
     }
 
