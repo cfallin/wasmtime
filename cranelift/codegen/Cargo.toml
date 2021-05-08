@@ -26,7 +26,7 @@ smallvec = { version = "1.6.1" }
 peepmatic = { path = "../peepmatic", optional = true, version = "0.75.0" }
 peepmatic-traits = { path = "../peepmatic/crates/traits", optional = true, version = "0.75.0" }
 peepmatic-runtime = { path = "../peepmatic/crates/runtime", optional = true, version = "0.75.0" }
-regalloc = { path = "../../../../regalloc.rs/lib/", version = "*" }
+regalloc = { path = "../../../regalloc.rs/lib/", version = "*" }
 souper-ir = { version = "2.1.0", optional = true }
 wast = { version = "36.0.0", optional = true }
 # It is a goal of the cranelift-codegen crate to have minimal external dependencies.
