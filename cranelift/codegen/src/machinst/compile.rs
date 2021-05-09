@@ -39,6 +39,10 @@ where
 
     // Perform register allocation.
     let (run_checker, algorithm) = match vcode.flags().regalloc() {
+        settings::Regalloc::Regalloc2 => (false, Algorithm::Regalloc2(Default::default())),
+        settings::Regalloc::Regalloc2Checked => {
+            (true, Algorithm::Regalloc2(Default::default()))
+        }
         settings::Regalloc::Backtracking => (false, Algorithm::Backtracking(Default::default())),
         settings::Regalloc::BacktrackingChecked => {
             (true, Algorithm::Backtracking(Default::default()))
@@ -50,7 +54,6 @@ where
             (true, Algorithm::LinearScan(Default::default()))
         }
     };
-    let algorithm = Algorithm::Regalloc2(Default::default());
 
     #[cfg(feature = "regalloc-snapshot")]
     {

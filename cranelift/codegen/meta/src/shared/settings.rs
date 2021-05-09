@@ -16,6 +16,8 @@ pub(crate) fn define() -> SettingGroup {
 
             Possible values:
 
+            - `regalloc2`
+            - `regalloc2_checked`
             - `backtracking` is a greedy, backtracking register allocator as implemented in
             Spidermonkey's optimizing tier IonMonkey. It may take more time to allocate registers, but
             it should generate better code in general, resulting in better throughput of generated
@@ -29,6 +31,8 @@ pub(crate) fn define() -> SettingGroup {
             checks that may take some time to run, and thus these checks are disabled by default.
         "#,
         vec![
+            "regalloc2",
+            "regalloc2_checked",
             "backtracking",
             "backtracking_checked",
             "experimental_linear_scan",
