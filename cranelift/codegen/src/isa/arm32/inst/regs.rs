@@ -103,6 +103,7 @@ pub fn create_reg_universe() -> RealRegUniverse {
         first: r_reg_base as usize,
         last: r_reg_last as usize,
         suggested_scratch: None,
+        suggested_scratch2: None,
     });
 
     // Other regs, not available to the allocator.

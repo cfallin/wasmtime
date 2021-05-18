@@ -230,11 +230,13 @@ pub(crate) fn create_reg_universe_systemv(flags: &settings::Flags) -> RealRegUni
         first: first_gpr,
         last: last_gpr,
         suggested_scratch: Some(r12().get_index()),
+        suggested_scratch2: Some(r13().get_index()),
     });
     allocable_by_class[RegClass::V128.rc_to_usize()] = Some(RegClassInfo {
         first: first_fpr,
         last: last_fpr,
         suggested_scratch: Some(xmm15().get_index()),
+        suggested_scratch2: Some(xmm14().get_index()),
     });
 
     // Sanity-check: the index passed to the Reg ctor must match the order in the register list.

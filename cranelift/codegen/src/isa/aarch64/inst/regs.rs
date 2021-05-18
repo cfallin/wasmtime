@@ -210,11 +210,13 @@ pub fn create_reg_universe(flags: &settings::Flags) -> RealRegUniverse {
         first: x_reg_base as usize,
         last: x_reg_last as usize,
         suggested_scratch: Some(XREG_INDICES[19] as usize),
+        suggested_scratch2: Some(XREG_INDICES[20] as usize),
     });
     allocable_by_class[RegClass::V128.rc_to_usize()] = Some(RegClassInfo {
         first: v_reg_base as usize,
         last: v_reg_last as usize,
         suggested_scratch: Some(/* V31: */ 31),
+        suggested_scratch2: Some(/* V31: */ 30),
     });
 
     // Other regs, not available to the allocator.
