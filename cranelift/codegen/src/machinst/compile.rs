@@ -9,6 +9,28 @@ use crate::timing;
 use log::debug;
 use regalloc::{allocate_registers_with_opts, Algorithm, Options, PrettyPrint};
 
+/// Get the regalloc.rs options, given the Cranelift flags.
+pub fn get_regalloc_opts(flags: &settings::Flags) -> Options {
+    let (run_checker, algorithm) = match flags.regalloc() {
+        settings::Regalloc::Regalloc2 => (false, Algorithm::Regalloc2(Default::default())),
+        settings::Regalloc::Regalloc2Checked => (true, Algorithm::Regalloc2(Default::default())),
+        settings::Regalloc::Backtracking => (false, Algorithm::Backtracking(Default::default())),
+        settings::Regalloc::BacktrackingChecked => {
+            (true, Algorithm::Backtracking(Default::default()))
+        }
+        settings::Regalloc::ExperimentalLinearScan => {
+            (false, Algorithm::LinearScan(Default::default()))
+        }
+        settings::Regalloc::ExperimentalLinearScanChecked => {
+            (true, Algorithm::LinearScan(Default::default()))
+        }
+    };
+    Options {
+        run_checker,
+        algorithm,
+    }
+}
+
 /// Compile the given function down to VCode with allocated registers, ready
 /// for binary emission.
 pub fn compile<B: LowerBackend + MachBackend>(
@@ -34,26 +56,11 @@ where
     // rendering.
     debug!(
         "vcode from lowering: \n{}",
-        DeferredDisplay::new(|| vcode.show_rru(Some(b.reg_universe())))
+        DeferredDisplay::new(|| vcode.show_rru(Some(&b.reg_env().rru)))
     );
 
     // Perform register allocation.
-    let (run_checker, algorithm) = match vcode.flags().regalloc() {
-        settings::Regalloc::Regalloc2 => (false, Algorithm::Regalloc2(Default::default())),
-        settings::Regalloc::Regalloc2Checked => {
-            (true, Algorithm::Regalloc2(Default::default()))
-        }
-        settings::Regalloc::Backtracking => (false, Algorithm::Backtracking(Default::default())),
-        settings::Regalloc::BacktrackingChecked => {
-            (true, Algorithm::Backtracking(Default::default()))
-        }
-        settings::Regalloc::ExperimentalLinearScan => {
-            (false, Algorithm::LinearScan(Default::default()))
-        }
-        settings::Regalloc::ExperimentalLinearScanChecked => {
-            (true, Algorithm::LinearScan(Default::default()))
-        }
-    };
+    let opts = get_regalloc_opts(vcode.flags());
 
     #[cfg(feature = "regalloc-snapshot")]
     {
@@ -81,24 +88,16 @@ where
 
     let result = {
         let _tt = timing::regalloc();
-        allocate_registers_with_opts(
-            &mut vcode,
-            b.reg_universe(),
-            sri,
-            Options {
-                run_checker,
-                algorithm,
-            },
-        )
-        .map_err(|err| {
-            debug!(
-                "Register allocation error for vcode\n{}\nError: {:?}",
-                vcode.show_rru(Some(b.reg_universe())),
+        allocate_registers_with_opts(&mut vcode, b.reg_env(), sri, opts)
+            .map_err(|err| {
+                debug!(
+                    "Register allocation error for vcode\n{}\nError: {:?}",
+                    vcode.show_rru(Some(&b.reg_env().rru)),
+                    err
+                );
                 err
-            );
-            err
-        })
-        .expect("register allocation")
+            })
+            .expect("register allocation")
     };
 
     // Reorder vcode into final order and copy out final instruction sequence
@@ -110,7 +109,7 @@ where
 
     debug!(
         "vcode after regalloc: final version:\n{}",
-        DeferredDisplay::new(|| vcode.show_rru(Some(b.reg_universe())))
+        DeferredDisplay::new(|| vcode.show_rru(Some(&b.reg_env().rru)))
     );
 
     Ok(vcode)

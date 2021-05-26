@@ -9,7 +9,7 @@ use crate::settings;
 
 use alloc::{boxed::Box, vec::Vec};
 use core::hash::{Hash, Hasher};
-use regalloc::{PrettyPrint, RealRegUniverse};
+use regalloc::{PrettyPrint, RegEnv};
 use target_lexicon::{Architecture, ArmArchitecture, Triple};
 
 // New backend:
@@ -24,17 +24,19 @@ use inst::{create_reg_universe, EmitInfo};
 pub struct Arm32Backend {
     triple: Triple,
     flags: settings::Flags,
-    reg_universe: RealRegUniverse,
+    reg_env: RegEnv,
 }
 
 impl Arm32Backend {
     /// Create a new ARM32 backend with the given (shared) flags.
     pub fn new_with_flags(triple: Triple, flags: settings::Flags) -> Arm32Backend {
         let reg_universe = create_reg_universe();
+        let opts = compile::get_regalloc_opts(&flags);
+        let reg_env = RegEnv::from_rru_and_opts(reg_universe, &opts);
         Arm32Backend {
             triple,
             flags,
-            reg_universe,
+            reg_env,
         }
     }
 
@@ -102,8 +104,8 @@ impl MachBackend for Arm32Backend {
         self.flags.hash(&mut hasher);
     }
 
-    fn reg_universe(&self) -> &RealRegUniverse {
-        &self.reg_universe
+    fn reg_env(&self) -> &RegEnv {
+        &self.reg_env
     }
 
     fn unsigned_add_overflow_condition(&self) -> IntCC {

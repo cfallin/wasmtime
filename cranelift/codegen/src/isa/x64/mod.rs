@@ -11,7 +11,7 @@ use crate::result::CodegenResult;
 use crate::settings::{self as shared_settings, Flags};
 use alloc::{boxed::Box, vec::Vec};
 use core::hash::{Hash, Hasher};
-use regalloc::{PrettyPrint, RealRegUniverse, Reg};
+use regalloc::{PrettyPrint, Reg, RegEnv};
 use target_lexicon::Triple;
 
 #[cfg(feature = "unwind")]
@@ -28,18 +28,20 @@ pub(crate) struct X64Backend {
     triple: Triple,
     flags: Flags,
     x64_flags: x64_settings::Flags,
-    reg_universe: RealRegUniverse,
+    reg_env: RegEnv,
 }
 
 impl X64Backend {
     /// Create a new X64 backend with the given (shared) flags.
     fn new_with_flags(triple: Triple, flags: Flags, x64_flags: x64_settings::Flags) -> Self {
+        let opts = compile::get_regalloc_opts(&flags);
         let reg_universe = create_reg_universe_systemv(&flags);
+        let reg_env = RegEnv::from_rru_and_opts(reg_universe, &opts);
         Self {
             triple,
             flags,
             x64_flags,
-            reg_universe,
+            reg_env,
         }
     }
 
@@ -105,8 +107,8 @@ impl MachBackend for X64Backend {
         self.triple.clone()
     }
 
-    fn reg_universe(&self) -> &RealRegUniverse {
-        &self.reg_universe
+    fn reg_env(&self) -> &RegEnv {
+        &self.reg_env
     }
 
     fn unsigned_add_overflow_condition(&self) -> IntCC {

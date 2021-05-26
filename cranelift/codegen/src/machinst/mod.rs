@@ -73,7 +73,8 @@ use core::hash::Hasher;
 use cranelift_entity::PrimaryMap;
 use regalloc::RegUsageCollector;
 use regalloc::{
-    RealReg, RealRegUniverse, Reg, RegClass, RegUsageMapper, SpillSlot, VirtualReg, Writable,
+    RealReg, RealRegUniverse, Reg, RegClass, RegEnv, RegUsageMapper, SpillSlot, VirtualReg,
+    Writable,
 };
 use smallvec::{smallvec, SmallVec};
 use std::string::String;
@@ -392,8 +393,8 @@ pub trait MachBackend {
     /// Return name for this backend.
     fn name(&self) -> &'static str;
 
-    /// Return the register universe for this backend.
-    fn reg_universe(&self) -> &RealRegUniverse;
+    /// Return the register allocation environment for this backend.
+    fn reg_env(&self) -> &RegEnv;
 
     /// Machine-specific condcode info needed by TargetIsa.
     /// Condition that will be true when an IaddIfcout overflows.

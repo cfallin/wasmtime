@@ -745,7 +745,12 @@ impl<I: VCodeInst> RegallocFunction for VCode<I> {
         self.abi.gen_reload(to_reg, from_slot, ty)
     }
 
-    fn gen_move(&self, to_reg: Writable<RealReg>, from_reg: RealReg, vreg: Option<VirtualReg>) -> I {
+    fn gen_move(
+        &self,
+        to_reg: Writable<RealReg>,
+        from_reg: RealReg,
+        vreg: Option<VirtualReg>,
+    ) -> I {
         let class = from_reg.get_class();
         let ty = match vreg {
             Some(vreg) => self.vreg_type(vreg),

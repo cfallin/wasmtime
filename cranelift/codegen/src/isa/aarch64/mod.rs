@@ -9,7 +9,7 @@ use crate::result::CodegenResult;
 use crate::settings as shared_settings;
 use alloc::{boxed::Box, vec::Vec};
 use core::hash::{Hash, Hasher};
-use regalloc::{PrettyPrint, RealRegUniverse};
+use regalloc::{PrettyPrint, RegEnv};
 use target_lexicon::{Aarch64Architecture, Architecture, Triple};
 
 // New backend:
@@ -28,7 +28,7 @@ pub struct AArch64Backend {
     triple: Triple,
     flags: shared_settings::Flags,
     isa_flags: aarch64_settings::Flags,
-    reg_universe: RealRegUniverse,
+    reg_env: RegEnv,
 }
 
 impl AArch64Backend {
@@ -39,11 +39,13 @@ impl AArch64Backend {
         isa_flags: aarch64_settings::Flags,
     ) -> AArch64Backend {
         let reg_universe = create_reg_universe(&flags);
+        let opts = compile::get_regalloc_opts(&flags);
+        let reg_env = RegEnv::from_rru_and_opts(reg_universe, &opts);
         AArch64Backend {
             triple,
             flags,
             isa_flags,
-            reg_universe,
+            reg_env,
         }
     }
 
@@ -113,8 +115,8 @@ impl MachBackend for AArch64Backend {
         self.isa_flags.hash(&mut hasher);
     }
 
-    fn reg_universe(&self) -> &RealRegUniverse {
-        &self.reg_universe
+    fn reg_env(&self) -> &RegEnv {
+        &self.reg_env
     }
 
     fn unsigned_add_overflow_condition(&self) -> IntCC {
