@@ -12,7 +12,12 @@ use regalloc::{allocate_registers_with_opts, Algorithm, Options, PrettyPrint};
 /// Get the regalloc.rs options, given the Cranelift flags.
 pub fn get_regalloc_opts(flags: &settings::Flags) -> Options {
     let (run_checker, algorithm) = match flags.regalloc() {
-        settings::Regalloc::Regalloc2 => (false, Algorithm::Regalloc2(Default::default())),
+        settings::Regalloc::Regalloc2 => {
+            let is_debug = log::log_enabled!(log::Level::Debug);
+            let mut opts = regalloc::Regalloc2Options::default();
+            opts.verbose_log = is_debug;
+            (false, Algorithm::Regalloc2(opts))
+        }
         settings::Regalloc::Regalloc2Checked => (true, Algorithm::Regalloc2(Default::default())),
         settings::Regalloc::Backtracking => (false, Algorithm::Backtracking(Default::default())),
         settings::Regalloc::BacktrackingChecked => {
