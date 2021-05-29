@@ -47,6 +47,8 @@ pub fn compile<B: LowerBackend + MachBackend>(
 where
     B::MInst: PrettyPrint,
 {
+    log::info!("compiling function {:?}", f.name);
+
     // Compute lowered block order.
     let block_order = BlockLoweringOrder::new(f);
     // Build the lowering context.
