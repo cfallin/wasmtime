@@ -61,7 +61,7 @@ where
 
     // Creating the vcode string representation may be costly for large functions, so defer its
     // rendering.
-    debug!(
+    log::info!(
         "vcode from lowering: \n{}",
         DeferredDisplay::new(|| vcode.show_rru(Some(&b.reg_env().rru)))
     );
