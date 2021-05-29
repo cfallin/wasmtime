@@ -13,9 +13,9 @@ use regalloc::{allocate_registers_with_opts, Algorithm, Options, PrettyPrint};
 pub fn get_regalloc_opts(flags: &settings::Flags) -> Options {
     let (run_checker, algorithm) = match flags.regalloc() {
         settings::Regalloc::Regalloc2 => {
-            let is_debug = log::log_enabled!(log::Level::Debug);
+            let is_info = log::log_enabled!(log::Level::Info);
             let mut opts = regalloc::Regalloc2Options::default();
-            opts.verbose_log = is_debug;
+            opts.verbose_log = is_info;
             (false, Algorithm::Regalloc2(opts))
         }
         settings::Regalloc::Regalloc2Checked => (true, Algorithm::Regalloc2(Default::default())),
@@ -112,7 +112,7 @@ where
         vcode.replace_insns_from_regalloc(result);
     }
 
-    debug!(
+    log::info!(
         "vcode after regalloc: final version:\n{}",
         DeferredDisplay::new(|| vcode.show_rru(Some(&b.reg_env().rru)))
     );
