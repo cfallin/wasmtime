@@ -13,7 +13,7 @@ use crate::settings as shared_settings;
 use alloc::{boxed::Box, vec::Vec};
 use core::hash::{Hash, Hasher};
 
-use regalloc::{PrettyPrint, RealRegUniverse, Reg};
+use regalloc::{PrettyPrint, Reg, RegEnv};
 use target_lexicon::{Architecture, Triple};
 
 // New backend:
@@ -31,7 +31,7 @@ pub struct S390xBackend {
     triple: Triple,
     flags: shared_settings::Flags,
     isa_flags: s390x_settings::Flags,
-    reg_universe: RealRegUniverse,
+    reg_env: RegEnv,
 }
 
 impl S390xBackend {
@@ -42,11 +42,13 @@ impl S390xBackend {
         isa_flags: s390x_settings::Flags,
     ) -> S390xBackend {
         let reg_universe = create_reg_universe(&flags);
+        let opts = compile::get_regalloc_opts(&flags);
+        let reg_env = RegEnv::from_rru_and_opts(reg_universe, &opts);
         S390xBackend {
             triple,
             flags,
             isa_flags,
-            reg_universe,
+            reg_env,
         }
     }
 
@@ -116,8 +118,8 @@ impl MachBackend for S390xBackend {
         self.isa_flags.hash(&mut hasher);
     }
 
-    fn reg_universe(&self) -> &RealRegUniverse {
-        &self.reg_universe
+    fn reg_env(&self) -> &RegEnv {
+        &self.reg_env
     }
 
     fn unsigned_add_overflow_condition(&self) -> IntCC {
