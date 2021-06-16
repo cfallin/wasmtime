@@ -642,11 +642,6 @@ impl MachInstEmit for Inst {
                     ALUOp::SMulH | ALUOp::UMulH => 0b011111,
                     _ => 0b000000,
                 };
-                debug_assert_ne!(writable_stack_reg(), rd);
-                // The stack pointer is the zero register in this context, so this might be an
-                // indication that something is wrong.
-                debug_assert_ne!(stack_reg(), rn);
-                debug_assert_ne!(stack_reg(), rm);
                 sink.put4(enc_arith_rrr(top11, bit15_10, rd, rn, rm));
             }
             &Inst::AluRRRR {
@@ -1196,10 +1191,6 @@ impl MachInstEmit for Inst {
             &Inst::Mov64 { rd, rm } => {
                 assert!(rd.to_reg().get_class() == rm.get_class());
                 assert!(rm.get_class() == RegClass::I64);
-
-                // MOV to SP is interpreted as MOV to XZR instead. And our codegen
-                // should never MOV to XZR.
-                assert!(rd.to_reg() != stack_reg());
 
                 if rm == stack_reg() {
                     // We can't use ORR here, so use an `add rd, sp, #0` instead.

@@ -20,7 +20,7 @@ use std::string::{String, ToString};
 pub const PINNED_REG: u8 = 21;
 
 #[rustfmt::skip]
-const XREG_INDICES: [u8; 31] = [
+const XREG_INDICES: [u8; 32] = [
     // X0 - X7
     32, 33, 34, 35, 36, 37, 38, 39,
     // X8 - X15
@@ -39,15 +39,13 @@ const XREG_INDICES: [u8; 31] = [
     61,
     // X30 (LR)
     62,
+    // X31 (SP, ZR)
+    63,
 ];
-
-const ZERO_REG_INDEX: u8 = 63;
-
-const SP_REG_INDEX: u8 = 64;
 
 /// Get a reference to an X-register (integer register).
 pub fn xreg(num: u8) -> Reg {
-    assert!(num < 31);
+    assert!(num < 32);
     Reg::new_real(
         RegClass::I64,
         /* enc = */ num,
@@ -73,13 +71,7 @@ pub fn writable_vreg(num: u8) -> Writable<Reg> {
 
 /// Get a reference to the zero-register.
 pub fn zero_reg() -> Reg {
-    // This should be the same as what xreg(31) returns, except that
-    // we use the special index into the register index space.
-    Reg::new_real(
-        RegClass::I64,
-        /* enc = */ 31,
-        /* index = */ ZERO_REG_INDEX,
-    )
+    xreg(31)
 }
 
 /// Get a writable reference to the zero-register (this discards a result).
@@ -89,16 +81,12 @@ pub fn writable_zero_reg() -> Writable<Reg> {
 
 /// Get a reference to the stack-pointer register.
 pub fn stack_reg() -> Reg {
-    // XSP (stack) and XZR (zero) are logically different registers which have
-    // the same hardware encoding, and whose meaning, in real aarch64
-    // instructions, is context-dependent.  For convenience of
-    // universe-construction and for correct printing, we make them be two
-    // different real registers.
-    Reg::new_real(
-        RegClass::I64,
-        /* enc = */ 31,
-        /* index = */ SP_REG_INDEX,
-    )
+    // XSP (stack) and XZR (zero) are logically different registers
+    // which have the same hardware encoding. Ideally we would use
+    // different RealReg indices to ensure they remain separate, but
+    // regalloc2 packs PRegs into 5 bits (32 regs) per class for
+    // efficiency, so we need to use the same register for both.
+    xreg(31)
 }
 
 /// Get a writable reference to the stack-pointer register.
@@ -234,13 +222,8 @@ pub fn create_reg_universe(flags: &settings::Flags) -> RealRegUniverse {
     regs.push((xreg(18).to_real_reg(), "x18".to_string()));
     regs.push((fp_reg().to_real_reg(), "fp".to_string()));
     regs.push((link_reg().to_real_reg(), "lr".to_string()));
-    regs.push((zero_reg().to_real_reg(), "xzr".to_string()));
-    regs.push((stack_reg().to_real_reg(), "sp".to_string()));
-
-    // FIXME JRS 2020Feb06: unfortunately this pushes the number of real regs
-    // to 65, which is potentially inconvenient from a compiler performance
-    // standpoint.  We could possibly drop back to 64 by "losing" a vector
-    // register in future.
+    assert_eq!(zero_reg(), stack_reg());
+    regs.push((zero_reg().to_real_reg(), "sp".to_string()));
 
     // Assert sanity: the indices in the register structs must match their
     // actual indices in the array.

@@ -275,25 +275,25 @@ mod test {
 
         // FIXME: the branching logic should be optimized more
 
-        // ahi %r2, 4660
-        // chi %r2, 0
+        // ahi %r5, 4660
+        // chi %r5, 0
         // jglh label1 ; jg label2
         // jg label6
         // jg label3
-        // ahik %r3, %r2, 4660
-        // chi %r3, 0
+        // ahik %r4, %r5, 4660
+        // chi %r4, 0
         // jglh label4 ; jg label5
         // jg label3
         // jg label6
-        // chi %r2, 0
+        // chi %r5, 0
         // jglh label7 ; jg label8
         // jg label3
         // ahi %r2, -4660
         // br %r14
         let golden = vec![
-            167, 42, 18, 52, 167, 46, 0, 0, 192, 100, 0, 0, 0, 11, 236, 50, 18, 52, 0, 216, 167,
-            62, 0, 0, 192, 100, 255, 255, 255, 251, 167, 46, 0, 0, 192, 100, 255, 255, 255, 246,
-            167, 42, 237, 204, 7, 254,
+            236, 82, 18, 52, 0, 216, 167, 94, 0, 0, 192, 100, 0, 0, 0, 11, 236, 69, 18, 52, 0, 216,
+            167, 78, 0, 0, 192, 100, 255, 255, 255, 251, 167, 94, 0, 0, 192, 100, 255, 255, 255,
+            246, 236, 37, 237, 204, 0, 216, 7, 254,
         ];
 
         assert_eq!(code, &golden[..]);

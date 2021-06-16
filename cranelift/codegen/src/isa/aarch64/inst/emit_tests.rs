@@ -220,7 +220,8 @@ fn test_aarch64_binemit() {
         },
         "5F00036B",
         // TODO: Display as cmp
-        "subs wzr, w2, w3",
+        // `sp` dest is actually `wzr`
+        "subs sp, w2, w3",
     ));
     insns.push((
         Inst::AluRRR {
@@ -271,7 +272,8 @@ fn test_aarch64_binemit() {
         },
         "BF0400B1",
         // TODO: Display as cmn.
-        "adds xzr, x5, #1",
+        // `sp` dest is actually `xzr`
+        "adds sp, x5, #1",
     ));
     insns.push((
         Inst::AluRRR {
@@ -914,7 +916,7 @@ fn test_aarch64_binemit() {
             extendop: ExtendOp::UXTX,
         },
         "FF632CEB",
-        "subs xzr, sp, x12, UXTX",
+        "subs sp, sp, x12, UXTX",
     ));
 
     insns.push((
@@ -5595,7 +5597,8 @@ fn test_aarch64_binemit() {
             ty: I32,
         },
         "FFFFE088",
-        "casal w0, wzr, [sp]",
+        // first `sp` is actually `wzr`
+        "casal w0, sp, [sp]",
     ));
     insns.push((
         Inst::AtomicCAS {
