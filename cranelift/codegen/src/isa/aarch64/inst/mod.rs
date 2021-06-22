@@ -3184,50 +3184,51 @@ impl PrettyPrint for Inst {
 
 impl Inst {
     fn print_with_state(&self, mb_rru: Option<&RealRegUniverse>, state: &mut EmitState) -> String {
-        fn op_name_size(alu_op: ALUOp) -> (&'static str, OperandSize) {
+        fn op_name_size(alu_op: ALUOp) -> (&'static str, OperandSize, bool) {
+            // Returns: (name, size, x31_is_xp).
             match alu_op {
-                ALUOp::Add32 => ("add", OperandSize::Size32),
-                ALUOp::Add64 => ("add", OperandSize::Size64),
-                ALUOp::Sub32 => ("sub", OperandSize::Size32),
-                ALUOp::Sub64 => ("sub", OperandSize::Size64),
-                ALUOp::Orr32 => ("orr", OperandSize::Size32),
-                ALUOp::Orr64 => ("orr", OperandSize::Size64),
-                ALUOp::And32 => ("and", OperandSize::Size32),
-                ALUOp::And64 => ("and", OperandSize::Size64),
-                ALUOp::AndS32 => ("ands", OperandSize::Size32),
-                ALUOp::AndS64 => ("ands", OperandSize::Size64),
-                ALUOp::Eor32 => ("eor", OperandSize::Size32),
-                ALUOp::Eor64 => ("eor", OperandSize::Size64),
-                ALUOp::AddS32 => ("adds", OperandSize::Size32),
-                ALUOp::AddS64 => ("adds", OperandSize::Size64),
-                ALUOp::SubS32 => ("subs", OperandSize::Size32),
-                ALUOp::SubS64 => ("subs", OperandSize::Size64),
-                ALUOp::SMulH => ("smulh", OperandSize::Size64),
-                ALUOp::UMulH => ("umulh", OperandSize::Size64),
-                ALUOp::SDiv64 => ("sdiv", OperandSize::Size64),
-                ALUOp::UDiv64 => ("udiv", OperandSize::Size64),
-                ALUOp::AndNot32 => ("bic", OperandSize::Size32),
-                ALUOp::AndNot64 => ("bic", OperandSize::Size64),
-                ALUOp::OrrNot32 => ("orn", OperandSize::Size32),
-                ALUOp::OrrNot64 => ("orn", OperandSize::Size64),
-                ALUOp::EorNot32 => ("eon", OperandSize::Size32),
-                ALUOp::EorNot64 => ("eon", OperandSize::Size64),
-                ALUOp::RotR32 => ("ror", OperandSize::Size32),
-                ALUOp::RotR64 => ("ror", OperandSize::Size64),
-                ALUOp::Lsr32 => ("lsr", OperandSize::Size32),
-                ALUOp::Lsr64 => ("lsr", OperandSize::Size64),
-                ALUOp::Asr32 => ("asr", OperandSize::Size32),
-                ALUOp::Asr64 => ("asr", OperandSize::Size64),
-                ALUOp::Lsl32 => ("lsl", OperandSize::Size32),
-                ALUOp::Lsl64 => ("lsl", OperandSize::Size64),
-                ALUOp::Adc32 => ("adc", OperandSize::Size32),
-                ALUOp::Adc64 => ("adc", OperandSize::Size64),
-                ALUOp::AdcS32 => ("adcs", OperandSize::Size32),
-                ALUOp::AdcS64 => ("adcs", OperandSize::Size64),
-                ALUOp::Sbc32 => ("sbc", OperandSize::Size32),
-                ALUOp::Sbc64 => ("sbc", OperandSize::Size64),
-                ALUOp::SbcS32 => ("sbcs", OperandSize::Size32),
-                ALUOp::SbcS64 => ("sbcs", OperandSize::Size64),
+                ALUOp::Add32 => ("add", OperandSize::Size32, true),
+                ALUOp::Add64 => ("add", OperandSize::Size64, true),
+                ALUOp::Sub32 => ("sub", OperandSize::Size32, true),
+                ALUOp::Sub64 => ("sub", OperandSize::Size64, true),
+                ALUOp::Orr32 => ("orr", OperandSize::Size32, true),
+                ALUOp::Orr64 => ("orr", OperandSize::Size64, true),
+                ALUOp::And32 => ("and", OperandSize::Size32, true),
+                ALUOp::And64 => ("and", OperandSize::Size64, true),
+                ALUOp::AndS32 => ("ands", OperandSize::Size32, false),
+                ALUOp::AndS64 => ("ands", OperandSize::Size64, false),
+                ALUOp::Eor32 => ("eor", OperandSize::Size32, true),
+                ALUOp::Eor64 => ("eor", OperandSize::Size64, true),
+                ALUOp::AddS32 => ("adds", OperandSize::Size32, false),
+                ALUOp::AddS64 => ("adds", OperandSize::Size64, false),
+                ALUOp::SubS32 => ("subs", OperandSize::Size32, false),
+                ALUOp::SubS64 => ("subs", OperandSize::Size64, false),
+                ALUOp::SMulH => ("smulh", OperandSize::Size64, false),
+                ALUOp::UMulH => ("umulh", OperandSize::Size64, false),
+                ALUOp::SDiv64 => ("sdiv", OperandSize::Size64, false),
+                ALUOp::UDiv64 => ("udiv", OperandSize::Size64, false),
+                ALUOp::AndNot32 => ("bic", OperandSize::Size32, false),
+                ALUOp::AndNot64 => ("bic", OperandSize::Size64, false),
+                ALUOp::OrrNot32 => ("orn", OperandSize::Size32, false),
+                ALUOp::OrrNot64 => ("orn", OperandSize::Size64, false),
+                ALUOp::EorNot32 => ("eon", OperandSize::Size32, false),
+                ALUOp::EorNot64 => ("eon", OperandSize::Size64, false),
+                ALUOp::RotR32 => ("ror", OperandSize::Size32, false),
+                ALUOp::RotR64 => ("ror", OperandSize::Size64, false),
+                ALUOp::Lsr32 => ("lsr", OperandSize::Size32, false),
+                ALUOp::Lsr64 => ("lsr", OperandSize::Size64, false),
+                ALUOp::Asr32 => ("asr", OperandSize::Size32, false),
+                ALUOp::Asr64 => ("asr", OperandSize::Size64, false),
+                ALUOp::Lsl32 => ("lsl", OperandSize::Size32, false),
+                ALUOp::Lsl64 => ("lsl", OperandSize::Size64, false),
+                ALUOp::Adc32 => ("adc", OperandSize::Size32, false),
+                ALUOp::Adc64 => ("adc", OperandSize::Size64, false),
+                ALUOp::AdcS32 => ("adcs", OperandSize::Size32, false),
+                ALUOp::AdcS64 => ("adcs", OperandSize::Size64, false),
+                ALUOp::Sbc32 => ("sbc", OperandSize::Size32, false),
+                ALUOp::Sbc64 => ("sbc", OperandSize::Size64, false),
+                ALUOp::SbcS32 => ("sbcs", OperandSize::Size32, false),
+                ALUOp::SbcS64 => ("sbcs", OperandSize::Size64, false),
             }
         }
 
@@ -3235,10 +3236,11 @@ impl Inst {
             &Inst::Nop0 => "nop-zero-len".to_string(),
             &Inst::Nop4 => "nop".to_string(),
             &Inst::AluRRR { alu_op, rd, rn, rm } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
-                let rm = show_ireg_sized(rm, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rn_x31_is_sp = x31_is_sp || alu_op == ALUOp::SubS32 || alu_op == ALUOp::SubS64;
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, rn_x31_is_sp);
+                let rm = show_ireg_sized_or_sp(rm, mb_rru, size, x31_is_sp);
                 format!("{} {}, {}, {}", op, rd, rn, rm)
             }
             &Inst::AluRRRR {
@@ -3267,9 +3269,10 @@ impl Inst {
                 rn,
                 ref imm12,
             } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rn_x31_is_sp = x31_is_sp || alu_op == ALUOp::SubS32 || alu_op == ALUOp::SubS64;
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, rn_x31_is_sp);
 
                 if imm12.bits == 0 && alu_op == ALUOp::Add64 {
                     // special-case MOV (used for moving into SP).
@@ -3285,9 +3288,9 @@ impl Inst {
                 rn,
                 ref imml,
             } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, x31_is_sp);
                 let imml = imml.show_rru(mb_rru);
                 format!("{} {}, {}, {}", op, rd, rn, imml)
             }
@@ -3297,9 +3300,10 @@ impl Inst {
                 rn,
                 ref immshift,
             } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rn_x31_is_sp = x31_is_sp || alu_op == ALUOp::SubS32 || alu_op == ALUOp::SubS64;
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, rn_x31_is_sp);
                 let immshift = immshift.show_rru(mb_rru);
                 format!("{} {}, {}, {}", op, rd, rn, immshift)
             }
@@ -3310,10 +3314,10 @@ impl Inst {
                 rm,
                 ref shiftop,
             } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
-                let rm = show_ireg_sized(rm, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, x31_is_sp);
+                let rm = show_ireg_sized_or_sp(rm, mb_rru, size, x31_is_sp);
                 let shiftop = shiftop.show_rru(mb_rru);
                 format!("{} {}, {}, {}, {}", op, rd, rn, rm, shiftop)
             }
@@ -3324,10 +3328,11 @@ impl Inst {
                 rm,
                 ref extendop,
             } => {
-                let (op, size) = op_name_size(alu_op);
-                let rd = show_ireg_sized(rd.to_reg(), mb_rru, size);
-                let rn = show_ireg_sized(rn, mb_rru, size);
-                let rm = show_ireg_sized(rm, mb_rru, size);
+                let (op, size, x31_is_sp) = op_name_size(alu_op);
+                let rn_x31_is_sp = x31_is_sp || alu_op == ALUOp::SubS32 || alu_op == ALUOp::SubS64;
+                let rd = show_ireg_sized_or_sp(rd.to_reg(), mb_rru, size, x31_is_sp);
+                let rn = show_ireg_sized_or_sp(rn, mb_rru, size, rn_x31_is_sp);
+                let rm = show_ireg_sized_or_sp(rm, mb_rru, size, x31_is_sp);
                 let extendop = extendop.show_rru(mb_rru);
                 format!("{} {}, {}, {}, {}", op, rd, rn, rm, extendop)
             }

@@ -220,8 +220,7 @@ fn test_aarch64_binemit() {
         },
         "5F00036B",
         // TODO: Display as cmp
-        // `sp` dest is actually `wzr`
-        "subs sp, w2, w3",
+        "subs wzr, w2, w3",
     ));
     insns.push((
         Inst::AluRRR {
@@ -272,8 +271,7 @@ fn test_aarch64_binemit() {
         },
         "BF0400B1",
         // TODO: Display as cmn.
-        // `sp` dest is actually `xzr`
-        "adds sp, x5, #1",
+        "adds xzr, x5, #1",
     ));
     insns.push((
         Inst::AluRRR {
@@ -916,7 +914,7 @@ fn test_aarch64_binemit() {
             extendop: ExtendOp::UXTX,
         },
         "FF632CEB",
-        "subs sp, sp, x12, UXTX",
+        "subs xzr, sp, x12, UXTX",
     ));
 
     insns.push((

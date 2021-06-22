@@ -261,6 +261,31 @@ pub fn show_ireg_sized(reg: Reg, mb_rru: Option<&RealRegUniverse>, size: Operand
     s
 }
 
+pub fn show_ireg_sized_or_sp(
+    reg: Reg,
+    mb_rru: Option<&RealRegUniverse>,
+    size: OperandSize,
+    x31_is_sp: bool,
+) -> String {
+    if reg == zero_reg() {
+        if x31_is_sp {
+            if size.is32() {
+                "wsp".into()
+            } else {
+                "sp".into()
+            }
+        } else {
+            if size.is32() {
+                "wzr".into()
+            } else {
+                "xzr".into()
+            }
+        }
+    } else {
+        show_ireg_sized(reg, mb_rru, size)
+    }
+}
+
 /// Show a vector register used in a scalar context.
 pub fn show_vreg_scalar(reg: Reg, mb_rru: Option<&RealRegUniverse>, size: ScalarSize) -> String {
     let mut s = reg.show_rru(mb_rru);
