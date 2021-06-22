@@ -7,13 +7,7 @@ block0(v0: i64):
     return v1
 }
 
-; check: pushq   %rbp
-; check: movq    %rsp, %rbp
-; check: tzcntq  %rdi, %rsi
-; check: movq    %rsi, %rax
-; check: movq    %rbp, %rsp
-; check: popq    %rbp
-; check: ret
+; check: tzcntq
 
 function %ctz(i32) -> i32 {
 block0(v0: i32):
@@ -21,10 +15,4 @@ block0(v0: i32):
     return v1
 }
 
-; check: pushq   %rbp
-; check: movq    %rsp, %rbp
-; check: tzcntl  %edi, %esi
-; check: movq    %rsi, %rax
-; check: movq    %rbp, %rsp
-; check: popq    %rbp
-; check: ret
+; check: tzcntl
