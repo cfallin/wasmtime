@@ -1,12 +1,16 @@
 test compile
 target x86_64 machinst
 
+; regex: REG=%r\S+
+; regex: XMM=%xmm\d+
+
 ;; system_v has first param in %rdi, fascall in %rcx
 function %one_arg(i32) system_v {
     sig0 = (i32) windows_fastcall
 block0(v0: i32):
-    ; check:  movq    %rdi, %rcx
-    ; nextln: call    *%rdi
+    ; check:  movq    %rdi, $(r1=$REG)
+    ; check:  movq    $r1, %rcx
+    ; nextln: call    *$r1
     call_indirect sig0, v0(v0)
     return
 }
@@ -16,16 +20,17 @@ function %two_args(i32, f32) system_v {
     sig0 = (i32, f32) windows_fastcall
     sig1 = (i32, f32) system_v
 block0(v0: i32, v1: f32):
-    ; check:  movq    %rdi, %rsi
-    ; check:  movaps  %xmm0, %xmm6
-    ; check:  movq    %rsi, %rcx
-    ; nextln: movaps  %xmm6, %xmm1
-    ; nextln: call    *%rsi
+    ; check:  movq    %rdi, $(r1=$REG)
+    ; check:  movdqa  %xmm0, %xmm6
+    ; check:  movq    $r1, %rcx
+    ; check:  movq    $r1, %rdi
+    ; nextln: movdqa  %xmm6, %xmm1
+    ; nextln: call    *%rdi
     call_indirect sig0, v0(v0, v1)
 
-    ; check:  movq    %rsi, %rdi
-    ; nextln: movaps  %xmm6, %xmm0
-    ; nextln: call    *%rsi
+    ; check:  movq    %rdi, $(r2=$REG)
+    ; nextln: movdqa  %xmm6, %xmm0
+    ; nextln: call    *$r2
     call_indirect sig1, v0(v0, v1)
     return
 }
@@ -91,50 +96,37 @@ block0(
       v6: f64, v7: f64, v8:f64, v9:f64, v10:f64, v11:f64, v12:f64, v13:f64,
       v14:i64, v15:i32, v16:f32, v17:f64
 ):
-    ; check:  pushq   %rbp
-    ; nextln: movq    %rsp, %rbp
-    ; nextln: subq    $$32, %rsp
-    ; nextln: movq    %r12, 0(%rsp)
-    ; nextln: movq    %r13, 8(%rsp)
-    ; nextln: movq    %r14, 16(%rsp)
-    ; nextln: movq    %rdx, %rax
-    ; nextln: movq    %rcx, %r10
-    ; nextln: movq    %r8, %r11
-    ; nextln: movq    %r9, %r12
-    ; nextln: movq    16(%rbp), %r13
-    ; nextln: movq    24(%rbp), %r14
-    ; nextln: movss   32(%rbp), %xmm8
-    ; nextln: movsd   40(%rbp), %xmm9
-    ; nextln: subq    $$144, %rsp
-    ; nextln: virtual_sp_offset_adjust 144
-    ; nextln: movq    %rdi, %rcx
-    ; nextln: movq    %rsi, %rdx
-    ; nextln: movq    %rax, %r8
-    ; nextln: movq    %r10, %r9
-    ; nextln: movq    %r11, 32(%rsp)
-    ; nextln: movq    %r12, 40(%rsp)
-    ; nextln: movsd   %xmm0, 48(%rsp)
-    ; nextln: movsd   %xmm1, 56(%rsp)
-    ; nextln: movsd   %xmm2, 64(%rsp)
-    ; nextln: movsd   %xmm3, 72(%rsp)
-    ; nextln: movsd   %xmm4, 80(%rsp)
-    ; nextln: movsd   %xmm5, 88(%rsp)
-    ; nextln: movsd   %xmm6, 96(%rsp)
-    ; nextln: movsd   %xmm7, 104(%rsp)
-    ; nextln: movq    %r13, 112(%rsp)
-    ; nextln: movl    %r14d, 120(%rsp)
-    ; nextln: movss   %xmm8, 128(%rsp)
-    ; nextln: movsd   %xmm9, 136(%rsp)
-    ; nextln: call    *%rdi
-    ; nextln: addq    $$144, %rsp
-    ; nextln: virtual_sp_offset_adjust -144
-    ; nextln: movq    0(%rsp), %r12
-    ; nextln: movq    8(%rsp), %r13
-    ; nextln: movq    16(%rsp), %r14
-    ; nextln: addq    $$32, %rsp
-    ; nextln: movq    %rbp, %rsp
-    ; nextln: popq    %rbp
-    ; nextln: ret
+
+    ; check:  movq    %rdx,
+    ; nextln: movq    %rcx,
+    ; nextln: movq    %r8,
+    ; nextln: movq    %r9,
+    ; nextln: movq    16(%rbp),
+    ; nextln: movq    24(%rbp),
+    ; nextln: movss   32(%rbp),
+    ; nextln: movsd   40(%rbp),
+    
+    ; check:  movq    $REG, %rcx
+    ; nextln: movq    $REG, %rdx
+    ; nextln: movq    $REG, %r8
+    ; nextln: movq    $REG, %r9
+    ; check:  movq    $REG, 32(%rsp)
+    ; check:  movq    $REG, 40(%rsp)
+    ; check:  movsd   $XMM, 48(%rsp)
+    ; check:  movsd   $XMM, 56(%rsp)
+    ; check:  movsd   $XMM, 64(%rsp)
+    ; check:  movsd   $XMM, 72(%rsp)
+    ; check:  movsd   $XMM, 80(%rsp)
+    ; check:  movsd   $XMM, 88(%rsp)
+    ; check:  movsd   $XMM, 96(%rsp)
+    ; check:  movsd   $XMM, 104(%rsp)
+    ; check:  movq    $REG, 112(%rsp)
+    ; check:  movl    $REG, 120(%rsp)
+    ; check:  movss   $XMM, 128(%rsp)
+    ; check:  movsd   $XMM, 136(%rsp)
+    
+    ; check:  call    *$REG
+
     call_indirect sig0, v0(
       v0, v1, v2, v3,
       v4, v5, v6, v7,
@@ -153,23 +145,21 @@ block0(
 function %many_ints(i64, i64, i64, i64, i64) system_v {
     sig0 = (i64, i64, i64, i64, i64) windows_fastcall
 block0(v0: i64, v1:i64, v2:i64, v3:i64, v4:i64):
-    ; check:  pushq   %rbp
-    ; nextln: movq    %rsp, %rbp
-    ; nextln: movq    %rdx, %rax
-    ; nextln: movq    %rcx, %r9
-    ; nextln: movq    %r8, %r10
-    ; nextln: subq    $$48, %rsp
-    ; nextln: virtual_sp_offset_adjust 48
-    ; nextln: movq    %rdi, %rcx
-    ; nextln: movq    %rsi, %rdx
-    ; nextln: movq    %rax, %r8
-    ; nextln: movq    %r10, 32(%rsp)
-    ; nextln: call    *%rdi
-    ; nextln: addq    $$48, %rsp
-    ; nextln: virtual_sp_offset_adjust -48
-    ; nextln: movq    %rbp, %rsp
-    ; nextln: popq    %rbp
-    ; nextln: ret
+
+; check:  movq    %rdi, %rax
+; nextln: movq    %rsi, %r10
+; nextln: movq    %rdx, %rsi
+; nextln: movq    %rcx, %r9
+; nextln: movq    %r8, %rdi
+; nextln: subq    $$48, %rsp
+; nextln: virtual_sp_offset_adjust 48
+; nextln: movq    %rax, %rcx
+; nextln: movq    %r10, %rdx
+; nextln: movq    %rsi, %r8
+; nextln: movq    %rdi, %r10
+; nextln: movq    %r10, 32(%rsp)
+; nextln: call    *%rax
+
     call_indirect sig0, v0(v0, v1, v2, v3, v4)
     return
 }
@@ -177,31 +167,31 @@ block0(v0: i64, v1:i64, v2:i64, v3:i64, v4:i64):
 function %many_args2(i32, f32, i64, f64, i32, i32, i32, f32, f64, f32, f64) system_v {
     sig0 = (i32, f32, i64, f64, i32, i32, i32, f32, f64, f32, f64) windows_fastcall
 block0(v0: i32, v1: f32, v2: i64, v3: f64, v4: i32, v5: i32, v6: i32, v7: f32, v8: f64, v9: f32, v10: f64):
-    ; check:   pushq   %rbp
-    ; nextln:  movq    %rsp, %rbp
-    ; nextln:  movaps  %xmm1, %xmm6
-    ; nextln:  movq    %rcx, %rax
-    ; nextln:  movq    %r8, %r9
-    ; nextln:  movaps  %xmm3, %xmm7
-    ; nextln:  subq    $$96, %rsp
-    ; nextln:  virtual_sp_offset_adjust 96
-    ; nextln:  movq    %rdi, %rcx
-    ; nextln:  movaps  %xmm0, %xmm1
-    ; nextln:  movq    %rsi, %r8
-    ; nextln:  movaps  %xmm6, %xmm3
-    ; nextln:  movl    %edx, 32(%rsp)
-    ; nextln:  movl    %eax, 40(%rsp)
-    ; nextln:  movl    %r9d, 48(%rsp)
-    ; nextln:  movss   %xmm2, 56(%rsp)
-    ; nextln:  movsd   %xmm7, 64(%rsp)
-    ; nextln:  movss   %xmm4, 72(%rsp)
-    ; nextln:  movsd   %xmm5, 80(%rsp)
-    ; nextln:  call    *%rdi
-    ; nextln:  addq    $$96, %rsp
-    ; nextln:  virtual_sp_offset_adjust -96
-    ; nextln:  movq    %rbp, %rsp
-    ; nextln:  popq    %rbp
-    ; nextln:  ret
+
+; check:  pushq   %rbp
+; nextln: movq    %rsp, %rbp
+; nextln: movq    %rdi, %r9
+; nextln: movdqa  %xmm1, %xmm7
+; nextln: movq    %rcx, %rax
+; nextln: movq    %r8, %rdi
+; nextln: movdqa  %xmm3, %xmm6
+; nextln: subq    $$96, %rsp
+; nextln: virtual_sp_offset_adjust 96
+; nextln: movq    %r9, %rcx
+; nextln: movq    %rsi, %r8
+; nextln: movdqa  %xmm0, %xmm1
+; nextln: movdqa  %xmm7, %xmm3
+; nextln: movl    %edx, 32(%rsp)
+; nextln: movl    %eax, 40(%rsp)
+; nextln: movl    %edi, 48(%rsp)
+; nextln: movss   %xmm2, 56(%rsp)
+; nextln: movsd   %xmm6, 64(%rsp)
+; nextln: movss   %xmm4, 72(%rsp)
+; nextln: movsd   %xmm5, 80(%rsp)
+; nextln: movq    %r9, %rax
+; nextln: call    *%rax
+
+
     call_indirect sig0, v0(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10)
     return
 }
@@ -209,9 +199,8 @@ block0(v0: i32, v1: f32, v2: i64, v3: f64, v4: i32, v5: i32, v6: i32, v7: f32, v
 function %wasmtime_mix1(i32) wasmtime_system_v {
     sig0 = (i32) system_v
 block0(v0: i32):
-    ; check:  movq    %rdi, %rsi
-    ; nextln: movq    %rsi, %rdi
-    ; nextln: call    *%rsi
+    ; check:  movq    %rdi, %rdx
+    ; nextln: call    *%rdx
     call_indirect sig0, v0(v0)
     return
 }
@@ -219,9 +208,8 @@ block0(v0: i32):
 function %wasmtime_mix2(i32) system_v {
     sig0 = (i32) wasmtime_system_v
 block0(v0: i32):
-    ; check:  movq    %rdi, %rsi
-    ; nextln: movq    %rsi, %rdi
-    ; nextln: call    *%rsi
+    ; check:  movq    %rdi, %rdx
+    ; nextln: call    *%rdx
     call_indirect sig0, v0(v0)
     return
 }
@@ -231,15 +219,14 @@ function %wasmtime_mix2() -> i32, i32 system_v {
 block0:
     ; check:  pushq   %rbp
     ; nextln: movq    %rsp, %rbp
-    ; nextln: movl    $$1, %esi
+    ; nextln: movl    $$1, %r8d
     ; nextln: subq    $$16, %rsp
     ; nextln: virtual_sp_offset_adjust 16
     ; nextln: lea     0(%rsp), %rdi
-    ; nextln: call    *%rsi
-    ; nextln: movq    0(%rsp), %rsi
+    ; nextln: call    *%r8
+    ; nextln: movq    0(%rsp), %rdx
     ; nextln: addq    $$16, %rsp
     ; nextln: virtual_sp_offset_adjust -16
-    ; nextln: movq    %rsi, %rdx
     ; nextln: movq    %rbp, %rsp
     ; nextln: popq    %rbp
     ; nextln: ret
@@ -254,12 +241,13 @@ block0:
     ; check:  pushq   %rbp
     ; nextln: movq    %rsp, %rbp
     ; nextln: subq    $$16, %rsp
-    ; nextln: movq    %r12, 0(%rsp)
-    ; nextln: movq    %rdi, %r12
-    ; nextln: movl    $$1, %esi
-    ; nextln: call    *%rsi
-    ; nextln: movl    %edx, 0(%r12)
-    ; nextln: movq    0(%rsp), %r12
+    ; nextln: movq    %rbx, 0(%rsp)
+    ; nextln: movq    %rdi, %rbx
+    ; nextln: movl    $$1, %r10d
+    ; nextln: call    *%r10
+    ; nextln: movq    %rbx, %rdi
+    ; nextln: movl    %edx, 0(%rdi)
+    ; nextln: movq    0(%rsp), %rbx
     ; nextln: addq    $$16, %rsp
     ; nextln: movq    %rbp, %rsp
     ; nextln: popq    %rbp
@@ -272,26 +260,22 @@ block0:
 function %wasmtime_mix4() -> i32, i64, i32 wasmtime_system_v {
     sig0 = () -> i32, i64, i32 system_v
 block0:
-    ; check:  pushq   %rbp
-    ; nextln: movq    %rsp, %rbp
-    ; nextln: subq    $$16, %rsp
-    ; nextln: movq    %r12, 0(%rsp)
-    ; nextln: movq    %rdi, %r12
-    ; nextln: movl    $$1, %esi
-    ; nextln: subq    $$16, %rsp
-    ; nextln: virtual_sp_offset_adjust 16
-    ; nextln: lea     0(%rsp), %rdi
-    ; nextln: call    *%rsi
-    ; nextln: movq    0(%rsp), %rsi
-    ; nextln: addq    $$16, %rsp
-    ; nextln: virtual_sp_offset_adjust -16
-    ; nextln: movq    %rdx, 0(%r12)
-    ; nextln: movl    %esi, 8(%r12)
-    ; nextln: movq    0(%rsp), %r12
-    ; nextln: addq    $$16, %rsp
-    ; nextln: movq    %rbp, %rsp
-    ; nextln: popq    %rbp
-    ; nextln: ret
+; check:  movq    %r13, 0(%rsp)
+; nextln: movq    %rdi, %r13
+; nextln: movl    $$1, %eax
+; nextln: subq    $$16, %rsp
+; nextln: virtual_sp_offset_adjust 16
+; nextln: lea     0(%rsp), %rdi
+; nextln: call    *%rax
+; nextln: movq    %rdx, %r8
+; nextln: movq    0(%rsp), %rdx
+; nextln: addq    $$16, %rsp
+; nextln: virtual_sp_offset_adjust -16
+; nextln: movq    %r8, %rcx
+; nextln: movq    %r13, %rdi
+; nextln: movq    %rcx, 0(%rdi)
+; nextln: movl    %edx, 8(%rdi)
+
     v3 = iconst.i32 1
     v0, v1, v2 = call_indirect sig0, v3()
     return v0, v1, v2
@@ -300,21 +284,15 @@ block0:
 function %wasmtime_mix5() -> f32, i64, i32, f32 wasmtime_system_v {
     sig0 = () -> f32, i64, i32, f32 system_v
 block0:
-    ; check:  pushq   %rbp
-    ; nextln: movq    %rsp, %rbp
-    ; nextln: subq    $$16, %rsp
-    ; nextln: movq    %r12, 0(%rsp)
-    ; nextln: movq    %rdi, %r12
-    ; nextln: movl    $$1, %esi
-    ; nextln: call    *%rsi
-    ; nextln: movq    %rax, 0(%r12)
-    ; nextln: movl    %edx, 8(%r12)
-    ; nextln: movss   %xmm1, 12(%r12)
-    ; nextln: movq    0(%rsp), %r12
-    ; nextln: addq    $$16, %rsp
-    ; nextln: movq    %rbp, %rsp
-    ; nextln: popq    %rbp
-    ; nextln: ret
+
+    ; check:  movq    %rdi, %r14
+    ; nextln: movl    $$1, %ecx
+    ; nextln: call    *%rcx
+    ; nextln: movq    %r14, %rdi
+    ; nextln: movq    %rax, 0(%rdi)
+    ; nextln: movl    %edx, 8(%rdi)
+    ; nextln: movss   %xmm1, 12(%rdi)
+
     v5 = iconst.i32 1
     v0, v1, v2, v3 = call_indirect sig0, v5()
     return v0, v1, v2, v3
@@ -323,21 +301,15 @@ block0:
 function %wasmtime_mix6(f32, i64, i32, f32) -> f32, i64, i32, f32 wasmtime_system_v {
     sig0 = (f32, i64, i32, f32) -> f32, i64, i32, f32 system_v
 block0(v0: f32, v1: i64, v2: i32, v3: f32):
-    ; check:  pushq   %rbp
-    ; nextln: movq    %rsp, %rbp
-    ; nextln: subq    $$16, %rsp
-    ; nextln: movq    %r12, 0(%rsp)
-    ; nextln: movq    %rdx, %r12
-    ; nextln: movl    $$1, %eax
-    ; nextln: call    *%rax
-    ; nextln: movq    %rax, 0(%r12)
-    ; nextln: movl    %edx, 8(%r12)
-    ; nextln: movss   %xmm1, 12(%r12)
-    ; nextln: movq    0(%rsp), %r12
-    ; nextln: addq    $$16, %rsp
-    ; nextln: movq    %rbp, %rsp
-    ; nextln: popq    %rbp
-    ; nextln: ret
+
+    ; check:  movq    %rdx, %r13
+    ; nextln: movl    $$1, %ecx
+    ; nextln: call    *%rcx
+    ; nextln: movq    %r13, %rcx
+    ; nextln: movq    %rax, 0(%rcx)
+    ; nextln: movl    %edx, 8(%rcx)
+    ; nextln: movss   %xmm1, 12(%rcx)
+
     v4 = iconst.i32 1
     v5, v6, v7, v8 = call_indirect sig0, v4(v0, v1, v2, v3)
     return v5, v6, v7, v8
