@@ -223,7 +223,7 @@ pub fn create_reg_universe(flags: &settings::Flags) -> RealRegUniverse {
     regs.push((fp_reg().to_real_reg(), "fp".to_string()));
     regs.push((link_reg().to_real_reg(), "lr".to_string()));
     assert_eq!(zero_reg(), stack_reg());
-    regs.push((zero_reg().to_real_reg(), "sp".to_string()));
+    regs.push((zero_reg().to_real_reg(), "xzr".to_string()));
 
     // Assert sanity: the indices in the register structs must match their
     // actual indices in the array.

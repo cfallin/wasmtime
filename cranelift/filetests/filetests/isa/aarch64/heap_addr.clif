@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 set unwind_info=false
 set enable_heap_access_spectre_mitigation=true
 target aarch64

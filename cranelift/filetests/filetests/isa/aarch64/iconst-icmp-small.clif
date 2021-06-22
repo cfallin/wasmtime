@@ -2,6 +2,7 @@
 ; would result in an out-of-bounds panic. (#2147)
 
 test compile
+set regalloc=backtracking
 set unwind_info=false
 target aarch64
 

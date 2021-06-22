@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 set tls_model=elf_gd
 target x86_64 machinst
 

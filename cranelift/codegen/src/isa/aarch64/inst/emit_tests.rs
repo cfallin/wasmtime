@@ -5595,8 +5595,7 @@ fn test_aarch64_binemit() {
             ty: I32,
         },
         "FFFFE088",
-        // first `sp` is actually `wzr`
-        "casal w0, sp, [sp]",
+        "casal w0, wzr, [sp]",
     ));
     insns.push((
         Inst::AtomicCAS {

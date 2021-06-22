@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 set unwind_info=false
 set enable_probestack=false
 target aarch64

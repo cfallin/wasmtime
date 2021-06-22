@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target x86_64 machinst has_lzcnt
 
 function %clz(i64) -> i64 {

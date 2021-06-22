@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target x86_64 machinst has_popcnt has_sse42
 
 function %popcnt(i64) -> i64 {

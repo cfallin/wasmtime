@@ -397,27 +397,45 @@ impl PrettyPrint for AMode {
         match self {
             &AMode::Unscaled(reg, simm9) => {
                 if simm9.value != 0 {
-                    format!("[{}, {}]", reg.show_rru(mb_rru), simm9.show_rru(mb_rru))
+                    format!(
+                        "[{}, {}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true),
+                        simm9.show_rru(mb_rru)
+                    )
                 } else {
-                    format!("[{}]", reg.show_rru(mb_rru))
+                    format!(
+                        "[{}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true)
+                    )
                 }
             }
             &AMode::UnsignedOffset(reg, uimm12) => {
                 if uimm12.value != 0 {
-                    format!("[{}, {}]", reg.show_rru(mb_rru), uimm12.show_rru(mb_rru))
+                    format!(
+                        "[{}, {}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true),
+                        uimm12.show_rru(mb_rru)
+                    )
                 } else {
-                    format!("[{}]", reg.show_rru(mb_rru))
+                    format!(
+                        "[{}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true)
+                    )
                 }
             }
             &AMode::RegReg(r1, r2) => {
-                format!("[{}, {}]", r1.show_rru(mb_rru), r2.show_rru(mb_rru),)
+                format!(
+                    "[{}, {}]",
+                    show_ireg_sized_or_sp(r1, mb_rru, OperandSize::Size64, true),
+                    show_ireg_sized_or_sp(r2, mb_rru, OperandSize::Size64, true)
+                )
             }
             &AMode::RegScaled(r1, r2, ty) => {
                 let shift = shift_for_type(ty);
                 format!(
                     "[{}, {}, LSL #{}]",
-                    r1.show_rru(mb_rru),
-                    r2.show_rru(mb_rru),
+                    show_ireg_sized_or_sp(r1, mb_rru, OperandSize::Size64, true),
+                    show_ireg_sized_or_sp(r2, mb_rru, OperandSize::Size64, true),
                     shift,
                 )
             }
@@ -430,8 +448,8 @@ impl PrettyPrint for AMode {
                 let op = op.show_rru(mb_rru);
                 format!(
                     "[{}, {}, {} #{}]",
-                    r1.show_rru(mb_rru),
-                    show_ireg_sized(r2, mb_rru, size),
+                    show_ireg_sized_or_sp(r1, mb_rru, OperandSize::Size64, true),
+                    show_ireg_sized_or_sp(r2, mb_rru, size, true),
                     op,
                     shift
                 )
@@ -444,20 +462,20 @@ impl PrettyPrint for AMode {
                 let op = op.show_rru(mb_rru);
                 format!(
                     "[{}, {}, {}]",
-                    r1.show_rru(mb_rru),
-                    show_ireg_sized(r2, mb_rru, size),
+                    show_ireg_sized_or_sp(r1, mb_rru, OperandSize::Size64, true),
+                    show_ireg_sized_or_sp(r2, mb_rru, size, true),
                     op,
                 )
             }
             &AMode::Label(ref label) => label.show_rru(mb_rru),
             &AMode::PreIndexed(r, simm9) => format!(
                 "[{}, {}]!",
-                r.to_reg().show_rru(mb_rru),
+                show_ireg_sized_or_sp(r.to_reg(), mb_rru, OperandSize::Size64, true),
                 simm9.show_rru(mb_rru)
             ),
             &AMode::PostIndexed(r, simm9) => format!(
                 "[{}], {}",
-                r.to_reg().show_rru(mb_rru),
+                show_ireg_sized_or_sp(r.to_reg(), mb_rru, OperandSize::Size64, true),
                 simm9.show_rru(mb_rru)
             ),
             // Eliminated by `mem_finalize()`.
@@ -476,19 +494,26 @@ impl PrettyPrint for PairAMode {
         match self {
             &PairAMode::SignedOffset(reg, simm7) => {
                 if simm7.value != 0 {
-                    format!("[{}, {}]", reg.show_rru(mb_rru), simm7.show_rru(mb_rru))
+                    format!(
+                        "[{}, {}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true),
+                        simm7.show_rru(mb_rru)
+                    )
                 } else {
-                    format!("[{}]", reg.show_rru(mb_rru))
+                    format!(
+                        "[{}]",
+                        show_ireg_sized_or_sp(reg, mb_rru, OperandSize::Size64, true)
+                    )
                 }
             }
             &PairAMode::PreIndexed(reg, simm7) => format!(
                 "[{}, {}]!",
-                reg.to_reg().show_rru(mb_rru),
+                show_ireg_sized_or_sp(reg.to_reg(), mb_rru, OperandSize::Size64, true),
                 simm7.show_rru(mb_rru)
             ),
             &PairAMode::PostIndexed(reg, simm7) => format!(
                 "[{}], {}",
-                reg.to_reg().show_rru(mb_rru),
+                show_ireg_sized_or_sp(reg.to_reg(), mb_rru, OperandSize::Size64, true),
                 simm7.show_rru(mb_rru)
             ),
         }

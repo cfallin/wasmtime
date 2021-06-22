@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target x86_64 machinst
 
 function %f(i32, i64 vmctx) -> i64 {

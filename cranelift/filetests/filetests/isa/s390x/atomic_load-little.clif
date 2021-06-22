@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target s390x
 
 function %atomic_load_i64(i64) -> i64 {

@@ -1,5 +1,5 @@
-
 test compile
+set regalloc=backtracking
 target s390x
 
 ; FIXME: add immediate operand versions

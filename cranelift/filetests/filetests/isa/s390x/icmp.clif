@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target s390x
 
 function %icmp_slt_i64(i64, i64) -> b1 {

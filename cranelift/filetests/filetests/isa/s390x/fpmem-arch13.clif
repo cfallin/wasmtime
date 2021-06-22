@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 target s390x arch13
 
 function %load_f64_little(i64) -> f64 {

@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 set enable_simd
 target x86_64 machinst has_ssse3 has_sse41
 

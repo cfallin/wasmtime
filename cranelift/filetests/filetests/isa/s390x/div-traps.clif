@@ -1,4 +1,5 @@
 test compile
+set regalloc=backtracking
 set avoid_div_traps=1
 target s390x
 
