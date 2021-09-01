@@ -159,7 +159,7 @@ fn write_testsuite_tests(
 
     writeln!(out, "#[test]")?;
     // Ignore when using QEMU for running tests (limited memory).
-    if ignore(testsuite, &testname, strategy) || (pooling && cfg!(target_os = "openbsd")) {
+    if ignore(testsuite, &testname, strategy, pooling) {
         writeln!(out, "#[ignore]")?;
     }
 
@@ -183,7 +183,7 @@ fn write_testsuite_tests(
 }
 
 /// Ignore tests that aren't supported yet.
-fn ignore(testsuite: &str, testname: &str, strategy: &str) -> bool {
+fn ignore(testsuite: &str, testname: &str, strategy: &str, pooling: bool) -> bool {
     match strategy {
         #[cfg(feature = "lightbeam")]
         "Lightbeam" => match (testsuite, testname) {
@@ -201,9 +201,16 @@ fn ignore(testsuite: &str, testname: &str, strategy: &str) -> bool {
             ("reference_types", _) if cfg!(feature = "old-x86-backend") => return true,
             // No simd support yet for s390x.
             ("simd", _) if platform_is_s390x() => return true,
+            // Memory64 test that allocates >4GiB fails on OpenBSD due to default rlimits.
+            ("memory64", "more_than_4gb") if cfg!(target_os = "openbsd") => return true,
             _ => {}
         },
         _ => panic!("unrecognized strategy"),
+    }
+
+    // Pooling instance allocator is not supported on OpenBSD.
+    if pooling && cfg!(target_os = "openbsd") {
+        return true;
     }
 
     false
