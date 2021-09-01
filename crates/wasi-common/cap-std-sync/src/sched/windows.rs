@@ -9,7 +9,7 @@
 // taken the time to improve it. See bug #2880.
 
 use anyhow::Context;
-use io_lifetimes::AsHandle;
+use rsix::io_lifetimes::AsHandle;
 use std::ops::Deref;
 use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};

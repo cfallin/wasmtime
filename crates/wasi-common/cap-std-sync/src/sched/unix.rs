@@ -1,5 +1,5 @@
 use cap_std::time::Duration;
-use io_lifetimes::{AsFd, BorrowedFd};
+use rsix::io_lifetimes::{AsFd, BorrowedFd};
 use rsix::io::{PollFd, PollFdVec, PollFlags};
 use std::convert::TryInto;
 use wasi_common::{

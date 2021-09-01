@@ -153,7 +153,7 @@ pub fn filetype_from(ft: &cap_std::fs::FileType) -> FileType {
 }
 
 #[cfg(windows)]
-use io_lifetimes::{AsHandle, BorrowedHandle};
+use rsix::io_lifetimes::{AsHandle, BorrowedHandle};
 #[cfg(windows)]
 impl AsHandle for File {
     fn as_handle(&self) -> BorrowedHandle<'_> {
@@ -162,7 +162,7 @@ impl AsHandle for File {
 }
 
 #[cfg(unix)]
-use io_lifetimes::{AsFd, BorrowedFd};
+use rsix::io_lifetimes::{AsFd, BorrowedFd};
 #[cfg(unix)]
 impl AsFd for File {
     fn as_fd(&self) -> BorrowedFd<'_> {

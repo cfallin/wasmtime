@@ -7,6 +7,10 @@
 //! Using the pooling instance allocator can speed up module instantiation
 //! when modules can be constrained based on configurable limits.
 
+// This allocator is unsupported on some platforms; silence warnings about code
+// that cannot be called as a result.
+#![cfg_attr(target_os = "openbsd", allow(dead_code, unused_imports))]
+
 use super::borrow_limiter;
 use super::{
     initialize_instance, initialize_vmcontext, InstanceAllocationRequest, InstanceAllocator,
@@ -351,9 +355,9 @@ impl InstancePool {
 
     #[cfg(target_os = "openbsd")]
     fn new(
-        module_limits: &ModuleLimits,
-        instance_limits: &InstanceLimits,
-        tunables: &Tunables,
+        _module_limits: &ModuleLimits,
+        _instance_limits: &InstanceLimits,
+        _tunables: &Tunables,
     ) -> Result<Self> {
         panic!("Pooling allocator not supported on OpenBSD due to limits in stack mmap'ing.");
     }

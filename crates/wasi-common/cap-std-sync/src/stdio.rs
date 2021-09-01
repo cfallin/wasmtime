@@ -1,6 +1,6 @@
 use crate::file::convert_systimespec;
 use fs_set_times::SetTimes;
-use io_lifetimes::AsFilelike;
+use rsix::io_lifetimes::AsFilelike;
 use std::any::Any;
 use std::convert::TryInto;
 use std::fs::File;
@@ -9,9 +9,9 @@ use std::io::{Read, Write};
 use system_interface::io::ReadReady;
 
 #[cfg(unix)]
-use io_lifetimes::{AsFd, BorrowedFd};
+use rsix::io_lifetimes::{AsFd, BorrowedFd};
 #[cfg(windows)]
-use io_lifetimes::{AsHandle, BorrowedHandle};
+use rsix::io_lifetimes::{AsHandle, BorrowedHandle};
 use wasi_common::{
     file::{Advice, FdFlags, FileType, Filestat, WasiFile},
     Error, ErrorExt,
