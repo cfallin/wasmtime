@@ -514,3 +514,29 @@ jobs:
     - run: |
         rustc scripts/publish.rs
         ./publish verify
+
+  # See bytecodealliance/rsix#36, from which this is largely copied.
+  check-tier3:
+    name: Check for compilation errors on Tier 3 platforms
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        build: [nightly]
+        include:
+          - build: nightly
+            os: ubuntu-latest
+            rust: nightly
+
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        submodules: true
+    - uses: ./.github/actions/install-rust
+      with:
+        toolchain: ${{ matrix.rust }}
+    - env:
+      RUSTFLAGS: -A improper_ctypes_definitions
+    - run: rustup component add rust-src
+    - run: cargo check -Z build-std=core,alloc,std --target x86_64-unknown-openbsd --all-targets
+    - run: cargo check -Z build-std=core,alloc,std --target x86_64-unknown-freebsd --all-targets
+    - run: cargo check -Z build-std=core,alloc,std --target x86_64-unknown-netbsd --all-targets
