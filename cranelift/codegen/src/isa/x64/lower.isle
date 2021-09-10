@@ -1,0 +1,36 @@
+;; Lowering rules for x86 in ISLE.
+
+;; The `Lower` term always returns a `Reg`, even for instructions that
+;; don't hvae an output (stores, branches). Perhaps we should have an
+;; enum type or separate lowering entry points to differentiate
+;; value-producing vs side-effecting-only instructions at the type
+;; level?
+(decl Lower (Inst) Reg)
+
+(rule
+ (Lower (Iadd a (InputConst k)))
+ (X86Add (InputToReg a)
+         (RegMemImm.Imm k)))
+(rule
+ (Lower (Iadd (InputConst k) b))
+ (X86Add (InputToReg b)
+         (RegMemImm.Imm k)))
+(rule
+ (Lower (Iadd a b))
+ (X86Add (InputToReg a)
+         (RegMemImm.Reg (InputToReg b))))
+
+(rule
+ (Lower (Iadd a (InputSourceInst (Load addr off))))
+ (X86Add
+  (InputToReg a)
+  (RegMemImm.Mem (Mem.BaseImm (InputToReg addr) off))))
+(rule
+ (Lower (Iadd (InputSourceInst (Load addr off)) a))
+ (X86Add
+  (InputToReg a)
+  (RegMemImm.Mem (Mem.BaseImm (InputToReg addr) off))))
+
+(rule
+ (Lower (Isub a b))
+ (X86Sub (InputToReg a) (InputToReg b)))

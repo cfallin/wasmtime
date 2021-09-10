@@ -1,0 +1,26 @@
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; CLIF ISA ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; External enum: Opcode. We specify a subset of opcodes here, just
+;; enough so that we have the ones we need. ISLE never generates an
+;; exhaustive match or an enum definition so it's OK to be missing
+;; some. Ideally we would eventually generate this list automatically
+;; from instruction definitions.
+(type Opcode extern (enum Iadd Isub Load))
+
+;; Helper extractor macros for particular opcodes. These could be
+;; generated as well.
+(decl Iadd (InstInput InstInput) Inst)
+(extractor
+ (Iadd a b)
+ (Inst2 (Opcode.Iadd) a b))
+(decl Isub (InstInput InstInput) Inst)
+(extractor
+ (Isub a b)
+ (Inst2 (Opcode.Iadd) a b))
+(decl Load (InstInput i64) Inst)
+(extractor
+ (Load addr offset)
+ (and
+   (Inst1 (Opcode.Load) addr)
+   (InstLoadOffset offset)))

@@ -1,0 +1,27 @@
+;; Machine-specific ISLE definitions.
+
+;; We define an external constructor for each MachInst enum
+;; branch. For two-address forms on x86 (with a dest reg that is also
+;; a source), we emulate a three-address form by implicitly doing a
+;; copy; this is what our old handwritten backend (that this DSL
+;; replaces) always does in practice, and the regalloc elides moves
+;; where possible.
+(decl X86Add (Reg RegMemImm) Reg)
+(extern constructor X86Add machinst_x86_add)
+(decl X86Sub (Reg Reg) Reg)
+(extern constructor X86Sub machinst_x86_sub)
+
+(type RegMemImm extern (enum
+                        (Reg (reg Reg))
+                        (Mem (mem Mem))
+                        (Imm (imm i64))))
+(type Mem extern (enum
+                  (Base (base Reg))
+                  (BaseOffset (base Reg) (offset Reg))
+                  (BaseImm (base Reg) (imm i64))
+                  (BaseOffsetImm (base Reg) (offset Reg) (imm i64))
+                  (BaseOffsetScaledImm (base Reg)
+                                       (offset Reg)
+                                       (scale MemScale)
+                                       (imm i64))))
+(type MemScale extern (enum Scale1 Scale2 Scale4 Scale8))

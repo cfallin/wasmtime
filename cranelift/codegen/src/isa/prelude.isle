@@ -1,0 +1,82 @@
+;; This is a prelude of standard definitions for ISLE, the
+;; instruction-selector DSL, as we use it bound to our interfaces.
+
+;; Primitives. Any type that is `Copy` in Rust can be a primitive in
+;; ISLE.
+(type bool (primitive bool))
+(type u32 (primitive u32))
+(type i64 (primitive i64))
+(type usize (primitive usize))
+
+;; ID-based identifiers.
+(type Inst (primitive Inst))
+(type Reg (primitive Reg))
+(type Type (primitive Type))
+
+;; TODO: allow exposing extern constants. For now we use external
+;; constructors for this.
+(decl I8 () Type)
+(extern constructor I8 get_i8)
+(decl I16 () Type)
+(extern constructor I16 get_i16)
+(decl I32 () Type)
+(extern constructor I32 get_i32)
+(decl I64 () Type)
+(extern constructor I64 get_i64)
+
+;; Represents an input to an instruction.
+(type InstInput (enum
+                 ;; One-variant enum is like a struct.
+                 (t (inst Inst) (output usize))))
+
+;; Extractor API to query an Inst.
+(decl InstInput (InstInput usize) Inst)
+(extern extractor infallible InstInput create_inst_input (out in))
+(decl InputSourceInst (Inst) InstInput)
+(extern extractor InputSourceInst input_source_inst)
+(decl InputConst (i64) InstInput)
+(extern extractor InputConst input_source_const)
+(decl InputToReg (InstInput) Reg)
+(extern constructor InputToReg put_input_in_reg)
+(decl InstOpcode (Opcode) Inst)
+(extern extractor infallible InstOpcode get_opcode)
+(decl InstLoadOffset (i64) Inst)
+(extern extractor InstLoadOffset get_load_offset)
+(decl InputType (Type) InstInput)
+(extern extractor infallible InputType input_type)
+(decl OutputType (Type) Inst)
+(extern extractor infallible OutputType output_type)
+
+;; External constructor to allocate a temp.
+(decl Temp (Type) Reg)
+(extern constructor Temp alloc_tmp)
+
+;; Helper extractor macros for N-ary instructions.
+(decl Inst0 (Opcode) Inst)
+(extractor
+ (Inst0 op)
+ (InstOpcode op))
+
+(decl Inst1 (Opcode InstInput) Inst)
+(extractor
+ (Inst1 op a)
+ (and
+  (InstOpcode op)
+  (InstInput a <0)))
+
+(decl Inst2 (Opcode InstInput InstInput) Inst)
+(extractor
+ (Inst2 op a b)
+ (and
+  (InstOpcode op)
+  (InstInput a <0)
+  (InstInput b <1)))
+
+(decl Inst3 (Opcode InstInput InstInput InstInput) Inst)
+(extractor
+ (Inst3 op a b c)
+ (and
+  (InstOpcode op)
+  (InstInput a <0)
+  (InstInput b <1)
+  (InstInput c <2)))
