@@ -99,6 +99,38 @@ fn main() {
         .unwrap()
     }
 
+    {
+        let isle_files = vec![
+            "src/isa/prelude.isle",
+            "src/isa/clif.isle",
+            "src/isa/x64/machine.isle",
+            "src/isa/x64/lower.isle",
+        ];
+
+        for file in &isle_files {
+            println!(
+                "cargo:rerun-if-changed={}",
+                crate_dir.join(file).to_str().unwrap(),
+            );
+        }
+
+        let isle_files = isle_files.iter().map(|s| s.to_string()).collect();
+        let lexer = isle::lexer::Lexer::from_files(isle_files).expect("Could not open ISLE files");
+        let mut parser = isle::parser::Parser::new(lexer);
+        let defs = parser.parse_defs().expect("Could not parse ISLE files");
+        let code = match isle::compile::compile(&defs) {
+            Ok(code) => code,
+            Err(errors) => {
+                for error in errors {
+                    eprintln!("{}", error);
+                }
+                panic!("Could not compile ISLE DSL code.");
+            }
+        };
+        std::fs::write(format!("{}/isle.rs", out_dir), code)
+            .expect("Could not write ISLE code to output file");
+    }
+
     let pkg_version = env::var("CARGO_PKG_VERSION").unwrap();
     let mut cmd = std::process::Command::new("git");
     cmd.arg("rev-parse")

@@ -39,6 +39,7 @@ criterion = "0.3"
 
 [build-dependencies]
 cranelift-codegen-meta = { path = "meta", version = "0.76.0" }
+isle = { git = "https://github.com/cfallin/isle", rev = "c241f0842cf896cb95b99d0584029a5083cac51b" }
 
 [features]
 default = ["std", "unwind"]
