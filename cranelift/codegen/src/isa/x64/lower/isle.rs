@@ -54,6 +54,15 @@ where
     let mut renamer = RegRenamer::default();
     for output in outputs {
         let dsts = get_output_reg(isle_ctx.lower_ctx, *output);
+        debug_assert_eq!(
+            temp_regs.len(),
+            dsts.len(),
+            "the number of temporary registers and destination registers do \
+            not match ({} != {}); ensure the correct registers are being \
+            returned.",
+            temp_regs.len(),
+            dsts.len()
+        );
         for (temp, dst) in temp_regs.by_ref().zip(dsts.regs()) {
             renamer.add_rename(*temp, dst.to_reg());
         }
