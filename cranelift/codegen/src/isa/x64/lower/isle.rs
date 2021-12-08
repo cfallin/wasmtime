@@ -45,6 +45,24 @@ where
     let mut isle_ctx = IsleContext::new(lower_ctx, isa_flags);
 
     let temp_regs = generated_code::constructor_lower(&mut isle_ctx, inst).ok_or(())?;
+
+    #[cfg(debug_assertions)]
+    {
+        let all_dsts_len = outputs
+            .iter()
+            .map(|out| get_output_reg(isle_ctx.lower_ctx, *out).len())
+            .sum();
+        debug_assert_eq!(
+            temp_regs.len(),
+            all_dsts_len,
+            "the number of temporary registers and destination registers do \
+         not match ({} != {}); ensure the correct registers are being \
+         returned.",
+            temp_regs.len(),
+            all_dsts_len,
+        );
+    }
+
     let mut temp_regs = temp_regs.regs().iter();
 
     // The ISLE generated code emits its own registers to define the
@@ -54,15 +72,6 @@ where
     let mut renamer = RegRenamer::default();
     for output in outputs {
         let dsts = get_output_reg(isle_ctx.lower_ctx, *output);
-        debug_assert_eq!(
-            temp_regs.len(),
-            dsts.len(),
-            "the number of temporary registers and destination registers do \
-            not match ({} != {}); ensure the correct registers are being \
-            returned.",
-            temp_regs.len(),
-            dsts.len()
-        );
         for (temp, dst) in temp_regs.by_ref().zip(dsts.regs()) {
             renamer.add_rename(*temp, dst.to_reg());
         }
