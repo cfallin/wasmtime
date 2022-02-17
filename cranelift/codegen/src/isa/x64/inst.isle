@@ -2088,3 +2088,17 @@
 (decl ud2 (TrapCode) SideEffectNoResult)
 (rule (ud2 code)
       (SideEffectNoResult.Inst (MInst.Ud2 code)))
+
+;;;; Automatic conversions ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(convert Gpr ValueRegs value_gpr)
+(convert Value Gpr put_in_gpr)
+(convert Value GprMemImm put_in_gpr_mem_imm)
+(convert Gpr GprMemImm gpr_to_gpr_mem_imm)
+(convert Gpr GprMem gpr_to_gpr_mem)
+(convert Gpr Reg gpr_to_reg)
+(convert WritableGpr Gpr writable_gpr_to_gpr)
+
+(convert Xmm ValueRegs value_xmm)
+(convert Value Xmm put_in_xmm)
+(convert Value XmmMem put_in_xmm_mem)
