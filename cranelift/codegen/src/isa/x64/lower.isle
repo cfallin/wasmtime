@@ -179,10 +179,10 @@
 
 (rule (lower (has_type (fits_in_64 ty)
                        (iadd_ifcout x (sinkable_load y))))
-        (value_gprs (add ty
-                         x
-                         (sink_load_to_gpr_mem_imm y))
-                    (unused_iflags)))
+      (value_gprs (add ty
+                       x
+                       (sink_load_to_gpr_mem_imm y))
+                  (unused_iflags)))
 
 (rule (lower (has_type (fits_in_64 ty)
                        (iadd_ifcout (sinkable_load x) y)))
@@ -336,7 +336,7 @@
 
 (rule (lower (has_type ty @ (multi_lane _bits _lanes)
                        (band x y)))
-       (sse_and ty x y))
+      (sse_and ty x y))
 
 ;; `{i,b}128`.
 
@@ -619,8 +619,8 @@
                                  amt)))
             ;; Nullify the carry if we are shifting by a multiple of 128.
             (carry_ Gpr (with_flags_1 (test (OperandSize.Size64)
-                                           (RegMemImm.Imm 127)
-                                           amt)
+                                            (RegMemImm.Imm 127)
+                                            amt)
                                       (cmove $I64
                                              (CC.Z)
                                              (imm $I64 0)
@@ -785,8 +785,8 @@
       (xmm_mem_imm_new (RegMemImm.Imm (u32_add i 8))))
 (rule (sshr_i8x16_bigger_shift ty (RegMemImm.Reg r))
       (mov_rmi_to_xmm (RegMemImm.Reg (add ty
-                                     r
-                                     (RegMemImm.Imm 8)))))
+                                          r
+                                          (RegMemImm.Imm 8)))))
 (rule (sshr_i8x16_bigger_shift ty rmi @ (RegMemImm.Mem _m))
       (mov_rmi_to_xmm (RegMemImm.Reg (add ty
                                           (imm ty 8)
@@ -1060,10 +1060,10 @@
 
 ;; Special case for `i16x8.extmul_high_i8x16_s`.
 (rule (lower (has_type (multi_lane 16 8)
-                       (imul (def_inst (swiden_high (and (value_type (multi_lane 8 16))
-                                                         x)))
-                             (def_inst (swiden_high (and (value_type (multi_lane 8 16))
-                                                         y))))))
+                       (imul (swiden_high (and (value_type (multi_lane 8 16))
+                                               x))
+                             (swiden_high (and (value_type (multi_lane 8 16))
+                                               y)))))
       (let ((x1 Xmm x)
             (x2 Xmm (palignr x1 x1 8 (OperandSize.Size32)))
             (x3 Xmm (pmovsxbw x2))
@@ -1074,10 +1074,10 @@
 
 ;; Special case for `i32x4.extmul_high_i16x8_s`.
 (rule (lower (has_type (multi_lane 32 4)
-                       (imul (def_inst (swiden_high (and (value_type (multi_lane 16 8))
-                                                         x)))
-                             (def_inst (swiden_high (and (value_type (multi_lane 16 8))
-                                                         y))))))
+                       (imul (swiden_high (and (value_type (multi_lane 16 8))
+                                               x))
+                             (swiden_high (and (value_type (multi_lane 16 8))
+                                               y)))))
       (let ((x2 Xmm x)
             (y2 Xmm y)
             (lo Xmm (pmullw x2 y2))
@@ -1086,10 +1086,10 @@
 
 ;; Special case for `i64x2.extmul_high_i32x4_s`.
 (rule (lower (has_type (multi_lane 64 2)
-                       (imul (def_inst (swiden_high (and (value_type (multi_lane 32 4))
-                                                         x)))
-                             (def_inst (swiden_high (and (value_type (multi_lane 32 4))
-                                                         y))))))
+                       (imul (swiden_high (and (value_type (multi_lane 32 4))
+                                               x))
+                             (swiden_high (and (value_type (multi_lane 32 4))
+                                               y)))))
       (let ((x2 Xmm (pshufd x
                             0xFA
                             (OperandSize.Size32)))
@@ -1100,20 +1100,20 @@
 
 ;; Special case for `i16x8.extmul_low_i8x16_s`.
 (rule (lower (has_type (multi_lane 16 8)
-                       (imul (def_inst (swiden_low (and (value_type (multi_lane 8 16))
-                                                        x)))
-                             (def_inst (swiden_low (and (value_type (multi_lane 8 16))
-                                                        y))))))
+                       (imul (swiden_low (and (value_type (multi_lane 8 16))
+                                              x))
+                             (swiden_low (and (value_type (multi_lane 8 16))
+                                              y)))))
       (let ((x2 Xmm (pmovsxbw x))
             (y2 Xmm (pmovsxbw y)))
         (pmullw x2 y2)))
 
 ;; Special case for `i32x4.extmul_low_i16x8_s`.
 (rule (lower (has_type (multi_lane 32 4)
-                       (imul (def_inst (swiden_low (and (value_type (multi_lane 16 8))
-                                                        x)))
-                             (def_inst (swiden_low (and (value_type (multi_lane 16 8))
-                                                        y))))))
+                       (imul (swiden_low (and (value_type (multi_lane 16 8))
+                                              x))
+                             (swiden_low (and (value_type (multi_lane 16 8))
+                                              y)))))
       (let ((x2 Xmm x)
             (y2 Xmm y)
             (lo Xmm (pmullw x2 y2))
@@ -1122,10 +1122,10 @@
 
 ;; Special case for `i64x2.extmul_low_i32x4_s`.
 (rule (lower (has_type (multi_lane 64 2)
-                       (imul (def_inst (swiden_low (and (value_type (multi_lane 32 4))
-                                                        x)))
-                             (def_inst (swiden_low (and (value_type (multi_lane 32 4))
-                                                        y))))))
+                       (imul (swiden_low (and (value_type (multi_lane 32 4))
+                                              x))
+                             (swiden_low (and (value_type (multi_lane 32 4))
+                                              y)))))
       (let ((x2 Xmm (pshufd x
                             0x50
                             (OperandSize.Size32)))
@@ -1136,10 +1136,10 @@
 
 ;; Special case for `i16x8.extmul_high_i8x16_u`.
 (rule (lower (has_type (multi_lane 16 8)
-                       (imul (def_inst (uwiden_high (and (value_type (multi_lane 8 16))
-                                                         x)))
-                             (def_inst (uwiden_high (and (value_type (multi_lane 8 16))
-                                                         y))))))
+                       (imul (uwiden_high (and (value_type (multi_lane 8 16))
+                                               x))
+                             (uwiden_high (and (value_type (multi_lane 8 16))
+                                               y)))))
       (let ((x1 Xmm x)
             (x2 Xmm (palignr x1 x1 8 (OperandSize.Size32)))
             (x3 Xmm (pmovzxbw x2))
@@ -1150,10 +1150,10 @@
 
 ;; Special case for `i32x4.extmul_high_i16x8_u`.
 (rule (lower (has_type (multi_lane 32 4)
-                       (imul (def_inst (uwiden_high (and (value_type (multi_lane 16 8))
-                                                         x)))
-                             (def_inst (uwiden_high (and (value_type (multi_lane 16 8))
-                                                         y))))))
+                       (imul (uwiden_high (and (value_type (multi_lane 16 8))
+                                               x))
+                             (uwiden_high (and (value_type (multi_lane 16 8))
+                                               y)))))
       (let ((x2 Xmm x)
             (y2 Xmm y)
             (lo Xmm (pmullw x2 y2))
@@ -1162,10 +1162,10 @@
 
 ;; Special case for `i64x2.extmul_high_i32x4_u`.
 (rule (lower (has_type (multi_lane 64 2)
-                       (imul (def_inst (uwiden_high (and (value_type (multi_lane 32 4))
-                                                         x)))
-                             (def_inst (uwiden_high (and (value_type (multi_lane 32 4))
-                                                         y))))))
+                       (imul (uwiden_high (and (value_type (multi_lane 32 4))
+                                               x))
+                             (uwiden_high (and (value_type (multi_lane 32 4))
+                                               y)))))
       (let ((x2 Xmm (pshufd x
                             0xFA
                             (OperandSize.Size32)))
@@ -1176,20 +1176,20 @@
 
 ;; Special case for `i16x8.extmul_low_i8x16_u`.
 (rule (lower (has_type (multi_lane 16 8)
-                       (imul (def_inst (uwiden_low (and (value_type (multi_lane 8 16))
-                                                        x)))
-                             (def_inst (uwiden_low (and (value_type (multi_lane 8 16))
-                                                        y))))))
+                       (imul (uwiden_low (and (value_type (multi_lane 8 16))
+                                              x))
+                             (uwiden_low (and (value_type (multi_lane 8 16))
+                                              y)))))
       (let ((x2 Xmm (pmovzxbw x))
             (y2 Xmm (pmovzxbw y)))
         (pmullw x2 y2)))
 
 ;; Special case for `i32x4.extmul_low_i16x8_u`.
 (rule (lower (has_type (multi_lane 32 4)
-                       (imul (def_inst (uwiden_low (and (value_type (multi_lane 16 8))
-                                                        x)))
-                             (def_inst (uwiden_low (and (value_type (multi_lane 16 8))
-                                                        y))))))
+                       (imul (uwiden_low (and (value_type (multi_lane 16 8))
+                                              x))
+                             (uwiden_low (and (value_type (multi_lane 16 8))
+                                              y)))))
       (let ((x2 Xmm x)
             (y2 Xmm y)
             (lo Xmm (pmullw x2 y2))
@@ -1198,10 +1198,10 @@
 
 ;; Special case for `i64x2.extmul_low_i32x4_u`.
 (rule (lower (has_type (multi_lane 64 2)
-                       (imul (def_inst (uwiden_low (and (value_type (multi_lane 32 4))
-                                                        x)))
-                             (def_inst (uwiden_low (and (value_type (multi_lane 32 4))
-                                                        y))))))
+                       (imul (uwiden_low (and (value_type (multi_lane 32 4))
+                                              x))
+                             (uwiden_low (and (value_type (multi_lane 32 4))
+                                              y)))))
       (let ((x2 Xmm (pshufd x
                             0x50
                             (OperandSize.Size32)))
