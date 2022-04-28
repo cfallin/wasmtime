@@ -100,6 +100,7 @@ pub trait Context {
         arg0: GlobalValue,
     ) -> Option<(ExternalName, RelocDistance, i64)>;
     fn reloc_distance_near(&mut self, arg0: RelocDistance) -> Option<()>;
+    fn lea_memflags(&mut self) -> MemFlags;
     fn use_lse(&mut self, arg0: Inst) -> Option<()>;
     fn move_wide_const_from_u64(&mut self, arg0: u64) -> Option<MoveWideConst>;
     fn move_wide_const_from_negated_u64(&mut self, arg0: u64) -> Option<MoveWideConst>;

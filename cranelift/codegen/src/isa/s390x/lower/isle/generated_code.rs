@@ -100,6 +100,7 @@ pub trait Context {
         arg0: GlobalValue,
     ) -> Option<(ExternalName, RelocDistance, i64)>;
     fn reloc_distance_near(&mut self, arg0: RelocDistance) -> Option<()>;
+    fn lea_memflags(&mut self) -> MemFlags;
     fn mie2_enabled(&mut self, arg0: Type) -> Option<()>;
     fn mie2_disabled(&mut self, arg0: Type) -> Option<()>;
     fn vxrs_ext2_enabled(&mut self, arg0: Type) -> Option<()>;

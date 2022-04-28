@@ -773,7 +773,7 @@ pub(crate) fn emit(
             )
         }
 
-        Inst::LoadEffectiveAddress { addr, dst } => {
+        Inst::LoadEffectiveAddress { addr, dst, size } => {
             let dst = allocs.next(dst.to_reg().to_reg());
             let amode = addr.finalize(state, sink).with_allocs(allocs);
 
@@ -786,7 +786,7 @@ pub(crate) fn emit(
                 1,
                 dst,
                 &amode,
-                RexFlags::set_w(),
+                RexFlags::from(*size),
             );
         }
 

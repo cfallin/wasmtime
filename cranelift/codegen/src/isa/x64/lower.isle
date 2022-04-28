@@ -60,20 +60,47 @@
 
 ;; `i64` and smaller.
 
-;; Add two registers.
-(rule (lower (has_type (fits_in_64 ty)
+;; Add two registers with narrow values (8 or 16 bits).
+(rule (lower (has_type (ty_8_or_16 ty)
                        (iadd x y)))
       (x64_add ty x y))
 
-;; Add a register and an immediate.
+;; Add two 32- or 64-bit registers, or three values one of which is a
+;; constant: always use LEA. We don't make use of the flags result and
+;; this avoids a register constraint (i.e. gives us a separate
+;; destination and non-destructive sources).
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd x y)))
+      (x64_lea ty (Amode.ImmRegRegShift 0 x y 0 (lea_memflags))))
 
-(rule (lower (has_type (fits_in_64 ty)
-                       (iadd x (simm32_from_value y))))
-      (x64_add ty x y))
+;; x+const or const+x.
 
-(rule (lower (has_type (fits_in_64 ty)
-                       (iadd (simm32_from_value x) y)))
-      (x64_add ty y x))
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd x (iconst (simm32 k)))))
+      (x64_lea ty (Amode.ImmReg k x (lea_memflags))))
+
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd (iconst (simm32 k)) x)))
+      (x64_lea ty (Amode.ImmReg k x (lea_memflags))))
+
+;; x+y+const, with the constant in any of four positions in a tree of
+;; two iadds.
+
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd x (iadd y (iconst (simm32 k))))))
+      (x64_lea ty (Amode.ImmRegRegShift k x y 0 (lea_memflags))))
+
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd x (iadd (iconst (simm32 k)) y))))
+      (x64_lea ty (Amode.ImmRegRegShift k x y 0 (lea_memflags))))
+
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd (iadd (iconst (simm32 k)) y) x)))
+      (x64_lea ty (Amode.ImmRegRegShift k x y 0 (lea_memflags))))
+
+(rule (lower (has_type (ty_32_or_64 ty)
+                       (iadd (iadd y (iconst (simm32 k))) x)))
+      (x64_lea ty (Amode.ImmRegRegShift k x y 0 (lea_memflags))))
 
 ;; Add a register and memory.
 
@@ -560,7 +587,7 @@
 (extern constructor ishl_i8x16_mask_table ishl_i8x16_mask_table)
 (rule (ishl_i8x16_mask (RegMemImm.Reg amt))
       (let ((mask_table SyntheticAmode (ishl_i8x16_mask_table))
-            (base_mask_addr Gpr (x64_lea mask_table))
+            (base_mask_addr Gpr (x64_lea $I64 mask_table))
             (mask_offset Gpr (x64_shl $I64 amt
                                   (imm8_to_imm8_gpr 4))))
         (amode_imm_reg_reg_shift 0
@@ -661,7 +688,7 @@
 (extern constructor ushr_i8x16_mask_table ushr_i8x16_mask_table)
 (rule (ushr_i8x16_mask (RegMemImm.Reg amt))
       (let ((mask_table SyntheticAmode (ushr_i8x16_mask_table))
-            (base_mask_addr Gpr (x64_lea mask_table))
+            (base_mask_addr Gpr (x64_lea $I64 mask_table))
             (mask_offset Gpr (x64_shl $I64
                                   amt
                                   (imm8_to_imm8_gpr 4))))

@@ -10,8 +10,7 @@ block0(v0: i32, v1: i32):
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   addl    %edi, %esi, %edi
-;   movq    %rdi, %rax
+;   lea     0(%rdi,%rsi,1), %eax
 ;   movq    %rbp, %rsp
 ;   popq    %rbp
 ;   ret

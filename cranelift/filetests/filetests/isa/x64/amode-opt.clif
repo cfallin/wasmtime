@@ -153,7 +153,7 @@ block0(v0: i64, v1: i32, v2: i32):
 ;   pushq   %rbp
 ;   movq    %rsp, %rbp
 ; block0:
-;   addl    %esi, %edx, %esi
+;   lea     0(%rsi,%rdx,1), %esi
 ;   movq    -1(%rdi,%rsi,4), %rax
 ;   movq    %rbp, %rsp
 ;   popq    %rbp

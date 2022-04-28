@@ -119,7 +119,8 @@
                 (dst WritableGpr))
 
        ;; Loads the memory address of addr into dst.
-       (LoadEffectiveAddress (addr SyntheticAmode)
+       (LoadEffectiveAddress (size OperandSize)
+                             (addr SyntheticAmode)
                              (dst WritableGpr))
 
        ;; Sign-extended loads and moves: movs (bl bq wl wq lq) addr reg.
@@ -2552,10 +2553,11 @@
             (_ Unit (emit (MInst.Neg size src dst))))
         dst))
 
-(decl x64_lea (SyntheticAmode) Gpr)
-(rule (x64_lea addr)
+(decl x64_lea (Type SyntheticAmode) Gpr)
+(rule (x64_lea ty addr)
       (let ((dst WritableGpr (temp_writable_gpr))
-            (_ Unit (emit (MInst.LoadEffectiveAddress addr dst))))
+            (size OperandSize (operand_size_of_type_32_64 ty))
+            (_ Unit (emit (MInst.LoadEffectiveAddress size addr dst))))
         dst))
 
 ;; Helper for creating `ud2` instructions.

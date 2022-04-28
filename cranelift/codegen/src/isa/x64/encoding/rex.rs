@@ -192,6 +192,9 @@ pub enum LegacyPrefixes {
     None,
     /// Operand Size Override -- here, denoting "16-bit operation".
     _66,
+    /// Address Size Override -- here, denoting "32-bit address" (see
+    /// LEA when used for 32-bit adds).
+    _67,
     /// The Lock prefix.
     _F0,
     /// Operand size override and Lock.
@@ -210,6 +213,7 @@ impl LegacyPrefixes {
     pub(crate) fn emit(&self, sink: &mut MachBuffer<Inst>) {
         match self {
             Self::_66 => sink.put1(0x66),
+            Self::_67 => sink.put1(0x67),
             Self::_F0 => sink.put1(0xF0),
             Self::_66F0 => {
                 // I don't think the order matters, but in any case, this is the same order that

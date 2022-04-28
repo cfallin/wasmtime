@@ -2239,6 +2239,17 @@ fn test_x64_emit() {
         "lea     label0(%rip), %rdi",
     ));
 
+    insns.push((
+        Inst::LoadEffectiveAddress {
+            addr: Amode::imm_reg_reg_shift(48, Gpr::new(r12).unwrap(), Gpr::new(r13).unwrap(), 2)
+                .into(),
+            size: OperandSize::Size32,
+            dst: WritableGpr::from_writable_reg(w_rax).unwrap(),
+        },
+        "438D44AC30",
+        "lea     48(%r12,%r13,4), %eax",
+    ));
+
     // ========================================================
     // MovSX_RM_R
     insns.push((

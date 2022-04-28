@@ -539,6 +539,11 @@ macro_rules! isle_prelude_methods {
             let offset: i32 = offset.into();
             offset as u32
         }
+
+        #[inline]
+        fn lea_memflags(&mut self) -> MemFlags {
+            MemFlags::trusted()
+        }
     };
 }
 

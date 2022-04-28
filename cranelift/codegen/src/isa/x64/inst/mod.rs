@@ -545,6 +545,7 @@ impl Inst {
     pub(crate) fn lea(addr: impl Into<SyntheticAmode>, dst: Writable<Reg>) -> Inst {
         debug_assert!(dst.to_reg().class() == RegClass::Int);
         Inst::LoadEffectiveAddress {
+            size: OperandSize::Size64,
             addr: addr.into(),
             dst: WritableGpr::from_writable_reg(dst).unwrap(),
         }
@@ -1392,8 +1393,8 @@ impl PrettyPrint for Inst {
                 format!("{} {}, {}", ljustify("movq".to_string()), src, dst)
             }
 
-            Inst::LoadEffectiveAddress { addr, dst } => {
-                let dst = pretty_print_reg(dst.to_reg().to_reg(), 8, allocs);
+            Inst::LoadEffectiveAddress { size, addr, dst } => {
+                let dst = pretty_print_reg(dst.to_reg().to_reg(), size.to_bytes(), allocs);
                 let addr = addr.pretty_print(8, allocs);
                 format!("{} {}, {}", ljustify("lea".to_string()), addr, dst)
             }
@@ -1922,7 +1923,7 @@ fn x64_get_operands<F: Fn(VReg) -> VReg>(inst: &Inst, collector: &mut OperandCol
             collector.reg_def(dst.to_writable_reg());
             src.get_operands(collector);
         }
-        Inst::LoadEffectiveAddress { addr: src, dst } => {
+        Inst::LoadEffectiveAddress { addr: src, dst, .. } => {
             collector.reg_def(dst.to_writable_reg());
             src.get_operands(collector);
         }

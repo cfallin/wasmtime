@@ -609,6 +609,10 @@
 (decl reloc_distance_near () RelocDistance)
 (extern extractor reloc_distance_near reloc_distance_near)
 
+;; Creation of default MemFlags -- use only when creating an Amode for LEA!
+(decl lea_memflags () MemFlags)
+(extern constructor lea_memflags lea_memflags)
+
 ;;;; Automatic conversions ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (convert Inst Value def_inst)
