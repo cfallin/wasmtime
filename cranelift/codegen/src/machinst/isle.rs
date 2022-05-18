@@ -291,6 +291,12 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn invalid_value(&mut self) -> Option<Value> {
+            use cranelift_entity::packed_option::ReservedValue;
+            Some(Value::reserved_value())
+        }
+
+        #[inline]
         fn u64_from_imm64(&mut self, imm: Imm64) -> u64 {
             imm.bits() as u64
         }
@@ -368,6 +374,76 @@ macro_rules! isle_common_prelude_methods {
                 None
             }
         }
+
+        #[inline]
+        fn mem_flags_heap_area(&mut self, flags: MemFlags) -> Option<()> {
+            if flags.heap() {
+                Some(())
+            } else {
+                None
+            }
+        }
+
+        #[inline]
+        fn mem_flags_table_area(&mut self, flags: MemFlags) -> Option<()> {
+            if flags.table() {
+                Some(())
+            } else {
+                None
+            }
+        }
+
+        #[inline]
+        fn mem_flags_vmctx_area(&mut self, flags: MemFlags) -> Option<()> {
+            if flags.vmctx() {
+                Some(())
+            } else {
+                None
+            }
+        }
+
+        #[inline]
+        fn mem_flags_other_area(&mut self, flags: MemFlags) -> Option<()> {
+            if !flags.vmctx() && !flags.heap() && !flags.table() {
+                Some(())
+            } else {
+                None
+            }
+        }
+
+        #[inline]
+        fn inst_mem_flags(&mut self, inst: Inst) -> Option<MemFlags> {
+            match self.dfg()[inst] {
+                InstructionData::AtomicRmw { flags, .. }
+                | InstructionData::AtomicCas { flags, .. }
+                | InstructionData::Load { flags, .. }
+                | InstructionData::LoadNoOffset { flags, .. }
+                | InstructionData::Store { flags, .. }
+                | InstructionData::StoreNoOffset { flags, .. } => Some(flags.clone()),
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn inst_mem_flags_store(&mut self, inst: Inst) -> Option<MemFlags> {
+            match self.dfg()[inst] {
+                InstructionData::AtomicRmw { flags, .. }
+                | InstructionData::AtomicCas { flags, .. }
+                | InstructionData::Store { flags, .. }
+                | InstructionData::StoreNoOffset { flags, .. } => Some(flags.clone()),
+                _ => None,
+            }
+        }
+
+        #[inline]
+        fn inst_mem_flags_load(&mut self, inst: Inst) -> Option<MemFlags> {
+            match self.dfg()[inst] {
+                | InstructionData::Load { flags, .. }
+                | InstructionData::LoadNoOffset { flags, .. } => Some(flags),
+                _ => None,
+            }
+        }
+
 
         #[inline]
         fn func_ref_data(&mut self, func_ref: FuncRef) -> (SigRef, ExternalName, RelocDistance) {

@@ -3,6 +3,9 @@
 ;; may-analysis: it is guaranteed that any subsequent instruction will
 ;; not have stored to the given abstract state, but the named
 ;; instruction may or may not have.)
+;;
+;; The state stored in the fact table *for* a given instruction is the
+;; memory state *after* that instruction.
 (type LastStoreState (enum
                       (Insts
                        ;; Last instruction to modify a Wasm heap.
@@ -23,10 +26,56 @@
 (rule (last_store_default inst)
       (LastStoreState.Insts inst inst inst inst))
 
+;; Does a given instruction "write" to the given piece of abstract
+;; state?
+(decl pure last_store_update (Inst LastStoreState) LastStoreState)
+
+;; Highest prio: calls can (indirectly) store anything.
+(rule 2 (last_store_update inst @ (call _ _) prev)
+      (last_store_default inst))
+(rule 2 (last_store_update inst @ (call_indirect _ _ _) prev)
+      (last_store_default inst))
+
+;; Any instruction that is specifically a load or store may update the
+;; given field for its accessed disjoint area of abstract state.
+
+(rule 1 (last_store_update inst prev)
+      (if-let flags (inst_mem_flags_store inst))
+      (if (mem_flags_heap_area flags))
+      (if-let (LastStoreState.Insts _ prev_table prev_vmctx prev_other) prev)
+      (LastStoreState.Insts inst prev_table prev_vmctx prev_other))
+
+(rule 1 (last_store_update inst prev)
+      (if-let flags (inst_mem_flags_store inst))
+      (if (mem_flags_table_area flags))
+      (if-let (LastStoreState.Insts prev_heap _ prev_vmctx prev_other) prev)
+      (LastStoreState.Insts prev_heap inst prev_vmctx prev_other))
+
+(rule 1 (last_store_update inst prev)
+      (if-let flags (inst_mem_flags_store inst))
+      (if (mem_flags_vmctx_area flags))
+      (if-let (LastStoreState.Insts prev_heap prev_table _ prev_other) prev)
+      (LastStoreState.Insts prev_heap prev_table inst prev_other))
+
+(rule 1 (last_store_update inst prev)
+      (if-let flags (inst_mem_flags_store inst))
+      (if (mem_flags_other_area flags))
+      (if-let (LastStoreState.Insts prev_heap prev_table prev_vmctx _) prev)
+      (LastStoreState.Insts prev_heap prev_table prev_vmctx inst))
+
+;; Otherwise, pass it through.
+
+(rule 0 (last_store_update _ prev)
+      prev)
+
+;; Top-level entry point: take state from prev inst and update it.
+
 (decl pure fact last_store (Inst) LastStoreState)
 (rule (last_store inst)
       (if-let pred (inst_single_pred inst))
-      (last_store pred))
+      (if-let prev_state (last_store pred))
+      (last_store_update inst prev_state))
+              
 (rule (last_store inst)
       (if (inst_no_single_pred inst))
       (last_store_default inst))

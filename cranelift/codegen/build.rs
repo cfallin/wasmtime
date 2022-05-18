@@ -249,6 +249,7 @@ fn get_isle_compilations(
                     prelude_isle.clone(),
                     prelude_analysis_isle.clone(),
                     src_facts.join("last_store.isle"),
+                    src_facts.join("mem_values.isle"),
                 ],
                 untracked_inputs: vec![clif_isle.clone()],
             },

@@ -20,6 +20,7 @@
 //! And that's it!
 
 use crate::dominator_tree::DominatorTree;
+use crate::fx::FxHashMap;
 use crate::machinst::isle::{analysis::*, *};
 use crate::{ir::*, settings};
 use cranelift_entity::SecondaryMap;
@@ -30,8 +31,20 @@ isle_common_prelude_uses!();
 pub struct FactTables {
     /// Single predecessor, if any.
     pub single_pred: SecondaryMap<Inst, PackedOption<Inst>>,
-    /// Alias analysis results.
+    /// Last-store indices: per instruction, if a memory op, the
+    /// instruction of the last prior instruction that may store to
+    /// its accessed memory.
     pub last_store: SecondaryMap<Inst, Option<generated::LastStoreState>>,
+    /// Known memory values: per (last_store, addr_value, ty), a
+    /// value, if any, known to be equal to the value stored in that
+    /// location.
+    ///
+    /// TODO: right now this is inverted (per value, the last
+    /// store/value/type) to build but we need a better way to handle
+    /// sparse relations
+    pub mem_values: FxHashMap<Value, (Value, Inst, Type)>,
+    
+    //    pub mem_values: FxHashMap<(Inst, Value, Type), Value>,
 }
 
 /// Perform an analysis of the function.
@@ -54,31 +67,35 @@ pub fn analyze(
             ctx.facts.single_pred[inst] = last_inst.into();
             last_inst = Some(inst);
 
-            generated::compute_last_store(&mut ctx, inst);
+            ctx.facts.last_store[inst] = generated::compute_last_store(&mut ctx, inst);
+
+            // TODO: compute_mem_values() per value...  PROBLEM: need
+            // a way for a "fact" relation/constructor to populate
+            // sparsely. compute_mem_values needs to *produce* the key
+            // (last_store, type, inst) with which its memoized tuple
+            // is stored.
         }
     }
 
     ctx.facts
 }
 
-macro_rules! fact_table_ctors {
-    ($name:tt, $default_ctor:path, $ty:path) => {
+macro_rules! fact_table_per_inst_ctors {
+    ($name:tt, $ty:ty) => {
         fn $name(&mut self, inst: Inst) -> Option<$ty> {
-            // Return the already-computed value, or fill in the
-            // default if not. (Note that we can't use
-            // `Option::get_or_insert_with` because we need the `&mut
-            // self` for the default ctor invocation as well.) We do
-            // not recurse on a missing fact because the top-level
+            // Return the already-computed value, or `None` if not. We
+            // do not recurse on a missing fact because the top-level
             // eager evaluation strategy should fill in any facts that
             // we are allowed to rely on before we reach this inst.
-            match &self.facts.$name[inst] {
-                Some(value) => Some(value.clone()),
-                None => {
-                    let def = $default_ctor(self, inst).unwrap();
-                    self.facts.$name[inst] = Some(def.clone());
-                    Some(def)
-                }
-            }
+            self.facts.$name[inst].clone()
+        }
+    };
+}
+
+macro_rules! fact_table_per_value_ctors {
+    ($name:tt, $ty:ty) => {
+        fn $name(&mut self, value: Value) -> Option<$ty> {
+            self.facts.$name.get(&value).cloned()
         }
     };
 }
@@ -100,11 +117,8 @@ impl<'a> generated::Context for IsleContext<'a> {
         }
     }
 
-    fact_table_ctors!(
-        last_store,
-        generated::constructor_last_store_default,
-        generated::LastStoreState
-    );
+    fact_table_per_inst_ctors!(last_store, generated::LastStoreState);
+//    fact_table_per_value_ctors!(mem_values, (Value, Inst, Type));
 }
 
 mod generated {

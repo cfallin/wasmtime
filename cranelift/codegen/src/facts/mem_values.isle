@@ -1,0 +1,7 @@
+;; Analysis that computes known associations between particular memory
+;; addresses, at particular locations (named via the "last store"),
+;; and particular values. Can be used for redundant-load elimination
+;; store-to-load forwarding, and dead-store elimination.
+
+;;(decl pure fact mem_values (Value Inst Type) Value)
+;;(rule (mem_values _ _ _) (invalid_value))

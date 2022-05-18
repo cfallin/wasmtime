@@ -261,6 +261,10 @@
 (extractor (unwrap_head_value_list_2 head1 head2 tail)
            (value_list_slice (value_slice_unwrap head1 (value_slice_unwrap head2 tail))))
 
+;; A constructor that builds an invalid value (`Value::reserved_value()`).
+(decl pure invalid_value () Value)
+(extern constructor invalid_value invalid_value)
+
 ;; Extract a `u8` from an `Uimm8`.
 (decl u8_from_uimm8 (u8) Uimm8)
 (extern extractor infallible u8_from_uimm8 u8_from_uimm8)
@@ -337,6 +341,29 @@
 
 (decl trap_code_bad_conversion_to_integer () TrapCode)
 (extern constructor trap_code_bad_conversion_to_integer trap_code_bad_conversion_to_integer)
+
+;;;; Helpers for Working with MemFlags ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(decl pure mem_flags_heap_area (MemFlags) Unit)
+(extern constructor mem_flags_heap_area mem_flags_heap_area)
+
+(decl pure mem_flags_table_area (MemFlags) Unit)
+(extern constructor mem_flags_table_area mem_flags_table_area)
+
+(decl pure mem_flags_vmctx_area (MemFlags) Unit)
+(extern constructor mem_flags_vmctx_area mem_flags_vmctx_area)
+
+(decl pure mem_flags_other_area (MemFlags) Unit)
+(extern constructor mem_flags_other_area mem_flags_other_area)
+
+(decl pure inst_mem_flags (Inst) MemFlags)
+(extern constructor inst_mem_flags inst_mem_flags)
+
+(decl pure inst_mem_flags_store (Inst) MemFlags)
+(extern constructor inst_mem_flags_store inst_mem_flags_store)
+
+(decl pure inst_mem_flags_load (Inst) MemFlags)
+(extern constructor inst_mem_flags_load inst_mem_flags_load)
 
 ;;;; Helpers for accessing compilation flags ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
