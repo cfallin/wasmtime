@@ -2,7 +2,7 @@
 
 use crate::ir::{ExprInst, InstId, PatternInst, Value};
 use crate::log;
-use crate::sema::ExternalSig;
+use crate::sema::{ExternalSig, SigReason, TermKind};
 use crate::sema::{TermEnv, TermId, Type, TypeEnv, TypeId, Variant};
 use crate::trie::{TrieEdge, TrieNode, TrieSymbol};
 use crate::{StableMap, StableSet};
@@ -142,7 +142,14 @@ impl<'a> Codegen<'a> {
                 self.generate_trait_sig(code, "    ", &ext_sig);
             }
             if term.has_external_constructor() {
-                let ext_sig = term.constructor_sig(self.typeenv).unwrap();
+                let ext_sig = term
+                    .constructor_sig(self.typeenv, SigReason::Caller)
+                    .unwrap();
+                self.generate_trait_sig(code, "    ", &ext_sig);
+            } else if let TermKind::Decl { fact: true, .. } = &term.kind {
+                let ext_sig = term
+                    .constructor_sig(self.typeenv, SigReason::TraitDecl)
+                    .unwrap();
                 self.generate_trait_sig(code, "    ", &ext_sig);
             }
         }
@@ -283,7 +290,9 @@ impl<'a> Codegen<'a> {
                 continue;
             }
 
-            let sig = termdata.constructor_sig(self.typeenv).unwrap();
+            let sig = termdata
+                .constructor_sig(self.typeenv, SigReason::Callee)
+                .unwrap();
 
             let args = sig
                 .param_tys
@@ -435,7 +444,9 @@ impl<'a> Codegen<'a> {
                 };
                 let outputname = self.value_name(&output);
                 let termdata = &self.termenv.terms[term.index()];
-                let sig = termdata.constructor_sig(self.typeenv).unwrap();
+                let sig = termdata
+                    .constructor_sig(self.typeenv, SigReason::Caller)
+                    .unwrap();
                 assert_eq!(input_exprs.len(), sig.param_tys.len());
                 let fallible_try = if infallible { "" } else { "?" };
                 writeln!(

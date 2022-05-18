@@ -2710,12 +2710,12 @@ pub(crate) fn emit(
 
             let r10_rmi = RegMemImm::reg(r10);
             match op {
-                inst_common::AtomicRmwOp::Xchg => {
+                inst_common::MachAtomicRmwOp::Xchg => {
                     // movq %r10, %r11
                     let i3 = Inst::mov_r_r(OperandSize::Size64, r10, r11_w);
                     i3.emit(&[], sink, info, state);
                 }
-                inst_common::AtomicRmwOp::Nand => {
+                inst_common::MachAtomicRmwOp::Nand => {
                     // andq %r10, %r11
                     let i3 =
                         Inst::alu_rmi_r(OperandSize::Size64, AluRmiROpcode::And, r10_rmi, r11_w);
@@ -2725,20 +2725,20 @@ pub(crate) fn emit(
                     let i4 = Inst::not(OperandSize::Size64, r11_w);
                     i4.emit(&[], sink, info, state);
                 }
-                inst_common::AtomicRmwOp::Umin
-                | inst_common::AtomicRmwOp::Umax
-                | inst_common::AtomicRmwOp::Smin
-                | inst_common::AtomicRmwOp::Smax => {
+                inst_common::MachAtomicRmwOp::Umin
+                | inst_common::MachAtomicRmwOp::Umax
+                | inst_common::MachAtomicRmwOp::Smin
+                | inst_common::MachAtomicRmwOp::Smax => {
                     // cmp %r11, %r10
                     let i3 = Inst::cmp_rmi_r(OperandSize::from_ty(*ty), RegMemImm::reg(r11), r10);
                     i3.emit(&[], sink, info, state);
 
                     // cmovcc %r10, %r11
                     let cc = match op {
-                        inst_common::AtomicRmwOp::Umin => CC::BE,
-                        inst_common::AtomicRmwOp::Umax => CC::NB,
-                        inst_common::AtomicRmwOp::Smin => CC::LE,
-                        inst_common::AtomicRmwOp::Smax => CC::NL,
+                        inst_common::MachAtomicRmwOp::Umin => CC::BE,
+                        inst_common::MachAtomicRmwOp::Umax => CC::NB,
+                        inst_common::MachAtomicRmwOp::Smin => CC::LE,
+                        inst_common::MachAtomicRmwOp::Smax => CC::NL,
                         _ => unreachable!(),
                     };
                     let i4 = Inst::cmove(OperandSize::Size64, cc, RegMem::reg(r10), r11_w);
@@ -2747,17 +2747,17 @@ pub(crate) fn emit(
                 _ => {
                     // opq %r10, %r11
                     let alu_op = match op {
-                        inst_common::AtomicRmwOp::Add => AluRmiROpcode::Add,
-                        inst_common::AtomicRmwOp::Sub => AluRmiROpcode::Sub,
-                        inst_common::AtomicRmwOp::And => AluRmiROpcode::And,
-                        inst_common::AtomicRmwOp::Or => AluRmiROpcode::Or,
-                        inst_common::AtomicRmwOp::Xor => AluRmiROpcode::Xor,
-                        inst_common::AtomicRmwOp::Xchg
-                        | inst_common::AtomicRmwOp::Nand
-                        | inst_common::AtomicRmwOp::Umin
-                        | inst_common::AtomicRmwOp::Umax
-                        | inst_common::AtomicRmwOp::Smin
-                        | inst_common::AtomicRmwOp::Smax => unreachable!(),
+                        inst_common::MachAtomicRmwOp::Add => AluRmiROpcode::Add,
+                        inst_common::MachAtomicRmwOp::Sub => AluRmiROpcode::Sub,
+                        inst_common::MachAtomicRmwOp::And => AluRmiROpcode::And,
+                        inst_common::MachAtomicRmwOp::Or => AluRmiROpcode::Or,
+                        inst_common::MachAtomicRmwOp::Xor => AluRmiROpcode::Xor,
+                        inst_common::MachAtomicRmwOp::Xchg
+                        | inst_common::MachAtomicRmwOp::Nand
+                        | inst_common::MachAtomicRmwOp::Umin
+                        | inst_common::MachAtomicRmwOp::Umax
+                        | inst_common::MachAtomicRmwOp::Smin
+                        | inst_common::MachAtomicRmwOp::Smax => unreachable!(),
                     };
                     let i3 = Inst::alu_rmi_r(OperandSize::Size64, alu_op, r10_rmi, r11_w);
                     i3.emit(&[], sink, info, state);

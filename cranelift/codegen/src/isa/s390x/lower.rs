@@ -2,7 +2,7 @@
 
 use crate::ir::condcodes::IntCC;
 use crate::ir::Inst as IRInst;
-use crate::ir::{MemFlags, Opcode};
+use crate::ir::Opcode;
 use crate::isa::s390x::abi::*;
 use crate::isa::s390x::inst::*;
 use crate::isa::s390x::settings as s390x_settings;

@@ -73,6 +73,8 @@ pub struct Decl {
     /// Whether this term's constructor is pure.
     pub pure: bool,
     pub pos: Pos,
+    /// Whether this rule is a "fact engine" rule.
+    pub fact: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

@@ -2190,7 +2190,7 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             ));
 
             // Now the AtomicRmwSeq (pseudo-) instruction itself
-            let op = inst_common::AtomicRmwOp::from(ctx.data(insn).atomic_rmw_op().unwrap());
+            let op = inst_common::MachAtomicRmwOp::from(ctx.data(insn).atomic_rmw_op().unwrap());
             ctx.emit(Inst::AtomicRmwSeq {
                 ty: ty_access,
                 op,

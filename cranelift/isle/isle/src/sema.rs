@@ -236,6 +236,8 @@ pub enum TermKind {
     Decl {
         /// Whether the term is marked as `pure`.
         pure: bool,
+        /// Wether the term is marked as `fact`.
+        fact: bool,
         /// The kind of this term's constructor, if any.
         constructor_kind: Option<ConstructorKind>,
         /// The kind of this term's extractor, if any.
@@ -290,6 +292,24 @@ pub struct ExternalSig {
     pub ret_tys: Vec<TypeId>,
     /// Whether this signature is infallible or not.
     pub infallible: bool,
+}
+
+/// The reason for requesting an `ExternalSig`: from the caller side,
+/// or from the callee side. These may differ in the function name as
+/// an implementation detail of certain features (e.g., memoization):
+/// that is, the function name may be different when we call the
+/// function (which will actually invoke a wrapper) vs. when we
+/// generate its body (which goes under an internal name only invoked
+/// by the wrapper).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SigReason {
+    /// We are requesting the signature as the caller.
+    Caller,
+    /// We are requesting the signature as the callee.
+    Callee,
+    /// We are requesting the signature and name to declare in the
+    /// context trait.
+    TraitDecl,
 }
 
 impl Term {
@@ -370,7 +390,7 @@ impl Term {
     }
 
     /// Get this term's constructor's external function signature, if any.
-    pub fn constructor_sig(&self, tyenv: &TypeEnv) -> Option<ExternalSig> {
+    pub fn constructor_sig(&self, tyenv: &TypeEnv, reason: SigReason) -> Option<ExternalSig> {
         match &self.kind {
             TermKind::Decl {
                 constructor_kind: Some(ConstructorKind::ExternalConstructor { name }),
@@ -385,9 +405,16 @@ impl Term {
             }),
             TermKind::Decl {
                 constructor_kind: Some(ConstructorKind::InternalConstructor { .. }),
+                fact,
                 ..
             } => {
-                let name = format!("constructor_{}", tyenv.syms[self.name.index()]);
+                let prefix = match (fact, reason) {
+                    (false, _) => "constructor_",
+                    (true, SigReason::Caller) => "C::",
+                    (true, SigReason::Callee) => "compute_",
+                    (true, SigReason::TraitDecl) => "",
+                };
+                let name = format!("{}{}", prefix, tyenv.syms[self.name.index()]);
                 Some(ExternalSig {
                     func_name: name.clone(),
                     full_name: name,
@@ -854,6 +881,7 @@ impl TermEnv {
                             constructor_kind: None,
                             extractor_kind: None,
                             pure: decl.pure,
+                            fact: decl.fact,
                         },
                     });
                 }

@@ -6,28 +6,26 @@ pub mod generated_code;
 // Types that the generated ISLE code uses via `use super::*`.
 use super::{
     writable_zero_reg, zero_reg, AMode, ASIMDFPModImm, ASIMDMovModImm, BranchTarget, CallIndInfo,
-    CallInfo, Cond, CondBrKind, ExtendOp, FPUOpRI, FloatCC, Imm12, ImmLogic, ImmShift,
-    Inst as MInst, IntCC, JTSequenceInfo, MachLabel, MoveWideConst, MoveWideOp, NarrowValueMode,
-    Opcode, OperandSize, PairAMode, Reg, ScalarSize, ShiftOpAndAmt, UImm5, VecMisc2, VectorSize,
-    NZCV,
+    CallInfo, Cond, CondBrKind, ExtendOp, FPUOpRI, Imm12, ImmLogic, ImmShift, Inst as MInst,
+    JTSequenceInfo, MachLabel, MoveWideConst, MoveWideOp, NarrowValueMode, OperandSize, PairAMode,
+    ScalarSize, ShiftOpAndAmt, UImm5, VecMisc2, VectorSize, NZCV,
 };
 use crate::isa::aarch64::settings::Flags as IsaFlags;
 use crate::machinst::{isle::*, InputSourceInst};
 use crate::settings::Flags;
 use crate::{
-    binemit::CodeOffset,
-    ir::{
-        immediates::*, types::*, AtomicRmwOp, ExternalName, Inst, InstructionData, MemFlags,
-        TrapCode, Value, ValueList,
-    },
     isa::aarch64::inst::args::{ShiftOp, ShiftOpShiftImm},
     isa::aarch64::lower::{is_valid_atomic_transaction_ty, writable_xreg, xreg},
     isa::unwind::UnwindInst,
+    isle_vcode_output_methods,
+    machinst::isle::lower::{lower_common, IsleContext},
     machinst::{ty_bits, InsnOutput, LowerCtx, VCodeConstant, VCodeConstantData},
 };
 use std::boxed::Box;
 use std::convert::TryFrom;
 use std::vec::Vec;
+
+isle_common_prelude_uses!();
 
 type BoxCallInfo = Box<CallInfo>;
 type BoxCallIndInfo = Box<CallIndInfo>;
@@ -65,7 +63,8 @@ impl<C> generated_code::Context for IsleContext<'_, C, Flags, IsaFlags, 6>
 where
     C: LowerCtx<I = MInst>,
 {
-    isle_prelude_methods!();
+    isle_common_prelude_methods!();
+    isle_vcode_output_methods!();
 
     fn use_lse(&mut self, _: Inst) -> Option<()> {
         if self.isa_flags.use_lse() {

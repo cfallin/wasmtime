@@ -1053,6 +1053,89 @@ following shorthand notation using `if` instead:
       (isa_special_inst ...))
 ```
 
+### "Fact" Engine: Syntax Sugar for Memoized Analyses
+
+To support Datalog-style analyses, the ISLE compiler provides some
+syntax sugar to allow writing analysis rules that work in conjunction
+with an external memoization table / driver (a "fact engine"). This
+external driver likely uses a semi-naive evaluation [1] to efficiently
+compute the transitive closure of facts using a series of inference
+rules in ISLE.
+
+[1] https://pages.cs.wisc.edu/~paris/cs838-s16/lecture-notes/lecture8.pdf
+
+#### Declaring a Fact Term
+
+The ISLE compiler will recognize a term declaration like:
+
+```lisp
+(decl fact ConstantValue (Value) u32)
+```
+
+A "fact" in this context is a predicate that defines a partial
+function from its arguments to its value. Here, `ConstantValue` may
+contain a mapping from any particular `Value` to a `u32`, or it may
+not.
+
+When such a `decl` is present, it de-sugars into a *pure constructor*
+as if we had defined:
+
+```lisp
+(decl pure ConstantValue (Value) u32)
+```
+
+so that one could write
+
+```lisp
+(rule (lower val)
+      (if-let k (ConstantValue val))
+      (isa_imm_in_reg k))
+```
+
+However, at the Rust API level, the `ConstantValue` rule bodies are
+compiled into a function with the name `fact_ConstantValue`, and
+special code is generated in `constructor_ConstantValue` to memoize
+and track dependencies.
+
+#### Providing a Fact Term's Rules
+
+```lisp
+(rule (ConstantValue (iconst k)) k)
+
+(rule (ConstantValue (iadd x y))
+      (if-let k1 (ConstantValue x))
+      (if-let k2 (ConstantValue y))
+      (u32_add k1 k2))
+```
+
+- defines a normal `custructor_ConstantValue`
+
+#### Fact Engine Implementation
+
+- implementing: what is needed?
+- basic flow: eager evaluation, monotonically growing a body of facts
+  - entry is `term(args)`; if succeeds, we'll get a value. toplevel
+    loop should invoke e.g. analysis function over all instructions
+- dependency scheme for semi-naive evaluation: when a `term(args)` is
+  invoked and calls another `subterm(subargs)`, if not present, return
+  None but record a subterm-to-term edge; re-eval `term(args)` if
+  `subterm(subargs)` appears
+  - have a "sealing" scheme too: note when no more facts will
+    appear. important not to grow dependency lists significantly
+    - `fact_T` is the implementation, and returns `Option`
+    - `constructor_T` is the entry point from the outside, or from
+      ISLE terms, and returns `Option` as well
+    - `populate_T` is the eager-evaluation driver entry point
+    - `constructor_T` checks table in `MemoizeState` and returns this,
+      only. If not present and if current 
+    
+- generate a `MemoizeState` struct with tables and methods
+  - record Option of "current eval term" (enum where each arm is a
+    fact term with args for fields)
+
+    
+- cranelift-isle-runtime crate with generic wrappers to help with this
+
 ## ISLE to Rust
 
 Now that we have described the core ISLE language, we will document

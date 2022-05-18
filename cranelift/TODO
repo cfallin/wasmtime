@@ -1,0 +1,23 @@
+- (codegen/src/machinst/isle.rs) separate out ISLE prelude bits that
+  depend only on DFG part of lower_ctx; get these without a lower_ctx
+
+- (codegen/src/prelude.isle) separate out the part of the prelude used
+  only for VCode output
+
+- (codegen/src/facts.rs) define a new Context impl that lets us write
+  ISLE against CLIF input only
+
+- (codegen/build.rs) generate another ISLE output for mid-end stuff
+
+- (codegen/facts/alias.isle) define alias-analysis facts
+
+- (codegen/facts.rs) write toplevel driver for alias analysis
+
+- (codegen/transforms/redundant-loads.isle) define redundant-load transform
+
+- (codegen/transforms.rs) write toplevel driver for ISLE-based
+  CLIF-to-CLIF transforms
+
+- move lowering pre-analyses to facts framework
+
+- generalize lowering pass driver?

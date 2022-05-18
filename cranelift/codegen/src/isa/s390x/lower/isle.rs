@@ -5,24 +5,23 @@ pub mod generated_code;
 
 // Types that the generated ISLE code uses via `use super::*`.
 use super::{
-    CallIndInfo, CallInfo, Cond, Inst as MInst, MachLabel, MemArg, MemFlags, Opcode, Reg,
-    UImm16Shifted, UImm32Shifted,
+    CallIndInfo, CallInfo, Cond, Inst as MInst, MachLabel, MemArg, UImm16Shifted, UImm32Shifted,
 };
 use crate::isa::s390x::settings::Flags as IsaFlags;
 use crate::machinst::isle::*;
 use crate::settings::Flags;
 use crate::{
-    ir::{
-        condcodes::*, immediates::*, types::*, AtomicRmwOp, Endianness, Inst, InstructionData,
-        StackSlot, TrapCode, Value, ValueList,
-    },
     isa::unwind::UnwindInst,
+    isle_vcode_output_methods,
+    machinst::isle::lower::{lower_common, IsleContext},
     machinst::{InsnOutput, LowerCtx, VCodeConstant, VCodeConstantData},
 };
 use std::boxed::Box;
 use std::cell::Cell;
 use std::convert::TryFrom;
 use std::vec::Vec;
+
+isle_common_prelude_uses!();
 
 type BoxCallInfo = Box<CallInfo>;
 type BoxCallIndInfo = Box<CallIndInfo>;
@@ -67,7 +66,8 @@ impl<C> generated_code::Context for IsleContext<'_, C, Flags, IsaFlags, 6>
 where
     C: LowerCtx<I = MInst>,
 {
-    isle_prelude_methods!();
+    isle_common_prelude_methods!();
+    isle_vcode_output_methods!();
 
     #[inline]
     fn allow_div_traps(&mut self, _: Type) -> Option<()> {

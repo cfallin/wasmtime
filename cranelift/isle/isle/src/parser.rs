@@ -291,6 +291,13 @@ impl<'a> Parser<'a> {
             false
         };
 
+        let fact = if self.is_sym_str("fact") {
+            self.symbol()?;
+            true
+        } else {
+            false
+        };
+
         let term = self.parse_ident()?;
 
         self.lparen()?;
@@ -307,6 +314,7 @@ impl<'a> Parser<'a> {
             arg_tys,
             ret_ty,
             pure,
+            fact,
             pos,
         })
     }

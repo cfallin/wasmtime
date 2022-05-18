@@ -1,0 +1,9 @@
+;; Analysis-specific prelude. Definitions here are available to
+;; "facts" rules in facts/.
+
+;; Get the single predecessor of an instruction, if any.
+(decl pure inst_single_pred (Inst) Inst)
+(extern constructor inst_single_pred inst_single_pred)
+;; Match when an instruction does not have a single predecessor.
+(decl pure inst_no_single_pred (Inst) Unit)
+(extern constructor inst_no_single_pred inst_no_single_pred)

@@ -441,7 +441,7 @@
        ;; %rax  (written) the old value at %r9
        ;; %rflags is written.  Do not assume anything about it after the instruction.
        (AtomicRmwSeq (ty Type) ;; I8, I16, I32, or I64
-                     (op AtomicRmwOp)
+                     (op MachAtomicRmwOp)
                      (address Reg)
                      (operand Reg)
                      (temp WritableReg)

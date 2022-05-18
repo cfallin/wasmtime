@@ -2,18 +2,14 @@
 
 // Pull in the ISLE generated code.
 pub(crate) mod generated_code;
-use crate::machinst::{InputSourceInst, Reg, Writable};
+use crate::machinst::{InputSourceInst, Writable};
 use generated_code::MInst;
+
+isle_common_prelude_uses!();
 
 // Types that the generated ISLE code uses via `use super::*`.
 use super::{is_int_or_ref_ty, is_mergeable_load, lower_to_amode};
 use crate::{
-    ir::{
-        condcodes::{FloatCC, IntCC},
-        immediates::*,
-        types::*,
-        Inst, InstructionData, MemFlags, Opcode, TrapCode, Value, ValueList,
-    },
     isa::{
         settings::Flags,
         unwind::UnwindInst,
@@ -22,8 +18,10 @@ use crate::{
             settings::Flags as IsaFlags,
         },
     },
+    isle_vcode_output_methods,
+    machinst::isle::lower::{lower_common, IsleContext},
     machinst::{
-        isle::*, AtomicRmwOp, InsnInput, InsnOutput, LowerCtx, VCodeConstant, VCodeConstantData,
+        isle::*, InsnInput, InsnOutput, LowerCtx, MachAtomicRmwOp, VCodeConstant, VCodeConstantData,
     },
 };
 use std::convert::TryFrom;
@@ -54,7 +52,8 @@ impl<C> generated_code::Context for IsleContext<'_, C, Flags, IsaFlags, 6>
 where
     C: LowerCtx<I = MInst>,
 {
-    isle_prelude_methods!();
+    isle_common_prelude_methods!();
+    isle_vcode_output_methods!();
 
     #[inline]
     fn operand_size_of_type_32_64(&mut self, ty: Type) -> OperandSize {

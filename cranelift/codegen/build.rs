@@ -180,6 +180,13 @@ fn get_isle_compilations(
     let clif_isle = out_dir.join("clif.isle");
     let prelude_isle =
         make_isle_source_path_relative(&cur_dir, crate_dir.join("src").join("prelude.isle"));
+    let prelude_lower_isle =
+        make_isle_source_path_relative(&cur_dir, crate_dir.join("src").join("prelude_lower.isle"));
+    let prelude_analysis_isle = make_isle_source_path_relative(
+        &cur_dir,
+        crate_dir.join("src").join("prelude_analysis.isle"),
+    );
+    let src_facts = make_isle_source_path_relative(&cur_dir, crate_dir.join("src").join("facts"));
     let src_isa_x64 =
         make_isle_source_path_relative(&cur_dir, crate_dir.join("src").join("isa").join("x64"));
     let src_isa_aarch64 =
@@ -207,6 +214,7 @@ fn get_isle_compilations(
                 output: out_dir.join("isle_x64.rs"),
                 inputs: vec![
                     prelude_isle.clone(),
+                    prelude_lower_isle.clone(),
                     src_isa_x64.join("inst.isle"),
                     src_isa_x64.join("lower.isle"),
                 ],
@@ -217,6 +225,7 @@ fn get_isle_compilations(
                 output: out_dir.join("isle_aarch64.rs"),
                 inputs: vec![
                     prelude_isle.clone(),
+                    prelude_lower_isle.clone(),
                     src_isa_aarch64.join("inst.isle"),
                     src_isa_aarch64.join("lower.isle"),
                 ],
@@ -227,8 +236,19 @@ fn get_isle_compilations(
                 output: out_dir.join("isle_s390x.rs"),
                 inputs: vec![
                     prelude_isle.clone(),
+                    prelude_lower_isle.clone(),
                     src_isa_s390x.join("inst.isle"),
                     src_isa_s390x.join("lower.isle"),
+                ],
+                untracked_inputs: vec![clif_isle.clone()],
+            },
+            // The mid-end fact analyses.
+            IsleCompilation {
+                output: out_dir.join("isle_facts.rs"),
+                inputs: vec![
+                    prelude_isle.clone(),
+                    prelude_analysis_isle.clone(),
+                    src_facts.join("last_store.isle"),
                 ],
                 untracked_inputs: vec![clif_isle.clone()],
             },

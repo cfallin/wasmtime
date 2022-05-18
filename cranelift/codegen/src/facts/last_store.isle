@@ -1,0 +1,32 @@
+;; Alias analysis result: for each disjoint "category" of abstracted
+;; state, the last instruction to maybe modify that state. (This is a
+;; may-analysis: it is guaranteed that any subsequent instruction will
+;; not have stored to the given abstract state, but the named
+;; instruction may or may not have.)
+(type LastStoreState (enum
+                      (Insts
+                       ;; Last instruction to modify a Wasm heap.
+                       (heap Inst)
+                       ;; Last instruction to modify a Wasm table.
+                       (table Inst)
+                       ;; Last instruction to modify a Wasm table.
+                       (vmctx Inst)
+                       ;; Last instruction to modify anything else (not one
+                       ;; of the above).
+                       (other Inst))))
+
+;; Default value: it is always safe to say that the last instruction
+;; to store any given area of state may have been the current
+;; instruction. This is used by the wrapper to fill in table elements
+;; that are requested before being computed (e.g. to break cycles).
+(decl pure last_store_default (Inst) LastStoreState)
+(rule (last_store_default inst)
+      (LastStoreState.Insts inst inst inst inst))
+
+(decl pure fact last_store (Inst) LastStoreState)
+(rule (last_store inst)
+      (if-let pred (inst_single_pred inst))
+      (last_store pred))
+(rule (last_store inst)
+      (if (inst_no_single_pred inst))
+      (last_store_default inst))
