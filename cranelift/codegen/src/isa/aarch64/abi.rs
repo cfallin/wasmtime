@@ -14,7 +14,7 @@ use crate::settings;
 use crate::{CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use regalloc2::VReg;
+use regalloc2::{PRegMask, VReg};
 use smallvec::{smallvec, SmallVec};
 
 // We use a generic implementation that factors out AArch64 and x64 ABI commonalities, because
@@ -1062,8 +1062,9 @@ impl ABIMachineSpec for AArch64MachineDeps {
 
     fn gen_call(
         dest: &CallDest,
-        uses: Vec<Reg>,
-        defs: Vec<Writable<Reg>>,
+        uses: SmallVec<[Reg; 8]>,
+        defs: SmallVec<[Writable<Reg>; 8]>,
+        clobbers: PRegMask,
         opcode: ir::Opcode,
         tmp: Writable<Reg>,
         callee_conv: isa::CallConv,
@@ -1076,6 +1077,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
                     dest: name.clone(),
                     uses,
                     defs,
+                    clobbers,
                     opcode,
                     caller_callconv: caller_conv,
                     callee_callconv: callee_conv,
@@ -1092,6 +1094,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
                         rn: tmp.to_reg(),
                         uses,
                         defs,
+                        clobbers,
                         opcode,
                         caller_callconv: caller_conv,
                         callee_callconv: callee_conv,
@@ -1103,6 +1106,7 @@ impl ABIMachineSpec for AArch64MachineDeps {
                     rn: *reg,
                     uses,
                     defs,
+                    clobbers,
                     opcode,
                     caller_callconv: caller_conv,
                     callee_callconv: callee_conv,
@@ -1131,8 +1135,9 @@ impl ABIMachineSpec for AArch64MachineDeps {
         insts.push(Inst::Call {
             info: Box::new(CallInfo {
                 dest: ExternalName::LibCall(LibCall::Memcpy),
-                uses: vec![arg0.to_reg(), arg1.to_reg(), arg2.to_reg()],
-                defs: Self::get_regs_clobbered_by_call(call_conv),
+                uses: smallvec![arg0.to_reg(), arg1.to_reg(), arg2.to_reg()],
+                defs: smallvec![],
+                clobbers: Self::get_regs_clobbered_by_call(call_conv),
                 opcode: Opcode::Call,
                 caller_callconv: call_conv,
                 callee_callconv: call_conv,
@@ -1159,21 +1164,17 @@ impl ABIMachineSpec for AArch64MachineDeps {
         s.nominal_sp_to_fp
     }
 
-    fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> Vec<Writable<Reg>> {
-        let mut caller_saved = Vec::new();
-        for i in 0..29 {
-            let x = writable_xreg(i);
-            if is_reg_clobbered_by_call(call_conv_of_callee, x.to_reg().to_real_reg().unwrap()) {
-                caller_saved.push(x);
-            }
+    fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> PRegMask {
+        let mut clobbers = DEFAULT_AAPCS_CLOBBERS;
+
+        if call_conv_of_callee.extends_baldrdash() {
+            clobbers.add(xreg_preg(16));
+            clobbers.add(xreg_preg(17));
+            clobbers.add(xreg_preg(18));
+            clobbers.add(vreg_preg(31));
         }
-        for i in 0..32 {
-            let v = writable_vreg(i);
-            if is_reg_clobbered_by_call(call_conv_of_callee, v.to_reg().to_real_reg().unwrap()) {
-                caller_saved.push(v);
-            }
-        }
-        caller_saved
+
+        clobbers
     }
 
     fn get_ext_mode(
@@ -1290,47 +1291,53 @@ fn get_regs_restored_in_epilogue(
     (int_saves, vec_saves)
 }
 
-fn is_reg_clobbered_by_call(call_conv_of_callee: isa::CallConv, r: RealReg) -> bool {
-    if call_conv_of_callee.extends_baldrdash() {
-        match r.class() {
-            RegClass::Int => {
-                let enc = r.hw_enc() & 31;
-                if !BALDRDASH_JIT_CALLEE_SAVED_GPR[enc as usize] {
-                    return true;
-                }
-                // Otherwise, fall through to preserve native's ABI caller-saved.
-            }
-            RegClass::Float => {
-                let enc = r.hw_enc() & 31;
-                if !BALDRDASH_JIT_CALLEE_SAVED_FPU[enc as usize] {
-                    return true;
-                }
-                // Otherwise, fall through to preserve native's ABI caller-saved.
-            }
-        };
-    }
-
-    match r.class() {
-        RegClass::Int => {
-            // x0 - x17 inclusive are caller-saves.
-            r.hw_enc() <= 17
-        }
-        RegClass::Float => {
-            // v0 - v7 inclusive and v16 - v31 inclusive are caller-saves. The
-            // upper 64 bits of v8 - v15 inclusive are also caller-saves.
-            // However, because we cannot currently represent partial registers
-            // to regalloc.rs, we indicate here that every vector register is
-            // caller-save. Because this function is used at *callsites*,
-            // approximating in this direction (save more than necessary) is
-            // conservative and thus safe.
-            //
-            // Note that we set the 'not included in clobber set' flag in the
-            // regalloc.rs API when a call instruction's callee has the same ABI
-            // as the caller (the current function body); this is safe (anything
-            // clobbered by callee can be clobbered by caller as well) and
-            // avoids unnecessary saves of v8-v15 in the prologue even though we
-            // include them as defs here.
-            true
-        }
-    }
+const fn default_aapcs_clobbers() -> PRegMask {
+    PRegMask::empty()
+        // x0 - x17 inclusive are caller-saves.
+        .with(xreg_preg(0))
+        .with(xreg_preg(1))
+        .with(xreg_preg(2))
+        .with(xreg_preg(3))
+        .with(xreg_preg(4))
+        .with(xreg_preg(5))
+        .with(xreg_preg(6))
+        .with(xreg_preg(7))
+        .with(xreg_preg(8))
+        .with(xreg_preg(9))
+        .with(xreg_preg(10))
+        .with(xreg_preg(11))
+        .with(xreg_preg(12))
+        .with(xreg_preg(13))
+        .with(xreg_preg(14))
+        .with(xreg_preg(15))
+        .with(xreg_preg(16))
+        .with(xreg_preg(17))
+        // v0 - v7 inclusive are caller-saves.
+        .with(vreg_preg(0))
+        .with(vreg_preg(1))
+        .with(vreg_preg(2))
+        .with(vreg_preg(3))
+        .with(vreg_preg(4))
+        .with(vreg_preg(5))
+        .with(vreg_preg(6))
+        .with(vreg_preg(7))
+        // v16 - v31 inclusive are caller-saves.
+        .with(vreg_preg(16))
+        .with(vreg_preg(17))
+        .with(vreg_preg(18))
+        .with(vreg_preg(19))
+        .with(vreg_preg(20))
+        .with(vreg_preg(21))
+        .with(vreg_preg(22))
+        .with(vreg_preg(23))
+        .with(vreg_preg(24))
+        .with(vreg_preg(25))
+        .with(vreg_preg(26))
+        .with(vreg_preg(27))
+        .with(vreg_preg(28))
+        .with(vreg_preg(29))
+        .with(vreg_preg(30))
+        .with(vreg_preg(31))
 }
+
+const DEFAULT_AAPCS_CLOBBERS: PRegMask = default_aapcs_clobbers();

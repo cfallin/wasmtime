@@ -5278,8 +5278,9 @@ fn test_aarch64_binemit() {
         Inst::Call {
             info: Box::new(CallInfo {
                 dest: ExternalName::testcase("test0"),
-                uses: Vec::new(),
-                defs: Vec::new(),
+                uses: smallvec![],
+                defs: smallvec![],
+                clobbers: PRegMask::empty(),
                 opcode: Opcode::Call,
                 caller_callconv: CallConv::SystemV,
                 callee_callconv: CallConv::SystemV,
@@ -5293,8 +5294,9 @@ fn test_aarch64_binemit() {
         Inst::CallInd {
             info: Box::new(CallIndInfo {
                 rn: xreg(10),
-                uses: Vec::new(),
-                defs: Vec::new(),
+                uses: smallvec![],
+                defs: smallvec![],
+                clobbers: PRegMask::empty(),
                 opcode: Opcode::CallIndirect,
                 caller_callconv: CallConv::SystemV,
                 callee_callconv: CallConv::SystemV,
