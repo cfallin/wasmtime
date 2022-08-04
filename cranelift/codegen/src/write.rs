@@ -94,6 +94,11 @@ pub trait FuncWriter {
             self.write_entity_definition(w, func, cref.into(), cval)?;
         }
 
+        for (callsite, callsite_data) in &func.callsite_labels {
+            any = true;
+            self.write_entity_definition(w, func, callsite.into(), callsite_data)?;
+        }
+
         if let Some(limit) = func.stack_limit {
             any = true;
             self.write_entity_definition(w, func, AnyEntity::StackLimit, &limit)?;
@@ -488,7 +493,36 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
                 DisplayValues(&args[1..])
             )
         }
+        LabeledCall {
+            callsite,
+            func_ref,
+            ref args,
+            ..
+        } => write!(
+            w,
+            " {}, {}({})",
+            callsite,
+            func_ref,
+            DisplayValues(args.as_slice(pool))
+        ),
+        LabeledCallIndirect {
+            callsite,
+            sig_ref,
+            ref args,
+            ..
+        } => {
+            let args = args.as_slice(pool);
+            write!(
+                w,
+                " {}, {}, {}({})",
+                callsite,
+                sig_ref,
+                args[0],
+                DisplayValues(&args[1..])
+            )
+        }
         FuncAddr { func_ref, .. } => write!(w, " {}", func_ref),
+        CallSite { callsite, .. } => write!(w, " {}", callsite),
         StackLoad {
             stack_slot, offset, ..
         } => write!(w, " {}{}", stack_slot, offset),

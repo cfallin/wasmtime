@@ -2186,7 +2186,7 @@
 ;;;; Rules for `func_addr` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; Load the address of a function, target reachable via PC-relative instruction.
-(rule (lower (func_addr (func_ref_data _ name (reloc_distance_near))))
+(rule (lower (func_addr (func_ref_data _ name (RelocDistance.Near))))
       (load_addr (memarg_symbol name 0 (memflags_trusted))))
 
 ;; Load the address of a function, general case.
@@ -2197,7 +2197,7 @@
 ;;;; Rules for `symbol_value` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; Load the address of a symbol, target reachable via PC-relative instruction.
-(rule (lower (symbol_value (symbol_value_data name (reloc_distance_near)
+(rule (lower (symbol_value (symbol_value_data name (RelocDistance.Near)
                                               off)))
       (if-let offset (memarg_symbol_offset off))
       (load_addr (memarg_symbol name offset (memflags_trusted))))
@@ -3568,8 +3568,14 @@
 
 ;;;; Rules for `call` and `call_indirect` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(rule (lower (call (func_ref_data sig_ref name reloc_distance) args))
+      (lower_call sig_ref name args reloc_distance))
+(rule (lower (labeled_call _ (func_ref_data sig_ref name reloc_distance) args))
+      (lower_call sig_ref name args reloc_distance))
+
 ;; Direct call to an in-range function.
-(rule (lower (call (func_ref_data sig_ref name (reloc_distance_near)) args))
+(decl lower_call (SigRef ExternalName ValueSlice RelocDistance) InstOutput)
+(rule (lower_call sig_ref name args (RelocDistance.Near))
       (let ((abi ABISig (abi_sig sig_ref))
             (_ Unit (abi_accumulate_outgoing_args_size abi))
             (_ InstOutput (lower_call_args abi (range 0 (abi_num_args abi)) args))
@@ -3577,7 +3583,7 @@
         (lower_call_rets abi (range 0 (abi_num_rets abi)) (output_builder_new))))
 
 ;; Direct call to an out-of-range function (implicitly via pointer).
-(rule (lower (call (func_ref_data sig_ref name _) args))
+(rule (lower_call sig_ref name args (RelocDistance.Far))
       (let ((abi ABISig (abi_sig sig_ref))
             (_ Unit (abi_accumulate_outgoing_args_size abi))
             (_ InstOutput (lower_call_args abi (range 0 (abi_num_args abi)) args))
@@ -3587,6 +3593,12 @@
 
 ;; Indirect call.
 (rule (lower (call_indirect sig_ref ptr args))
+      (lower_call_indirect sig_ref ptr args))
+(rule (lower (labeled_call_indirect _ sig_ref ptr args))
+      (lower_call_indirect sig_ref ptr args))
+
+(decl lower_call_indirect (SigRef Value ValueSlice) InstOutput)
+(rule (lower_call_indirect sig_ref ptr args)
       (let ((abi ABISig (abi_sig sig_ref))
             (target Reg (put_in_reg ptr))
             (_ Unit (abi_accumulate_outgoing_args_size abi))

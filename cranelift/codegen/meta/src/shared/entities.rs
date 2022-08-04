@@ -43,6 +43,10 @@ pub(crate) struct EntityRefs {
 
     /// A variable-sized list of value operands. Use for Block and function call arguments.
     pub(crate) varargs: OperandKind,
+
+    /// A callsite. Used for primitives that return info about the
+    /// callsite, like its return address.
+    pub(crate) callsite: OperandKind,
 }
 
 impl EntityRefs {
@@ -85,6 +89,8 @@ impl EntityRefs {
                         returned from an instruction.
                     "#,
             ),
+
+            callsite: new("callsite", "ir::CallSite", "A callsite."),
         }
     }
 }

@@ -405,6 +405,10 @@
                     (name BoxExternalName)
                     (offset i64))
 
+       ;; Loads the return address label after a labeled callsite.
+       (LoadCallReturnAddr (dst WritableReg)
+                           (label CallSite))
+
        ;; =========================================
        ;; Instructions pertaining to atomic memory accesses.
 
@@ -1518,10 +1522,10 @@
 
 ;;;; Helpers for Emitting Calls ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(decl gen_call (SigRef ExternalName RelocDistance ValueSlice) InstOutput)
+(decl gen_call (OptionCallSite SigRef ExternalName RelocDistance ValueSlice) InstOutput)
 (extern constructor gen_call gen_call)
 
-(decl gen_call_indirect (SigRef Value ValueSlice) InstOutput)
+(decl gen_call_indirect (OptionCallSite SigRef Value ValueSlice) InstOutput)
 (extern constructor gen_call_indirect gen_call_indirect)
 
 ;;;; Helpers for Emitting Loads ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1556,6 +1560,13 @@
 (rule (load_ext_name extname offset)
       (let ((dst WritableGpr (temp_writable_gpr))
             (_ Unit (emit (MInst.LoadExtName dst extname offset))))
+        dst))
+
+;; Helper for constructing a LoadCallReturnAddr instruction.
+(decl x64_load_call_return_addr (CallSite) Reg)
+(rule (x64_load_call_return_addr callsite)
+      (let ((dst WritableGpr (temp_writable_gpr))
+            (_ Unit (emit (MInst.LoadCallReturnAddr dst callsite))))
         dst))
 
 ;; Load a value into a register.

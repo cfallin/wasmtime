@@ -15,6 +15,8 @@ pub(crate) struct Formats {
     pub(crate) branch_table: Rc<InstructionFormat>,
     pub(crate) call: Rc<InstructionFormat>,
     pub(crate) call_indirect: Rc<InstructionFormat>,
+    pub(crate) labeled_call: Rc<InstructionFormat>,
+    pub(crate) labeled_call_indirect: Rc<InstructionFormat>,
     pub(crate) cond_trap: Rc<InstructionFormat>,
     pub(crate) float_compare: Rc<InstructionFormat>,
     pub(crate) float_cond: Rc<InstructionFormat>,
@@ -49,6 +51,7 @@ pub(crate) struct Formats {
     pub(crate) unary_ieee32: Rc<InstructionFormat>,
     pub(crate) unary_ieee64: Rc<InstructionFormat>,
     pub(crate) unary_imm: Rc<InstructionFormat>,
+    pub(crate) callsite: Rc<InstructionFormat>,
 }
 
 impl Formats {
@@ -179,6 +182,21 @@ impl Formats {
                 .value()
                 .varargs()
                 .build(),
+
+            labeled_call: Builder::new("LabeledCall")
+                .imm(&entities.callsite)
+                .imm(&entities.func_ref)
+                .varargs()
+                .build(),
+
+            labeled_call_indirect: Builder::new("LabeledCallIndirect")
+                .imm(&entities.callsite)
+                .imm(&entities.sig_ref)
+                .value()
+                .varargs()
+                .build(),
+
+            callsite: Builder::new("CallSite").imm(&entities.callsite).build(),
 
             func_addr: Builder::new("FuncAddr").imm(&entities.func_ref).build(),
 

@@ -65,8 +65,8 @@ use crate::ir;
 use crate::ir::entities::AnyEntity;
 use crate::ir::instructions::{BranchInfo, CallInfo, InstructionFormat, ResolvedConstraint};
 use crate::ir::{
-    types, ArgumentPurpose, Block, Constant, DynamicStackSlot, FuncRef, Function, GlobalValue,
-    Inst, JumpTable, Opcode, SigRef, StackSlot, Type, Value, ValueDef, ValueList,
+    types, ArgumentPurpose, Block, CallSite, Constant, DynamicStackSlot, FuncRef, Function,
+    GlobalValue, Inst, JumpTable, Opcode, SigRef, StackSlot, Type, Value, ValueDef, ValueList,
 };
 use crate::isa::TargetIsa;
 use crate::iterators::IteratorExtras;
@@ -675,8 +675,27 @@ impl<'a> Verifier<'a> {
                 self.verify_sig_ref(inst, sig_ref, errors)?;
                 self.verify_value_list(inst, args, errors)?;
             }
+            LabeledCall {
+                func_ref, ref args, ..
+            } => {
+                // Callsite verified to not be a duplicate def during
+                // parsing.
+                self.verify_func_ref(inst, func_ref, errors)?;
+                self.verify_value_list(inst, args, errors)?;
+            }
+            LabeledCallIndirect {
+                sig_ref, ref args, ..
+            } => {
+                // Callsite verified to not be a duplicate def during
+                // parsing.
+                self.verify_sig_ref(inst, sig_ref, errors)?;
+                self.verify_value_list(inst, args, errors)?;
+            }
             FuncAddr { func_ref, .. } => {
                 self.verify_func_ref(inst, func_ref, errors)?;
+            }
+            CallSite { callsite, .. } => {
+                self.verify_callsite_ref(inst, callsite, errors)?;
             }
             StackLoad { stack_slot, .. } | StackStore { stack_slot, .. } => {
                 self.verify_stack_slot(inst, stack_slot, errors)?;
@@ -815,6 +834,23 @@ impl<'a> Verifier<'a> {
                 inst,
                 self.context(inst),
                 format!("invalid function reference {}", f),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_callsite_ref(
+        &self,
+        inst: Inst,
+        callsite: CallSite,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult<()> {
+        if self.func.callsite_labels[callsite].call_inst.is_none() {
+            errors.fatal((
+                inst,
+                self.context(inst),
+                format!("reference to dangling callsite label {}", callsite),
             ))
         } else {
             Ok(())

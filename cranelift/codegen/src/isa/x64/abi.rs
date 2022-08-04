@@ -493,6 +493,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 defs: smallvec![],
                 clobbers: PRegSet::empty(),
                 opcode: Opcode::Call,
+                callsite: None.into(),
             }),
         });
         insts

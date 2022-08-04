@@ -184,6 +184,9 @@ pub trait LowerCtx {
 
     /// Note that one vreg is to be treated as an alias of another.
     fn set_vreg_alias(&mut self, from: Reg, to: Reg);
+
+    /// Bind a CallSite return-address label to a return location.
+    fn bind_callsite_return(&mut self, callsite: CallSite);
 }
 
 /// A representation of all of the ways in which a value is available, aside

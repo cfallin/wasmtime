@@ -7,8 +7,8 @@ use std::cell::Cell;
 
 pub use super::MachLabel;
 pub use crate::ir::{
-    ArgumentExtension, Constant, DynamicStackSlot, ExternalName, FuncRef, GlobalValue, Immediate,
-    SigRef, StackSlot,
+    ArgumentExtension, CallSite, Constant, DynamicStackSlot, ExternalName, FuncRef, GlobalValue,
+    Immediate, SigRef, StackSlot,
 };
 pub use crate::isa::unwind::UnwindInst;
 pub use crate::machinst::{
@@ -27,6 +27,7 @@ pub type InstOutput = SmallVec<[ValueRegs; 2]>;
 pub type InstOutputBuilder = Cell<InstOutput>;
 pub type BoxExternalName = Box<ExternalName>;
 pub type Range = (usize, usize);
+pub type OptionCallSite = cranelift_entity::packed_option::PackedOption<CallSite>;
 
 /// Helper macro to define methods in `prelude.isle` within `impl Context for
 /// ...` for each backend. These methods are shared amongst all backends.
@@ -645,15 +646,6 @@ macro_rules! isle_prelude_methods {
         }
 
         #[inline]
-        fn reloc_distance_near(&mut self, dist: RelocDistance) -> Option<()> {
-            if dist == RelocDistance::Near {
-                Some(())
-            } else {
-                None
-            }
-        }
-
-        #[inline]
         fn u128_from_immediate(&mut self, imm: Immediate) -> Option<u128> {
             let bytes = self.lower_ctx.get_immediate_data(imm).as_slice();
             Some(u128::from_le_bytes(bytes.try_into().ok()?))
@@ -883,6 +875,19 @@ macro_rules! isle_prelude_methods {
         #[inline]
         fn sink_inst(&mut self, inst: Inst) {
             self.lower_ctx.sink_inst(inst);
+        }
+
+        #[inline]
+        fn invalid_callsite(&mut self) -> cranelift_entity::packed_option::PackedOption<CallSite> {
+            None.into()
+        }
+
+        #[inline]
+        fn some_callsite(
+            &mut self,
+            callsite: CallSite,
+        ) -> cranelift_entity::packed_option::PackedOption<CallSite> {
+            Some(callsite).into()
         }
     };
 }

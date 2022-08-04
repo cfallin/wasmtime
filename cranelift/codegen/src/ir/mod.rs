@@ -2,6 +2,7 @@
 
 mod atomic_rmw_op;
 mod builder;
+mod callsite;
 pub mod condcodes;
 pub mod constant;
 pub mod dfg;
@@ -32,12 +33,13 @@ pub use crate::ir::atomic_rmw_op::AtomicRmwOp;
 pub use crate::ir::builder::{
     InsertBuilder, InstBuilder, InstBuilderBase, InstInserterBase, ReplaceBuilder,
 };
+pub use crate::ir::callsite::CallSiteData;
 pub use crate::ir::constant::{ConstantData, ConstantPool};
 pub use crate::ir::dfg::{DataFlowGraph, ValueDef};
 pub use crate::ir::dynamic_type::{DynamicTypeData, DynamicTypes};
 pub use crate::ir::entities::{
-    Block, Constant, DynamicStackSlot, DynamicType, FuncRef, GlobalValue, Heap, Immediate, Inst,
-    JumpTable, SigRef, StackSlot, Table, Value,
+    Block, CallSite, Constant, DynamicStackSlot, DynamicType, FuncRef, GlobalValue, Heap,
+    Immediate, Inst, JumpTable, SigRef, StackSlot, Table, Value,
 };
 pub use crate::ir::extfunc::{
     AbiParam, ArgumentExtension, ArgumentPurpose, ExtFuncData, Signature,

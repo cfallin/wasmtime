@@ -1,7 +1,7 @@
 //! This module defines x86_64-specific machine instruction types.
 
 use crate::binemit::{Addend, CodeOffset, Reloc, StackMap};
-use crate::ir::{types, ExternalName, Opcode, SourceLoc, TrapCode, Type};
+use crate::ir::{types, CallSite, ExternalName, Opcode, SourceLoc, TrapCode, Type};
 use crate::isa::x64::abi::X64ABIMachineSpec;
 use crate::isa::x64::inst::regs::pretty_print_reg;
 use crate::isa::x64::settings as x64_settings;
@@ -10,6 +10,7 @@ use crate::{machinst::*, trace};
 use crate::{settings, CodegenError, CodegenResult};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use cranelift_entity::packed_option::PackedOption;
 use regalloc2::{Allocation, PRegSet, VReg};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
@@ -41,6 +42,8 @@ pub struct CallInfo {
     pub clobbers: PRegSet,
     /// The opcode of this call.
     pub opcode: Opcode,
+    /// The label of this call, if any.
+    pub callsite: PackedOption<CallSite>,
 }
 
 #[test]
@@ -698,6 +701,7 @@ impl Inst {
                 defs,
                 clobbers,
                 opcode,
+                callsite: None.into(),
             }),
         }
     }
@@ -717,6 +721,7 @@ impl Inst {
                 defs,
                 clobbers,
                 opcode,
+                callsite: None.into(),
             }),
         }
     }

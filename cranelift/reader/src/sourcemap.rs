@@ -10,8 +10,8 @@ use crate::error::{Location, ParseResult};
 use crate::lexer::split_entity_name;
 use cranelift_codegen::ir::entities::{AnyEntity, DynamicType};
 use cranelift_codegen::ir::{
-    Block, Constant, DynamicStackSlot, FuncRef, GlobalValue, Heap, JumpTable, SigRef, StackSlot,
-    Table, Value,
+    Block, CallSite, Constant, DynamicStackSlot, FuncRef, GlobalValue, Heap, JumpTable, SigRef,
+    StackSlot, Table, Value,
 };
 use std::collections::HashMap;
 
@@ -76,6 +76,11 @@ impl SourceMap {
 
     /// Look up a constant entity.
     pub fn contains_constant(&self, c: Constant) -> bool {
+        self.locations.contains_key(&c.into())
+    }
+
+    /// Look up a callsite entity.
+    pub fn contains_callsite(&self, c: CallSite) -> bool {
         self.locations.contains_key(&c.into())
     }
 
@@ -219,8 +224,13 @@ impl SourceMap {
         self.def_entity(entity.into(), loc)
     }
 
-    /// Define the jump table `entity`.
+    /// Define the caonstant `entity`.
     pub fn def_constant(&mut self, entity: Constant, loc: Location) -> ParseResult<()> {
+        self.def_entity(entity.into(), loc)
+    }
+
+    /// Define the callsite `entity`.
+    pub fn def_callsite(&mut self, entity: CallSite, loc: Location) -> ParseResult<()> {
         self.def_entity(entity.into(), loc)
     }
 

@@ -15,7 +15,7 @@ use crate::{
         condcodes::{FloatCC, IntCC},
         immediates::*,
         types::*,
-        Inst, InstructionData, MemFlags, Opcode, TrapCode, Value, ValueList,
+        CallSite, Inst, InstructionData, MemFlags, Opcode, TrapCode, Value, ValueList,
     },
     isa::{
         settings::Flags,
@@ -31,6 +31,7 @@ use crate::{
         VCodeConstant, VCodeConstantData,
     },
 };
+use cranelift_entity::packed_option::PackedOption;
 use smallvec::SmallVec;
 use std::boxed::Box;
 use std::convert::TryFrom;
@@ -595,27 +596,30 @@ where
 
     fn gen_call(
         &mut self,
+        callsite: PackedOption<CallSite>,
         sig_ref: SigRef,
         extname: ExternalName,
-        dist: RelocDistance,
+        dist: &RelocDistance,
         args @ (inputs, off): ValueSlice,
     ) -> InstOutput {
         let caller_conv = self.lower_ctx.abi().call_conv();
         let sig = &self.lower_ctx.dfg().signatures[sig_ref];
         let num_rets = sig.returns.len();
         let abi = ABISig::from_func_sig::<X64ABIMachineSpec>(sig, self.flags).unwrap();
-        let caller = X64ABICaller::from_func(sig, &extname, dist, caller_conv, self.flags).unwrap();
+        let caller =
+            X64ABICaller::from_func(sig, &extname, *dist, caller_conv, self.flags).unwrap();
 
         assert_eq!(
             inputs.len(&self.lower_ctx.dfg().value_lists) - off,
             sig.params.len()
         );
 
-        self.gen_call_common(abi, num_rets, caller, args)
+        self.gen_call_common(abi, num_rets, caller, args, callsite)
     }
 
     fn gen_call_indirect(
         &mut self,
+        callsite: PackedOption<CallSite>,
         sig_ref: SigRef,
         val: Value,
         args @ (inputs, off): ValueSlice,
@@ -634,7 +638,7 @@ where
             sig.params.len()
         );
 
-        self.gen_call_common(abi, num_rets, caller, args)
+        self.gen_call_common(abi, num_rets, caller, args, callsite)
     }
 }
 
@@ -666,6 +670,7 @@ where
         num_rets: usize,
         mut caller: X64ABICaller,
         (inputs, off): ValueSlice,
+        callsite: PackedOption<CallSite>,
     ) -> InstOutput {
         caller.emit_stack_pre_adjust(self.lower_ctx);
 

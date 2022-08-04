@@ -7,9 +7,10 @@ use crate::entity::{PrimaryMap, SecondaryMap};
 use crate::ir;
 use crate::ir::JumpTables;
 use crate::ir::{
-    instructions::BranchInfo, Block, DynamicStackSlot, DynamicStackSlotData, DynamicType,
-    ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Heap, HeapData, Inst, InstructionData,
-    JumpTable, JumpTableData, Opcode, SigRef, StackSlot, StackSlotData, Table, TableData, Type,
+    instructions::BranchInfo, Block, CallSite, CallSiteData, DynamicStackSlot,
+    DynamicStackSlotData, DynamicType, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Heap,
+    HeapData, Inst, InstructionData, JumpTable, JumpTableData, Opcode, SigRef, StackSlot,
+    StackSlotData, Table, TableData, Type,
 };
 use crate::ir::{DataFlowGraph, ExternalName, Layout, Signature};
 use crate::ir::{DynamicStackSlots, SourceLocs, StackSlots};
@@ -96,6 +97,9 @@ pub struct Function {
     /// Jump tables used in this function.
     pub jump_tables: JumpTables,
 
+    /// Callsite labels.
+    pub callsite_labels: PrimaryMap<ir::CallSite, ir::CallSiteData>,
+
     /// Data flow graph containing the primary definition of all instructions, blocks and values.
     pub dfg: DataFlowGraph,
 
@@ -129,6 +133,7 @@ impl Function {
             heaps: PrimaryMap::new(),
             tables: PrimaryMap::new(),
             jump_tables: PrimaryMap::new(),
+            callsite_labels: PrimaryMap::new(),
             dfg: DataFlowGraph::new(),
             layout: Layout::new(),
             srclocs: SecondaryMap::new(),
@@ -148,6 +153,7 @@ impl Function {
         self.dfg.clear();
         self.layout.clear();
         self.srclocs.clear();
+        self.callsite_labels.clear();
         self.stack_limit = None;
     }
 
@@ -216,6 +222,11 @@ impl Function {
     /// Declares a table accessible to the function.
     pub fn create_table(&mut self, data: TableData) -> Table {
         self.tables.push(data)
+    }
+
+    /// Creates a new callsite label.
+    pub fn create_callsite(&mut self, data: CallSiteData) -> CallSite {
+        self.callsite_labels.push(data)
     }
 
     /// Return an object that can display this function with correct ISA-specific annotations.

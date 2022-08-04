@@ -589,10 +589,10 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
             });
         }
 
-        Opcode::Call | Opcode::CallIndirect => {
+        Opcode::Call | Opcode::CallIndirect | Opcode::LabeledCall | Opcode::LabeledCallIndirect => {
             let caller_conv = ctx.abi().call_conv();
             let (mut abi, inputs) = match op {
-                Opcode::Call => {
+                Opcode::Call | Opcode::LabeledCall => {
                     let (extname, dist) = ctx.call_target(insn).unwrap();
                     let extname = extname.clone();
                     let sig = ctx.call_sig(insn).unwrap();
@@ -603,7 +603,7 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                         &inputs[..],
                     )
                 }
-                Opcode::CallIndirect => {
+                Opcode::CallIndirect | Opcode::LabeledCallIndirect => {
                     let ptr = put_input_in_reg(ctx, inputs[0], NarrowValueMode::ZeroExtend64);
                     let sig = ctx.call_sig(insn).unwrap();
                     assert!(inputs.len() - 1 == sig.params.len());
@@ -629,6 +629,10 @@ pub(crate) fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
                 abi.emit_copy_retval_to_regs(ctx, i, retval_regs);
             }
             abi.emit_stack_post_adjust(ctx);
+        }
+
+        Opcode::CallsiteReturnAddr => {
+            unimplemented!("Not implemented yet");
         }
 
         Opcode::GetPinnedReg => {

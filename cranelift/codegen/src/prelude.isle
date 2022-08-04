@@ -203,7 +203,7 @@
 (type UnwindInst (primitive UnwindInst))
 (type ExternalName (primitive ExternalName))
 (type BoxExternalName (primitive BoxExternalName))
-(type RelocDistance (primitive RelocDistance))
+(type RelocDistance extern (enum RelocDistance (Near) (Far)))
 
 ;;;; Primitive Type Conversions ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -735,11 +735,6 @@
 (decl box_external_name (ExternalName) BoxExternalName)
 (extern constructor box_external_name box_external_name)
 
-;; Accessor for `RelocDistance`.
-
-(decl reloc_distance_near () RelocDistance)
-(extern extractor reloc_distance_near reloc_distance_near)
-
 ;; Accessor for `Immediate` as u128.
 
 (decl u128_from_immediate (u128) Immediate)
@@ -749,7 +744,6 @@
 
 (decl u128_from_constant (u128) Constant)
 (extern extractor u128_from_constant u128_from_constant)
-
 
 ;;;; Helpers for tail recursion loops ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -878,6 +872,17 @@
 (decl real_reg_to_writable_reg (RealReg) WritableReg)
 (extern constructor real_reg_to_writable_reg real_reg_to_writable_reg)
 
+;; The type of a `PackedOption<CallSite>`.
+(type OptionCallSite (primitive OptionCallSite))
+
+;; Get the invalid-callsite label.
+(decl invalid_callsite () OptionCallSite)
+(extern constructor invalid_callsite invalid_callsite)
+
+;; Turn a CallSite into an OptionCallsite.
+(decl some_callsite (CallSite) OptionCallSite)
+(extern constructor some_callsite some_callsite)
+
 ;;;; Automatic conversions ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (convert Inst Value def_inst)
@@ -890,3 +895,4 @@
 (convert Value InstOutput output_value)
 (convert Offset32 u32 offset32_to_u32)
 (convert ExternalName BoxExternalName box_external_name)
+(convert CallSite OptionCallSite some_callsite)

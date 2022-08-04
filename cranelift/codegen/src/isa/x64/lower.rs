@@ -927,6 +927,9 @@ fn lower_insn_to_regs<C: LowerCtx<I = Inst>>(
         | Opcode::Return
         | Opcode::Call
         | Opcode::CallIndirect
+        | Opcode::LabeledCall
+        | Opcode::LabeledCallIndirect
+        | Opcode::CallsiteReturnAddr
         | Opcode::Trapif
         | Opcode::Trapff => {
             implemented_in_isle(ctx);

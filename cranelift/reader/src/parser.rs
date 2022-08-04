@@ -17,11 +17,11 @@ use cranelift_codegen::ir::instructions::{InstructionData, InstructionFormat, Va
 use cranelift_codegen::ir::types::INVALID;
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{
-    AbiParam, ArgumentExtension, ArgumentPurpose, Block, Constant, ConstantData, DynamicStackSlot,
-    DynamicStackSlotData, DynamicTypeData, ExtFuncData, ExternalName, FuncRef, Function,
-    GlobalValue, GlobalValueData, Heap, HeapData, HeapStyle, JumpTable, JumpTableData, MemFlags,
-    Opcode, SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Table, TableData, Type,
-    Value,
+    AbiParam, ArgumentExtension, ArgumentPurpose, Block, CallSite, CallSiteData, Constant,
+    ConstantData, DynamicStackSlot, DynamicStackSlotData, DynamicTypeData, ExtFuncData,
+    ExternalName, FuncRef, Function, GlobalValue, GlobalValueData, Heap, HeapData, HeapStyle,
+    JumpTable, JumpTableData, MemFlags, Opcode, SigRef, Signature, StackSlot, StackSlotData,
+    StackSlotKind, Table, TableData, Type, Value,
 };
 use cranelift_codegen::isa::{self, CallConv};
 use cranelift_codegen::packed_option::ReservedValue;
@@ -471,6 +471,25 @@ impl Context {
         Ok(())
     }
 
+    // Add a new callsite label.
+    fn add_callsite(&mut self, callsite: CallSite, loc: Location) -> ParseResult<()> {
+        self.map.def_callsite(callsite, loc)?;
+        // Ensure array is defined up to this point.
+        while self.function.callsite_labels.next_key().index() <= callsite.index() {
+            self.function.callsite_labels.push(CallSiteData::default());
+        }
+        Ok(())
+    }
+
+    // Resolve a reference to a callsite label.
+    fn check_callsite(&self, callsite: CallSite, loc: Location) -> ParseResult<()> {
+        if !self.map.contains_callsite(callsite) {
+            err!(loc, "undefined callsite {}", callsite)
+        } else {
+            Ok(())
+        }
+    }
+
     // Resolve a reference to a constant.
     fn check_constant(&self, c: Constant, loc: Location) -> ParseResult<()> {
         if !self.map.contains_constant(c) {
@@ -683,6 +702,17 @@ impl<'a> Parser<'a> {
             self.consume();
             if let Some(fnref) = FuncRef::with_number(fnref) {
                 return Ok(fnref);
+            }
+        }
+        err!(self.loc, err_msg)
+    }
+
+    // Match and consume a callsite reference.
+    fn match_callsite(&mut self, err_msg: &str) -> ParseResult<CallSite> {
+        if let Some(Token::CallSite(callsite)) = self.token() {
+            self.consume();
+            if let Some(callsite) = CallSite::with_number(callsite) {
+                return Ok(callsite);
             }
         }
         err!(self.loc, err_msg)
@@ -1508,6 +1538,11 @@ impl<'a> Parser<'a> {
                     self.parse_stack_limit_decl()
                         .and_then(|gv| ctx.add_stack_limit(gv, self.loc))
                 }
+                Some(Token::CallSite(..)) => {
+                    self.start_gathering_comments();
+                    self.parse_callsite_decl()
+                        .and_then(|callsite| ctx.add_callsite(callsite, self.loc))
+                }
                 // More to come..
                 _ => return Ok(()),
             }?;
@@ -1944,7 +1979,7 @@ impl<'a> Parser<'a> {
         Ok((name, data))
     }
 
-    // Parse a stack limit decl
+    // Parse a stack limit decl.
     //
     // stack-limit-decl ::= * StackLimit "=" GlobalValue(gv)
     fn parse_stack_limit_decl(&mut self) -> ParseResult<GlobalValue> {
@@ -1964,6 +1999,24 @@ impl<'a> Parser<'a> {
         self.claim_gathered_comments(AnyEntity::StackLimit);
 
         Ok(limit)
+    }
+
+    // Parse a callsite label decl.
+    //
+    // callsite-decl ::= CallSite(c) "=" "callsite"
+    fn parse_callsite_decl(&mut self) -> ParseResult<CallSite> {
+        let name = self.match_callsite("expected callsite label")?;
+        self.match_token(Token::Equal, "expected '=' in callsite decl")?;
+        self.match_identifier(
+            "callsite",
+            "expected 'callsite' on right-hand side of callsite decl",
+        )?;
+
+        // Collect any trailing comments.
+        self.token();
+        self.claim_gathered_comments(name);
+
+        Ok(name)
     }
 
     // Parse a function body, add contents to `ctx`.
@@ -2247,6 +2300,28 @@ impl<'a> Parser<'a> {
         ctx.map
             .def_entity(inst.into(), opcode_loc)
             .expect("duplicate inst references created");
+
+        // If this was a LabeledCall or LabeledCallIndirect, set the
+        // location in the entity.
+        match ctx.function.dfg[inst] {
+            InstructionData::LabeledCall { callsite, .. }
+            | InstructionData::LabeledCallIndirect { callsite, .. } => {
+                let old = std::mem::replace(
+                    &mut ctx.function.callsite_labels[callsite].call_inst,
+                    Some(inst).into(),
+                );
+                if old.is_some() {
+                    return err!(
+                        self.loc,
+                        "duplicate def of callsite label {}: at {} and {}",
+                        callsite,
+                        old.unwrap(),
+                        inst
+                    );
+                }
+            }
+            _ => {}
+        }
 
         if !srcloc.is_default() {
             ctx.function.srclocs[inst] = srcloc;
@@ -2915,6 +2990,21 @@ impl<'a> Parser<'a> {
                     args: args.into_value_list(&[], &mut ctx.function.dfg.value_lists),
                 }
             }
+            InstructionFormat::LabeledCall => {
+                let callsite = self.match_callsite("expected callsite label")?;
+                ctx.check_callsite(callsite, self.loc)?;
+                let func_ref = self.match_fn("expected function reference")?;
+                ctx.check_fn(func_ref, self.loc)?;
+                self.match_token(Token::LPar, "expected '(' before arguments")?;
+                let args = self.parse_value_list()?;
+                self.match_token(Token::RPar, "expected ')' after arguments")?;
+                InstructionData::LabeledCall {
+                    opcode,
+                    callsite,
+                    func_ref,
+                    args: args.into_value_list(&[], &mut ctx.function.dfg.value_lists),
+                }
+            }
             InstructionFormat::CallIndirect => {
                 let sig_ref = self.match_sig("expected signature reference")?;
                 ctx.check_sig(sig_ref, self.loc)?;
@@ -2929,11 +3019,34 @@ impl<'a> Parser<'a> {
                     args: args.into_value_list(&[callee], &mut ctx.function.dfg.value_lists),
                 }
             }
+            InstructionFormat::LabeledCallIndirect => {
+                let callsite = self.match_callsite("expected callsite label")?;
+                ctx.check_callsite(callsite, self.loc)?;
+                let sig_ref = self.match_sig("expected signature reference")?;
+                ctx.check_sig(sig_ref, self.loc)?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let callee = self.match_value("expected SSA value callee operand")?;
+                self.match_token(Token::LPar, "expected '(' before arguments")?;
+                let args = self.parse_value_list()?;
+                self.match_token(Token::RPar, "expected ')' after arguments")?;
+                InstructionData::LabeledCallIndirect {
+                    opcode,
+                    callsite,
+                    sig_ref,
+                    args: args.into_value_list(&[callee], &mut ctx.function.dfg.value_lists),
+                }
+            }
             InstructionFormat::FuncAddr => {
                 let func_ref = self.match_fn("expected function reference")?;
                 ctx.check_fn(func_ref, self.loc)?;
                 InstructionData::FuncAddr { opcode, func_ref }
             }
+            InstructionFormat::CallSite => {
+                let callsite = self.match_callsite("expected callsite label")?;
+                ctx.check_callsite(callsite, self.loc)?;
+                InstructionData::CallSite { opcode, callsite }
+            }
+
             InstructionFormat::StackLoad => {
                 let ss = self.match_ss("expected stack slot number: ss«n»")?;
                 ctx.check_ss(ss, self.loc)?;

@@ -413,6 +413,44 @@ impl Table {
     }
 }
 
+/// An IR entity for naming a callsite. Used to get information about
+/// the callsite with various primitives.
+///
+/// Typically used like:
+///
+/// ```ignore
+///     callsite0 = callsite
+///
+/// block0(...):
+///     v1 := callsite_return_addr callsite0
+///     v2 := labeled_call callsite0, fn0(vN, vM, ...)
+/// ```
+///
+/// A `call` or `call_indirect` instruction *may* reference a
+/// callsite, but does not have to. (We may strengthen this in the
+/// future.) At most one call instruction may refer to a given
+/// callsite label; that call instruction *defines* the callsite.
+///
+/// A callsite label may then be used by primitives like
+/// `callsite_return_address`.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub struct CallSite(u32);
+entity_impl!(CallSite, "callsite");
+
+impl CallSite {
+    /// Create a new callsite label from its number.
+    ///
+    /// This method is for use by the parser.
+    pub fn with_number(n: u32) -> Option<Self> {
+        if n < u32::MAX {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+}
+
 /// An opaque reference to any of the entities defined in this module that can appear in CLIF IR.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
@@ -447,6 +485,8 @@ pub enum AnyEntity {
     Table(Table),
     /// A function's stack limit
     StackLimit,
+    /// A callsite label.
+    CallSite(CallSite),
 }
 
 impl fmt::Display for AnyEntity {
@@ -466,6 +506,7 @@ impl fmt::Display for AnyEntity {
             Self::SigRef(r) => r.fmt(f),
             Self::Heap(r) => r.fmt(f),
             Self::Table(r) => r.fmt(f),
+            Self::CallSite(r) => r.fmt(f),
             Self::StackLimit => write!(f, "stack_limit"),
         }
     }
@@ -552,6 +593,12 @@ impl From<Heap> for AnyEntity {
 impl From<Table> for AnyEntity {
     fn from(r: Table) -> Self {
         Self::Table(r)
+    }
+}
+
+impl From<CallSite> for AnyEntity {
+    fn from(r: CallSite) -> Self {
+        Self::CallSite(r)
     }
 }
 

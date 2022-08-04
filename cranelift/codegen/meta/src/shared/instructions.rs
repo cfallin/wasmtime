@@ -354,6 +354,7 @@ fn define_control_flow(
         .with_doc("function to call, declared by `function`");
     let args = &Operand::new("args", &entities.varargs).with_doc("call arguments");
     let rvals = &Operand::new("rvals", &entities.varargs).with_doc("return values");
+    let callsite = &Operand::new("callsite", &entities.callsite).with_doc("callsite label");
     ig.push(
         Inst::new(
             "call",
@@ -370,10 +371,30 @@ fn define_control_flow(
         .is_call(true),
     );
 
+    ig.push(
+        Inst::new(
+            "labeled_call",
+            r#"
+        Direct function call.
+
+        Call a function which has been declared in the preamble. The argument
+        types must match the function's signature.
+
+        This variant takes an explicit callsite label that can be used to query
+        metadata about the callsite.
+        "#,
+            &formats.labeled_call,
+        )
+        .operands_in(vec![callsite, FN, args])
+        .operands_out(vec![rvals])
+        .is_call(true),
+    );
+
     let SIG = &Operand::new("SIG", &entities.sig_ref).with_doc("function signature");
     let callee = &Operand::new("callee", iAddr).with_doc("address of function to call");
     let args = &Operand::new("args", &entities.varargs).with_doc("call arguments");
     let rvals = &Operand::new("rvals", &entities.varargs).with_doc("return values");
+    let callsite = &Operand::new("callsite", &entities.callsite).with_doc("callsite label");
     ig.push(
         Inst::new(
             "call_indirect",
@@ -391,6 +412,30 @@ fn define_control_flow(
             &formats.call_indirect,
         )
         .operands_in(vec![SIG, callee, args])
+        .operands_out(vec![rvals])
+        .is_call(true),
+    );
+
+    ig.push(
+        Inst::new(
+            "labeled_call_indirect",
+            r#"
+        Indirect function call.
+
+        Call the function pointed to by `callee` with the given arguments. The
+        called function must match the specified signature.
+
+        Note that this is different from WebAssembly's ``call_indirect``; the
+        callee is a native address, rather than a table index. For WebAssembly,
+        `table_addr` and `load` are used to obtain a native address
+        from a table.
+
+        This variant takes an explicit callsite label that can be used to query
+        metadata about the callsite.
+        "#,
+            &formats.labeled_call_indirect,
+        )
+        .operands_in(vec![callsite, SIG, callee, args])
         .operands_out(vec![rvals])
         .is_call(true),
     );
@@ -413,6 +458,30 @@ fn define_control_flow(
             &formats.func_addr,
         )
         .operands_in(vec![FN])
+        .operands_out(vec![addr]),
+    );
+
+    let callsite = &Operand::new("callsite", &entities.callsite).with_doc("callsite label");
+    let addr = &Operand::new("addr", iAddr);
+    ig.push(
+        Inst::new(
+            "callsite_return_addr",
+            r#"
+        Get the address of the return point of a callsite.
+
+        This is the native-code PC value that will be returned by a
+        "return address" primitive in the called function, and that
+        will receive control when it returns.
+
+        This operator should only be used to implement low-level
+        behavior such as unwind-metadata maintenance in
+        trampolines. The address should *not* be jumped to directly by
+        CLIF: the results will be undefined, as the register and stack
+        state expected by the ABI may not be set up properly.
+        "#,
+            &formats.callsite,
+        )
+        .operands_in(vec![callsite])
         .operands_out(vec![addr]),
     );
 }
