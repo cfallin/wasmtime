@@ -475,28 +475,37 @@ fn s390x_get_operands<F: Fn(VReg) -> VReg>(inst: &Inst, collector: &mut OperandC
             collector.reg_def(rd);
             collector.reg_use(rn);
         }
-        &Inst::AluRR { rd, rm, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRR { rd, ri, rm, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
             collector.reg_use(rm);
         }
-        &Inst::AluRX { rd, ref mem, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRX {
+            rd, ri, ref mem, ..
+        } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
             memarg_operands(mem, collector);
         }
-        &Inst::AluRSImm16 { rd, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRSImm16 { rd, ri, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
         }
-        &Inst::AluRSImm32 { rd, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRSImm32 { rd, ri, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
         }
-        &Inst::AluRUImm32 { rd, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRUImm32 { rd, ri, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
         }
-        &Inst::AluRUImm16Shifted { rd, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRUImm16Shifted { rd, ri, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
         }
-        &Inst::AluRUImm32Shifted { rd, .. } => {
-            collector.reg_mod(rd);
+        &Inst::AluRUImm32Shifted { rd, ri, .. } => {
+            collector.reg_reuse_def(rd, 1);
+            collector.reg_use(ri);
         }
         &Inst::SMulWide { rn, rm, .. } => {
             collector.reg_use(rn);
@@ -1235,7 +1244,12 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 if have_rr && rd.to_reg() == rn {
-                    let inst = Inst::AluRR { alu_op, rd, rm };
+                    let inst = Inst::AluRR {
+                        alu_op,
+                        rd,
+                        ri: rd.to_reg(),
+                        rm,
+                    };
                     return inst.print_with_state(state, &mut empty_allocs);
                 }
                 let rd = pretty_print_reg(rd.to_reg(), &mut empty_allocs);
@@ -1253,7 +1267,12 @@ impl Inst {
                 let rn = allocs.next(rn);
 
                 if rd.to_reg() == rn {
-                    let inst = Inst::AluRSImm16 { alu_op, rd, imm };
+                    let inst = Inst::AluRSImm16 {
+                        alu_op,
+                        rd,
+                        ri: rd.to_reg(),
+                        imm,
+                    };
                     return inst.print_with_state(state, &mut empty_allocs);
                 }
                 let op = match alu_op {
@@ -1265,7 +1284,7 @@ impl Inst {
                 let rn = pretty_print_reg(rn, &mut empty_allocs);
                 format!("{} {}, {}, {}", op, rd, rn, imm)
             }
-            &Inst::AluRR { alu_op, rd, rm } => {
+            &Inst::AluRR { alu_op, rd, ri, rm } => {
                 let op = match alu_op {
                     ALUOp::Add32 => "ar",
                     ALUOp::Add64 => "agr",
@@ -1291,12 +1310,14 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
+                let ri = pretty_print_reg(ri, allocs);
                 let rm = pretty_print_reg(rm, allocs);
-                format!("{} {}, {}", op, rd, rm)
+                format!("{} {}, {}, {}", op, rd, ri, rm)
             }
             &Inst::AluRX {
                 alu_op,
                 rd,
+                ri,
                 ref mem,
             } => {
                 let (opcode_rx, opcode_rxy) = match alu_op {
@@ -1331,6 +1352,7 @@ impl Inst {
                 };
 
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
+                let ri = pretty_print_reg(ri, allocs);
                 let mem = mem.with_allocs(allocs);
                 let (mem_str, mem) = mem_finalize_for_show(
                     &mem,
@@ -1350,9 +1372,14 @@ impl Inst {
                 };
                 let mem = mem.pretty_print_default();
 
-                format!("{}{} {}, {}", mem_str, op.unwrap(), rd, mem)
+                format!("{}{} {}, {}, {}", mem_str, op.unwrap(), rd, ri, mem)
             }
-            &Inst::AluRSImm16 { alu_op, rd, imm } => {
+            &Inst::AluRSImm16 {
+                alu_op,
+                rd,
+                ri,
+                imm,
+            } => {
                 let op = match alu_op {
                     ALUOp::Add32 => "ahi",
                     ALUOp::Add64 => "aghi",
@@ -1361,9 +1388,15 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
-                format!("{} {}, {}", op, rd, imm)
+                let ri = pretty_print_reg(ri, allocs);
+                format!("{} {}, {}, {}", op, rd, ri, imm)
             }
-            &Inst::AluRSImm32 { alu_op, rd, imm } => {
+            &Inst::AluRSImm32 {
+                alu_op,
+                rd,
+                ri,
+                imm,
+            } => {
                 let op = match alu_op {
                     ALUOp::Add32 => "afi",
                     ALUOp::Add64 => "agfi",
@@ -1372,9 +1405,15 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
-                format!("{} {}, {}", op, rd, imm)
+                let ri = pretty_print_reg(ri, allocs);
+                format!("{} {}, {}, {}", op, rd, ri, imm)
             }
-            &Inst::AluRUImm32 { alu_op, rd, imm } => {
+            &Inst::AluRUImm32 {
+                alu_op,
+                rd,
+                ri,
+                imm,
+            } => {
                 let op = match alu_op {
                     ALUOp::AddLogical32 => "alfi",
                     ALUOp::AddLogical64 => "algfi",
@@ -1383,9 +1422,15 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
-                format!("{} {}, {}", op, rd, imm)
+                let ri = pretty_print_reg(ri, allocs);
+                format!("{} {}, {}, {}", op, rd, ri, imm)
             }
-            &Inst::AluRUImm16Shifted { alu_op, rd, imm } => {
+            &Inst::AluRUImm16Shifted {
+                alu_op,
+                rd,
+                ri,
+                imm,
+            } => {
                 let op = match (alu_op, imm.shift) {
                     (ALUOp::And32, 0) => "nill",
                     (ALUOp::And32, 1) => "nilh",
@@ -1402,9 +1447,15 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
-                format!("{} {}, {}", op, rd, imm.bits)
+                let ri = pretty_print_reg(ri, allocs);
+                format!("{} {}, {}, {}", op, rd, ri, imm.bits)
             }
-            &Inst::AluRUImm32Shifted { alu_op, rd, imm } => {
+            &Inst::AluRUImm32Shifted {
+                alu_op,
+                rd,
+                ri,
+                imm,
+            } => {
                 let op = match (alu_op, imm.shift) {
                     (ALUOp::And32, 0) => "nilf",
                     (ALUOp::And64, 0) => "nilf",
@@ -1418,7 +1469,8 @@ impl Inst {
                     _ => unreachable!(),
                 };
                 let rd = pretty_print_reg(rd.to_reg(), allocs);
-                format!("{} {}, {}", op, rd, imm.bits)
+                let ri = pretty_print_reg(ri, allocs);
+                format!("{} {}, {}, {}", op, rd, ri, imm.bits)
             }
             &Inst::SMulWide { rn, rm } => {
                 let op = "mgrk";

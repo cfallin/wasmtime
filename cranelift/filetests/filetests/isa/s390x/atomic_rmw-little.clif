@@ -39,12 +39,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lrvr %r2, %r4
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; risbgn %r1, %r2, 48, 64, 48 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_xchg_i8(i64, i64, i8) -> i8 {
@@ -55,7 +55,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lcr %r2, %r5
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 0(%r5) ; risbgn %r1, %r4, 32, 40, 24 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
@@ -70,7 +70,7 @@ block0(v0: i64, v1: i64, v2: i64):
 
 ; block0:
 ;   lg %r0, 0(%r3)
-;   0: lrvgr %r1, %r0 ; agr %r1, %r4 ; lrvgr %r1, %r1 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: lrvgr %r1, %r0 ; agr %r1, %r1, %r4 ; lrvgr %r1, %r1 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvgr %r2, %r0
 ;   br %r14
 
@@ -82,7 +82,7 @@ block0(v0: i64, v1: i64, v2: i32):
 
 ; block0:
 ;   l %r0, 0(%r3)
-;   0: lrvr %r1, %r0 ; ar %r1, %r4 ; lrvr %r1, %r1 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: lrvr %r1, %r0 ; ar %r1, %r1, %r4 ; lrvr %r1, %r1 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvr %r2, %r0
 ;   br %r14
 
@@ -94,12 +94,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; ar %r1, %r2 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; ar %r1, %r1, %r2 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_add_i8(i64, i64, i8) -> i8 {
@@ -110,11 +110,11 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 0(%r5) ; ar %r1, %r2 ; rll %r1, %r1, 0(%r4) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: rll %r1, %r0, 0(%r5) ; ar %r1, %r1, %r2 ; rll %r1, %r1, 0(%r4) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   rll %r2, %r0, 8(%r5)
 ;   br %r14
 
@@ -126,7 +126,7 @@ block0(v0: i64, v1: i64, v2: i64):
 
 ; block0:
 ;   lg %r0, 0(%r3)
-;   0: lrvgr %r1, %r0 ; sgr %r1, %r4 ; lrvgr %r1, %r1 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: lrvgr %r1, %r0 ; sgr %r1, %r1, %r4 ; lrvgr %r1, %r1 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvgr %r2, %r0
 ;   br %r14
 
@@ -138,7 +138,7 @@ block0(v0: i64, v1: i64, v2: i32):
 
 ; block0:
 ;   l %r0, 0(%r3)
-;   0: lrvr %r1, %r0 ; sr %r1, %r4 ; lrvr %r1, %r1 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: lrvr %r1, %r0 ; sr %r1, %r1, %r4 ; lrvr %r1, %r1 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvr %r2, %r0
 ;   br %r14
 
@@ -150,12 +150,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; sr %r1, %r2 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; sr %r1, %r1, %r2 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_sub_i8(i64, i64, i8) -> i8 {
@@ -166,11 +166,11 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 0(%r5) ; sr %r1, %r2 ; rll %r1, %r1, 0(%r4) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: rll %r1, %r0, 0(%r5) ; sr %r1, %r1, %r2 ; rll %r1, %r1, 0(%r4) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   rll %r2, %r0, 8(%r5)
 ;   br %r14
 
@@ -206,12 +206,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lrvr %r2, %r4
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; rnsbg %r1, %r2, 48, 64, 48 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_and_i8(i64, i64, i8) -> i8 {
@@ -222,7 +222,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lcr %r2, %r5
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 0(%r5) ; rnsbg %r1, %r4, 32, 40, 24 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
@@ -261,12 +261,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lrvr %r2, %r4
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; rosbg %r1, %r2, 48, 64, 48 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_or_i8(i64, i64, i8) -> i8 {
@@ -277,7 +277,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lcr %r2, %r5
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 0(%r5) ; rosbg %r1, %r4, 32, 40, 24 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
@@ -316,12 +316,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lrvr %r2, %r4
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; rxsbg %r1, %r2, 48, 64, 48 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_xor_i8(i64, i64, i8) -> i8 {
@@ -332,7 +332,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lcr %r2, %r5
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 0(%r5) ; rxsbg %r1, %r4, 32, 40, 24 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
@@ -348,7 +348,7 @@ block0(v0: i64, v1: i64, v2: i64):
 ; block0:
 ;   lrvgr %r5, %r4
 ;   lg %r0, 0(%r3)
-;   0: ngrk %r1, %r0, %r5 ; xilf %r1, 4294967295 ; xihf %r1, 4294967295 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: ngrk %r1, %r0, %r5 ; xilf %r1, %r1, 4294967295 ; xihf %r1, %r1, 4294967295 ; csg %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvgr %r2, %r0
 ;   br %r14
 
@@ -361,7 +361,7 @@ block0(v0: i64, v1: i64, v2: i32):
 ; block0:
 ;   lrvr %r5, %r4
 ;   l %r0, 0(%r3)
-;   0: nrk %r1, %r0, %r5 ; xilf %r1, 4294967295 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: nrk %r1, %r0, %r5 ; xilf %r1, %r1, 4294967295 ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   lrvr %r2, %r0
 ;   br %r14
 
@@ -373,12 +373,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lrvr %r2, %r4
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 16(%r5) ; rnsbg %r1, %r2, 48, 64, 48 ; xilf %r1, 65535 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   0: rll %r1, %r0, 16(%r5) ; rnsbg %r1, %r2, 48, 64, 48 ; xilf %r1, %r1, 65535 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_nand_i8(i64, i64, i8) -> i8 {
@@ -389,10 +389,10 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   lcr %r2, %r5
 ;   l %r0, 0(%r3)
-;   0: rll %r1, %r0, 0(%r5) ; rnsbg %r1, %r4, 32, 40, 24 ; xilf %r1, 4278190080 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
+;   0: rll %r1, %r0, 0(%r5) ; rnsbg %r1, %r4, 32, 40, 24 ; xilf %r1, %r1, 4278190080 ; rll %r1, %r1, 0(%r2) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
 ;   rll %r2, %r0, 8(%r5)
 ;   br %r14
 
@@ -428,12 +428,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; cr %r2, %r1 ; jgnl 1f ; risbgn %r1, %r2, 32, 48, 0 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_smin_i8(i64, i64, i8) -> i8 {
@@ -444,7 +444,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)
@@ -484,12 +484,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; cr %r2, %r1 ; jgnh 1f ; risbgn %r1, %r2, 32, 48, 0 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_smax_i8(i64, i64, i8) -> i8 {
@@ -500,7 +500,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)
@@ -540,12 +540,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; clr %r2, %r1 ; jgnl 1f ; risbgn %r1, %r2, 32, 48, 0 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_umin_i8(i64, i64, i8) -> i8 {
@@ -556,7 +556,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)
@@ -596,12 +596,12 @@ block0(v0: i64, v1: i64, v2: i16):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 16
 ;   l %r0, 0(%r3)
 ;   0: rll %r1, %r0, 16(%r5) ; lrvr %r1, %r1 ; clr %r2, %r1 ; jgnh 1f ; risbgn %r1, %r2, 32, 48, 0 ; lrvr %r1, %r1 ; rll %r1, %r1, 16(%r5) ; cs %r0, %r1, 0(%r3) ; jglh 0b ; 1:
-;   rll %r2, %r0, 0(%r5)
-;   lrvr %r2, %r2
+;   rll %r5, %r0, 0(%r5)
+;   lrvr %r2, %r5
 ;   br %r14
 
 function %atomic_rmw_umax_i8(i64, i64, i8) -> i8 {
@@ -612,7 +612,7 @@ block0(v0: i64, v1: i64, v2: i8):
 
 ; block0:
 ;   sllk %r5, %r3, 3
-;   nill %r3, 65532
+;   nill %r3, %r3, 65532
 ;   sllk %r2, %r4, 24
 ;   lcr %r4, %r5
 ;   l %r0, 0(%r3)

@@ -652,10 +652,10 @@ block0(v0: i64x2, v1: i64x2):
 ; block0:
 ;   vlgvg %r3, %v24, 0
 ;   vlgvg %r5, %v25, 0
-;   msgr %r3, %r5
+;   msgr %r3, %r3, %r5
 ;   vlgvg %r5, %v24, 1
 ;   vlgvg %r4, %v25, 1
-;   msgr %r5, %r4
+;   msgr %r5, %r5, %r4
 ;   vlvgp %v24, %r3, %r5
 ;   br %r14
 
@@ -829,10 +829,10 @@ block0(v0: i32x4, v1: i32x4):
 ;   vuphf %v7, %v25
 ;   lgdr %r3, %f5
 ;   lgdr %r5, %f7
-;   msgr %r3, %r5
+;   msgr %r3, %r3, %r5
 ;   vlgvg %r5, %v5, 1
 ;   vlgvg %r4, %v7, 1
-;   msgr %r5, %r4
+;   msgr %r5, %r5, %r4
 ;   vlvgp %v29, %r3, %r5
 ;   vgmg %v31, 33, 33
 ;   vag %v1, %v29, %v31
@@ -841,10 +841,10 @@ block0(v0: i32x4, v1: i32x4):
 ;   vuplf %v7, %v25
 ;   lgdr %r3, %f5
 ;   lgdr %r5, %f7
-;   msgr %r3, %r5
+;   msgr %r3, %r3, %r5
 ;   vlgvg %r5, %v5, 1
 ;   vlgvg %r4, %v7, 1
-;   msgr %r5, %r4
+;   msgr %r5, %r5, %r4
 ;   vlvgp %v29, %r3, %r5
 ;   vgmg %v31, 33, 33
 ;   vag %v1, %v29, %v31
