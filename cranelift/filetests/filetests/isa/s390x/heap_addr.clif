@@ -21,7 +21,7 @@ block0(v0: i64, v1: i32):
 ;   agr %r2, %r2, %r4
 ;   lghi %r3, 0
 ;   clgr %r4, %r5
-;   locgrh %r2, %r3
+;   locgrh %r2, %r2, %r3
 ;   br %r14
 ; block2:
 ;   trap
@@ -43,7 +43,7 @@ block0(v0: i64, v1: i32):
 ;   agr %r2, %r2, %r3
 ;   lghi %r4, 0
 ;   clgfi %r3, 65536
-;   locgrh %r2, %r4
+;   locgrh %r2, %r2, %r4
 ;   br %r14
 ; block2:
 ;   trap

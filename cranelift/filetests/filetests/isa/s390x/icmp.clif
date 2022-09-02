@@ -10,7 +10,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   cgr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_ext32(i64, i32) -> b1 {
@@ -23,7 +23,7 @@ block0(v0: i64, v1: i32):
 ; block0:
 ;   cgfr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_imm16(i64) -> b1 {
@@ -36,7 +36,7 @@ block0(v0: i64):
 ; block0:
 ;   cghi %r2, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_imm32(i64) -> b1 {
@@ -49,7 +49,7 @@ block0(v0: i64):
 ; block0:
 ;   cgfi %r2, 32768
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_mem(i64, i64) -> b1 {
@@ -62,7 +62,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   cg %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_sym(i64) -> b1 {
@@ -77,7 +77,7 @@ block0(v0: i64):
 ; block0:
 ;   cgrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_mem_ext16(i64, i64) -> b1 {
@@ -90,7 +90,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   cgh %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_sym_ext16(i64) -> b1 {
@@ -105,7 +105,7 @@ block0(v0: i64):
 ; block0:
 ;   cghrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_mem_ext32(i64, i64) -> b1 {
@@ -118,7 +118,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   cgf %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i64_sym_ext32(i64) -> b1 {
@@ -133,7 +133,7 @@ block0(v0: i64):
 ; block0:
 ;   cgfrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32(i32, i32) -> b1 {
@@ -145,7 +145,7 @@ block0(v0: i32, v1: i32):
 ; block0:
 ;   cr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_imm16(i32) -> b1 {
@@ -158,7 +158,7 @@ block0(v0: i32):
 ; block0:
 ;   chi %r2, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_imm(i32) -> b1 {
@@ -171,7 +171,7 @@ block0(v0: i32):
 ; block0:
 ;   cfi %r2, 32768
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_mem(i32, i64) -> b1 {
@@ -184,7 +184,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   c %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_memoff(i32, i64) -> b1 {
@@ -197,7 +197,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   cy %r2, 4096(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_sym(i32) -> b1 {
@@ -212,7 +212,7 @@ block0(v0: i32):
 ; block0:
 ;   crl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_mem_ext16(i32, i64) -> b1 {
@@ -225,7 +225,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   ch %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_memoff_ext16(i32, i64) -> b1 {
@@ -238,7 +238,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   chy %r2, 4096(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i32_sym_ext16(i32) -> b1 {
@@ -253,7 +253,7 @@ block0(v0: i32):
 ; block0:
 ;   chrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i16(i16, i16) -> b1 {
@@ -268,7 +268,7 @@ block0(v0: i16, v1: i16):
 ;   lhr %r5, %r5
 ;   cr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i16_imm(i16) -> b1 {
@@ -282,7 +282,7 @@ block0(v0: i16):
 ;   lhr %r5, %r2
 ;   chi %r5, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i16_mem(i16, i64) -> b1 {
@@ -296,7 +296,7 @@ block0(v0: i16, v1: i64):
 ;   lhr %r4, %r2
 ;   ch %r4, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i16_sym(i16) -> b1 {
@@ -312,7 +312,7 @@ block0(v0: i16):
 ;   lhr %r5, %r2
 ;   chrl %r5, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i8(i8, i8) -> b1 {
@@ -327,7 +327,7 @@ block0(v0: i8, v1: i8):
 ;   lbr %r5, %r5
 ;   cr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i8_imm(i8) -> b1 {
@@ -341,7 +341,7 @@ block0(v0: i8):
 ;   lbr %r5, %r2
 ;   chi %r5, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_slt_i8_mem(i8, i64) -> b1 {
@@ -357,7 +357,7 @@ block0(v0: i8, v1: i64):
 ;   lb %r5, 0(%r5)
 ;   cr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64(i64, i64) -> b1 {
@@ -369,7 +369,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   clgr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_ext32(i64, i32) -> b1 {
@@ -382,7 +382,7 @@ block0(v0: i64, v1: i32):
 ; block0:
 ;   clgfr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_imm(i64) -> b1 {
@@ -395,7 +395,7 @@ block0(v0: i64):
 ; block0:
 ;   clgfi %r2, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_mem(i64, i64) -> b1 {
@@ -408,7 +408,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   clg %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_sym(i64) -> b1 {
@@ -423,7 +423,7 @@ block0(v0: i64):
 ; block0:
 ;   clgrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_mem_ext32(i64, i64) -> b1 {
@@ -436,7 +436,7 @@ block0(v0: i64, v1: i64):
 ; block0:
 ;   clgf %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_sym_ext32(i64) -> b1 {
@@ -451,7 +451,7 @@ block0(v0: i64):
 ; block0:
 ;   clgfrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_mem_ext16(i64, i64) -> b1 {
@@ -465,7 +465,7 @@ block0(v0: i64, v1: i64):
 ;   llgh %r4, 0(%r3)
 ;   clgr %r2, %r4
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i64_sym_ext16(i64) -> b1 {
@@ -480,7 +480,7 @@ block0(v0: i64):
 ; block0:
 ;   clghrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32(i32, i32) -> b1 {
@@ -492,7 +492,7 @@ block0(v0: i32, v1: i32):
 ; block0:
 ;   clr %r2, %r3
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_imm(i32) -> b1 {
@@ -505,7 +505,7 @@ block0(v0: i32):
 ; block0:
 ;   clfi %r2, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_mem(i32, i64) -> b1 {
@@ -518,7 +518,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   cl %r2, 0(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_memoff(i32, i64) -> b1 {
@@ -531,7 +531,7 @@ block0(v0: i32, v1: i64):
 ; block0:
 ;   cly %r2, 4096(%r3)
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_sym(i32) -> b1 {
@@ -546,7 +546,7 @@ block0(v0: i32):
 ; block0:
 ;   clrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_mem_ext16(i32, i64) -> b1 {
@@ -560,7 +560,7 @@ block0(v0: i32, v1: i64):
 ;   llh %r4, 0(%r3)
 ;   clr %r2, %r4
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i32_sym_ext16(i32) -> b1 {
@@ -575,7 +575,7 @@ block0(v0: i32):
 ; block0:
 ;   clhrl %r2, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i16(i16, i16) -> b1 {
@@ -590,7 +590,7 @@ block0(v0: i16, v1: i16):
 ;   llhr %r5, %r5
 ;   clr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i16_imm(i16) -> b1 {
@@ -604,7 +604,7 @@ block0(v0: i16):
 ;   llhr %r5, %r2
 ;   clfi %r5, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i16_mem(i16, i64) -> b1 {
@@ -620,7 +620,7 @@ block0(v0: i16, v1: i64):
 ;   llh %r5, 0(%r5)
 ;   clr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i16_mem(i16) -> b1 {
@@ -636,7 +636,7 @@ block0(v0: i16):
 ;   llhr %r5, %r2
 ;   clhrl %r5, %sym + 0
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i8(i8, i8) -> b1 {
@@ -651,7 +651,7 @@ block0(v0: i8, v1: i8):
 ;   llcr %r5, %r5
 ;   clr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i8_imm(i8) -> b1 {
@@ -665,7 +665,7 @@ block0(v0: i8):
 ;   llcr %r5, %r2
 ;   clfi %r5, 1
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
 function %icmp_ult_i8_mem(i8, i64) -> b1 {
@@ -681,6 +681,6 @@ block0(v0: i8, v1: i64):
 ;   llc %r5, 0(%r5)
 ;   clr %r3, %r5
 ;   lhi %r2, 0
-;   lochil %r2, 1
+;   lochil %r2, %r2, 1
 ;   br %r14
 
