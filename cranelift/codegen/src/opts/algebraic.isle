@@ -174,6 +174,12 @@
 (rule (simplify (select ty (bint _ b) x y))
       (subsume (select ty b x y)))
 
+;; bint of icmp becomes just the icmp. Likewise for fcmp.
+(rule (simplify (bint ty (icmp _ cc x y)))
+      (subsume (icmp ty cc x y)))
+(rule (simplify (bint ty (fcmp _ cc x y)))
+      (subsume (fcmp ty cc x y)))
+
 ;; Rematerialize ALU-op-with-imm and iconsts in each block where they're
 ;; used. This is neutral (add-with-imm) or positive (iconst) for
 ;; register pressure, and these ops are very cheap.
