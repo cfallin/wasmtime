@@ -293,6 +293,7 @@ impl DataFlowGraph {
                 // detect alias loops without overrunning the stack.
                 self.value_def(self.resolve_aliases(original))
             }
+            ValueData::Union { x, y, .. } => ValueDef::Union(x, y),
         }
     }
 
@@ -308,6 +309,7 @@ impl DataFlowGraph {
             Inst { inst, num, .. } => Some(&v) == self.inst_results(inst).get(num as usize),
             Param { block, num, .. } => Some(&v) == self.block_params(block).get(num as usize),
             Alias { .. } => false,
+            Union { .. } => false,
         }
     }
 
@@ -417,6 +419,8 @@ pub enum ValueDef {
     Result(Inst, usize),
     /// Value is the n'th parameter to a block.
     Param(Block, usize),
+    /// Value is a union of two other values.
+    Union(Value, Value),
 }
 
 impl ValueDef {
@@ -453,6 +457,7 @@ impl ValueDef {
     pub fn num(self) -> usize {
         match self {
             Self::Result(_, n) | Self::Param(_, n) => n,
+            Self::Union(_, _) => 0,
         }
     }
 }
@@ -471,6 +476,11 @@ enum ValueData {
     /// An alias value can't be linked as an instruction result or block parameter. It is used as a
     /// placeholder when the original instruction or block has been rewritten or modified.
     Alias { ty: Type, original: Value },
+
+    /// Union is a "fork" in representation: the value can be
+    /// represented as either of the values named here. This is used
+    /// for aegraph (acyclic egraph) representation in the DFG.
+    Union { ty: Type, x: Value, y: Value },
 }
 
 /// Bit-packed version of ValueData, for efficiency.
@@ -478,40 +488,71 @@ enum ValueData {
 /// Layout:
 ///
 /// ```plain
-///        | tag:2 |  type:14        |    num:16       | index:32          |
+///        | tag:2 |  type:14        |    x:24       | y:24          |
+///
+/// Inst       00     ty               inst output     inst index
+/// Param      01     ty               blockparam num  block index
+/// Alias      10     ty               0               value index
+/// Union      11     ty               first value     second value
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 struct ValueDataPacked(u64);
 
+/// Encodes a value in 0..2^32 into 0..2^n, where n is less than 32
+/// (and is implied by `mask`), by translating 2^32-1 (0xffffffff)
+/// into 2^n-1 and panic'ing on 2^n..2^32-1.
+fn encode_narrow_field(x: u32, bits: u8) -> u32 {
+    if x == 0xffff_ffff {
+        (1 << bits) - 1
+    } else {
+        debug_assert!(x < (1 << bits));
+        x
+    }
+}
+
+/// The inverse of the above `encode_narrow_field`: unpacks 2^n-1 into
+/// 2^32-1.
+fn decode_narrow_field(x: u32, bits: u8) -> u32 {
+    if x == (1 << bits) - 1 {
+        0xffff_ffff
+    } else {
+        x
+    }
+}
+
 impl ValueDataPacked {
-    const INDEX_SHIFT: u64 = 0;
-    const INDEX_BITS: u64 = 32;
-    const NUM_SHIFT: u64 = Self::INDEX_SHIFT + Self::INDEX_BITS;
-    const NUM_BITS: u64 = 16;
-    const TYPE_SHIFT: u64 = Self::NUM_SHIFT + Self::NUM_BITS;
-    const TYPE_BITS: u64 = 14;
-    const TAG_SHIFT: u64 = Self::TYPE_SHIFT + Self::TYPE_BITS;
-    const TAG_BITS: u64 = 2;
+    const Y_SHIFT: u8 = 0;
+    const Y_BITS: u8 = 24;
+    const X_SHIFT: u8 = Self::Y_SHIFT + Self::Y_BITS;
+    const X_BITS: u8 = 24;
+    const TYPE_SHIFT: u8 = Self::X_SHIFT + Self::X_BITS;
+    const TYPE_BITS: u8 = 14;
+    const TAG_SHIFT: u8 = Self::TYPE_SHIFT + Self::TYPE_BITS;
+    const TAG_BITS: u8 = 2;
 
-    const TAG_INST: u64 = 1;
-    const TAG_PARAM: u64 = 2;
-    const TAG_ALIAS: u64 = 3;
+    const TAG_INST: u64 = 0;
+    const TAG_PARAM: u64 = 1;
+    const TAG_ALIAS: u64 = 2;
+    const TAG_UNION: u64 = 3;
 
-    fn make(tag: u64, ty: Type, num: u16, index: u32) -> ValueDataPacked {
+    fn make(tag: u64, ty: Type, x: u32, y: u32) -> ValueDataPacked {
         debug_assert!(tag < (1 << Self::TAG_BITS));
         debug_assert!(ty.repr() < (1 << Self::TYPE_BITS));
+
+        let x = encode_narrow_field(x, Self::X_BITS);
+        let y = encode_narrow_field(y, Self::Y_BITS);
 
         ValueDataPacked(
             (tag << Self::TAG_SHIFT)
                 | ((ty.repr() as u64) << Self::TYPE_SHIFT)
-                | ((num as u64) << Self::NUM_SHIFT)
-                | ((index as u64) << Self::INDEX_SHIFT),
+                | ((x as u64) << Self::X_SHIFT)
+                | ((y as u64) << Self::Y_SHIFT),
         )
     }
 
     #[inline(always)]
-    fn field(self, shift: u64, bits: u64) -> u64 {
+    fn field(self, shift: u8, bits: u8) -> u64 {
         (self.0 >> shift) & ((1 << bits) - 1)
     }
 
@@ -532,13 +573,16 @@ impl From<ValueData> for ValueDataPacked {
     fn from(data: ValueData) -> Self {
         match data {
             ValueData::Inst { ty, num, inst } => {
-                Self::make(Self::TAG_INST, ty, num, inst.as_bits())
+                Self::make(Self::TAG_INST, ty, num.into(), inst.as_bits())
             }
             ValueData::Param { ty, num, block } => {
-                Self::make(Self::TAG_PARAM, ty, num, block.as_bits())
+                Self::make(Self::TAG_PARAM, ty, num.into(), block.as_bits())
             }
             ValueData::Alias { ty, original } => {
                 Self::make(Self::TAG_ALIAS, ty, 0, original.as_bits())
+            }
+            ValueData::Union { ty, x, y } => {
+                Self::make(Self::TAG_ALIAS, ty, x.as_bits(), y.as_bits())
             }
         }
     }
@@ -547,25 +591,33 @@ impl From<ValueData> for ValueDataPacked {
 impl From<ValueDataPacked> for ValueData {
     fn from(data: ValueDataPacked) -> Self {
         let tag = data.field(ValueDataPacked::TAG_SHIFT, ValueDataPacked::TAG_BITS);
-        let ty = data.field(ValueDataPacked::TYPE_SHIFT, ValueDataPacked::TYPE_BITS) as u16;
-        let num = data.field(ValueDataPacked::NUM_SHIFT, ValueDataPacked::NUM_BITS) as u16;
-        let index = data.field(ValueDataPacked::INDEX_SHIFT, ValueDataPacked::INDEX_BITS) as u32;
+        let ty = u16::try_from(data.field(ValueDataPacked::TYPE_SHIFT, ValueDataPacked::TYPE_BITS))
+            .expect("Mask should ensure result fits in a u16");
+        let x = u32::try_from(data.field(ValueDataPacked::X_SHIFT, ValueDataPacked::X_BITS))
+            .expect("Mask should ensure result fits in a u32");
+        let y = u32::try_from(data.field(ValueDataPacked::Y_SHIFT, ValueDataPacked::Y_BITS))
+            .expect("Mask should ensure result fits in a u32");
 
         let ty = Type::from_repr(ty);
         match tag {
             ValueDataPacked::TAG_INST => ValueData::Inst {
                 ty,
-                num,
-                inst: Inst::from_bits(index),
+                num: u16::try_from(x).expect("Inst result num should fit in u16"),
+                inst: Inst::from_bits(decode_narrow_field(y, ValueDataPacked::Y_BITS)),
             },
             ValueDataPacked::TAG_PARAM => ValueData::Param {
                 ty,
-                num,
-                block: Block::from_bits(index),
+                num: u16::try_from(x).expect("Blockparam index should fit in u16"),
+                block: Block::from_bits(decode_narrow_field(y, ValueDataPacked::Y_BITS)),
             },
             ValueDataPacked::TAG_ALIAS => ValueData::Alias {
                 ty,
-                original: Value::from_bits(index),
+                original: Value::from_bits(decode_narrow_field(y, ValueDataPacked::Y_BITS)),
+            },
+            ValueDataPacked::TAG_UNION => ValueData::Union {
+                ty,
+                x: Value::from_bits(decode_narrow_field(x, ValueDataPacked::X_BITS)),
+                y: Value::from_bits(decode_narrow_field(y, ValueDataPacked::Y_BITS)),
             },
             _ => panic!("Invalid tag {} in ValueDataPacked 0x{:x}", tag, data.0),
         }
@@ -603,6 +655,7 @@ impl DataFlowGraph {
         match self.value_def(value) {
             ir::ValueDef::Result(inst, _) => self.display_inst(inst),
             ir::ValueDef::Param(_, _) => panic!("value is not defined by an instruction"),
+            ir::ValueDef::Union(_, _) => panic!("value is a union of two other values"),
         }
     }
 
