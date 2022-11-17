@@ -335,47 +335,9 @@ impl<'a> FuncEGraph<'a> {
         }
     }
 
-    /// Scoped elaboration: compute a final ordering of op computation
-    /// for each block and replace the given Func body.
-    ///
-    /// This works in concert with the domtree. We do a preorder
-    /// traversal of the domtree, tracking a scoped map from Id to
-    /// (new) Value. The map's scopes correspond to levels in the
-    /// domtree.
-    ///
-    /// At each block, we iterate forward over the side-effecting
-    /// eclasses, and recursively generate their arg eclasses, then
-    /// emit the ops themselves.
-    ///
-    /// To use an eclass in a given block, we first look it up in the
-    /// scoped map, and get the Value if already present. If not, we
-    /// need to generate it. We emit the extracted enode for this
-    /// eclass after recursively generating its args. Eclasses are
-    /// thus computed "as late as possible", but then memoized into
-    /// the Id-to-Value map and available to all dominated blocks and
-    /// for the rest of this block. (This subsumes GVN.)
+    /// This doc comment has been cannibalized.
     pub fn elaborate(&mut self, func: &mut Function) {
-        let mut elab = Elaborator::new(
-            func,
-            self.domtree,
-            self.loop_analysis,
-            &self.egraph,
-            &self.node_ctx,
-            &self.remat_ids,
-            &mut self.stats,
-        );
-        elab.elaborate(
-            |block| {
-                let blockparam_range = self.blockparams[block].clone();
-                &self.blockparam_ids_tys
-                    [blockparam_range.start as usize..blockparam_range.end as usize]
-            },
-            |block| {
-                let side_effect_range = self.side_effects[block].clone();
-                &self.side_effect_ids
-                    [side_effect_range.start as usize..side_effect_range.end as usize]
-            },
-        );
+        panic!("I have been cannibalized")
     }
 }
 

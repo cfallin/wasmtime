@@ -302,8 +302,11 @@ impl std::ops::Add<Cost> for Cost {
     }
 }
 
-pub(crate) fn op_cost(op: &InstructionImms) -> Cost {
-    match op.opcode() {
+/// Return the cost of a *pure* opcode. Caller is responsible for
+/// checking that the opcode came from an instruction that satisfies
+/// `inst_predicates::is_pure_for_egraph()`.
+pub(crate) fn pure_op_cost(op: Opcode) -> Cost {
+    match op {
         // Constants.
         Opcode::Iconst | Opcode::F32const | Opcode::F64const => Cost(0),
         // Extends/reduces.
@@ -319,8 +322,8 @@ pub(crate) fn op_cost(op: &InstructionImms) -> Cost {
         | Opcode::BorNot
         | Opcode::Bxor
         | Opcode::BxorNot
-        | Opcode::Bnot => Cost(2),
-        // Everything else.
+            | Opcode::Bnot => Cost(2),
+        // Everything else (pure.)
         _ => Cost(3),
     }
 }

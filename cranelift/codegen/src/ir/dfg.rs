@@ -168,6 +168,11 @@ impl DataFlowGraph {
         self.values.len()
     }
 
+    /// Get an iterator over all values and their definitions.
+    pub fn values_and_defs(&self) -> impl Iterator<Item = (Value, ValueDef)> + '_ {
+        self.values().map(|value| (value, self.value_def(value)))
+    }
+
     /// Starts collection of debug information.
     pub fn collect_debug_info(&mut self) {
         if self.values_labels.is_none() {

@@ -2,18 +2,19 @@
 //! in CFG nodes.
 
 use super::domtree::DomTreeWithChildren;
-use super::node::{op_cost, Cost, Node, NodeCtx};
+use super::node::{pure_op_cost, Cost};
 use super::Analysis;
+use super::AnalysisValue;
 use super::Stats;
 use crate::dominator_tree::DominatorTree;
 use crate::fx::FxHashSet;
+use crate::ir::ValueDef;
 use crate::ir::{Block, Function, Inst, Opcode, RelSourceLoc, Type, Value, ValueList};
 use crate::loop_analysis::LoopAnalysis;
 use crate::scoped_hash_map::ScopedHashMap;
 use crate::trace;
 use alloc::vec::Vec;
-use cranelift_egraph::{EGraph, Id, Language, NodeKey};
-use cranelift_entity::{packed_option::PackedOption, SecondaryMap};
+use cranelift_entity::{packed_option::PackedOption, packed_option::ReservedValue, SecondaryMap};
 use smallvec::{smallvec, SmallVec};
 use std::ops::Add;
 
@@ -23,18 +24,37 @@ pub(crate) struct Elaborator<'a> {
     func: &'a mut Function,
     domtree: &'a DominatorTree,
     loop_analysis: &'a LoopAnalysis,
-    node_ctx: &'a NodeCtx,
-    egraph: &'a EGraph<NodeCtx, Analysis>,
-    id_to_value: ScopedHashMap<Id, IdValue>,
-    id_to_best_cost_and_node: SecondaryMap<Id, (Cost, Id)>,
+    analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
+    /// Map from Inst that is pure (and was thus not in the
+    /// side-effecting skeleton) to the elaborated inst (placed in the
+    /// layout) to whose results we refer in the final code.
+    ///
+    /// The first time we use some result of an instruction during
+    /// elaboration, we can place it and insert an identity map (inst
+    /// to that same inst) in this scoped map. Within that block and
+    /// its dom-tree children, that mapping is visible and we can
+    /// continue to use it. This allows us to avoid cloning the
+    /// instruction. However, if we pop that scope and use it
+    /// somewhere else as well, we will need to duplicate. We detect
+    /// this case by checking, when an Inst is not present in this
+    /// map, whether it is already placed in the Layout. If so, we
+    /// duplicate, and insert non-identity mappings from the original
+    /// inst to the cloned inst.
+    inst_to_elaborated_inst: ScopedHashMap<Inst, Inst>,
+    /// Map from Value to the best (lowest-cost) Value in its eclass
+    /// (tree of union value-nodes).
+    value_to_best_value: SecondaryMap<Value, (Cost, Value)>,
     /// Stack of blocks and loops in current elaboration path.
     loop_stack: SmallVec<[LoopStackEntry; 8]>,
     cur_block: Option<Block>,
     first_branch: SecondaryMap<Block, PackedOption<Inst>>,
-    remat_ids: &'a FxHashSet<Id>,
+    /// Values that opt rules have indicated should be rematerialized
+    /// in every block they are used (e.g., immediates or other
+    /// "cheap-to-compute" ops).
+    remat_values: &'a FxHashSet<Value>,
     /// Explicitly-unrolled value elaboration stack.
     elab_stack: Vec<ElabStackEntry>,
-    elab_result_stack: Vec<IdValue>,
+    elab_result_stack: Vec<Value>,
     /// Explicitly-unrolled block elaboration stack.
     block_stack: Vec<BlockStackEntry>,
     stats: &'a mut Stats,
@@ -54,22 +74,24 @@ struct LoopStackEntry {
 
 #[derive(Clone, Debug)]
 enum ElabStackEntry {
-    /// Next action is to resolve this id into a node and elaborate
-    /// args.
-    Start { id: Id },
+    /// Next action is to resolve this inst into an elaborated inst
+    /// (placed into the layout) recursively elaborate the insts that
+    /// produce its args.
+    ///
+    /// Any inserted ops should be inserted before `before`, which is
+    /// the instruction demanding this value.
+    Start {
+        inst: Inst,
+        result_idx: usize,
+        before: Inst,
+    },
     /// Args have been pushed; waiting for results.
-    PendingNode {
-        canonical: Id,
-        node_key: NodeKey,
+    PendingInst {
+        inst: Inst,
         remat: bool,
         num_args: usize,
-    },
-    /// Waiting for a result to return one projected value of a
-    /// multi-value result.
-    PendingProjection {
-        canonical: Id,
-        index: usize,
-        ty: Type,
+        result_idx: usize,
+        before: Inst,
     },
 }
 
@@ -79,59 +101,35 @@ enum BlockStackEntry {
     Pop,
 }
 
-#[derive(Clone, Debug)]
-enum IdValue {
-    /// A single value.
-    Value {
-        depth: LoopDepth,
-        block: Block,
-        value: Value,
-    },
-    /// Multiple results; indices in `node_args`.
-    Values {
-        depth: LoopDepth,
-        block: Block,
-        values: ValueList,
-    },
-}
-
-impl IdValue {
-    fn block(&self) -> Block {
-        match self {
-            IdValue::Value { block, .. } | IdValue::Values { block, .. } => *block,
-        }
-    }
-}
-
 impl<'a> Elaborator<'a> {
     pub(crate) fn new(
         func: &'a mut Function,
         domtree: &'a DominatorTree,
         loop_analysis: &'a LoopAnalysis,
-        egraph: &'a EGraph<NodeCtx, Analysis>,
-        node_ctx: &'a NodeCtx,
-        remat_ids: &'a FxHashSet<Id>,
+        remat_values: &'a FxHashSet<Value>,
+        analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
         stats: &'a mut Stats,
     ) -> Self {
         let num_blocks = func.dfg.num_blocks();
-        let mut id_to_best_cost_and_node =
-            SecondaryMap::with_default((Cost::infinity(), Id::invalid()));
-        id_to_best_cost_and_node.resize(egraph.classes.len());
+        let num_insts = func.dfg.num_insts();
+        let num_values = func.dfg.num_values();
+        let mut value_to_best_value =
+            SecondaryMap::with_default((Cost::infinity(), Value::reserved_value()));
+        value_to_best_value.resize(num_values);
         Self {
             func,
             domtree,
             loop_analysis,
-            egraph,
-            node_ctx,
-            id_to_value: ScopedHashMap::with_capacity(egraph.classes.len()),
-            id_to_best_cost_and_node,
+            inst_to_elaborated_inst: ScopedHashMap::with_capacity(num_insts),
+            value_to_best_value,
             loop_stack: smallvec![],
             cur_block: None,
             first_branch: SecondaryMap::with_capacity(num_blocks),
-            remat_ids,
+            remat_values,
             elab_stack: vec![],
             elab_result_stack: vec![],
             block_stack: vec![],
+            analysis_values,
             stats,
         }
     }
@@ -140,13 +138,13 @@ impl<'a> Elaborator<'a> {
         self.loop_stack.len() as LoopDepth
     }
 
-    fn start_block(&mut self, idom: Option<Block>, block: Block, block_params: &[(Id, Type)]) {
+    fn start_block(&mut self, idom: Option<Block>, block: Block) {
         trace!(
             "start_block: block {:?} with idom {:?} at loop depth {} scope depth {}",
             block,
             idom,
             self.cur_loop_depth(),
-            self.id_to_value.depth()
+            self.inst_to_elaborated_inst.depth()
         );
 
         // Note that if the *entry* block is a loop header, we will
@@ -163,7 +161,7 @@ impl<'a> Elaborator<'a> {
                     // inserted in to the scoped hashmap at that block's
                     // level.
                     hoist_block: idom,
-                    scope_depth: (self.id_to_value.depth() - 1) as u32,
+                    scope_depth: (self.inst_to_elaborated_inst.depth() - 1) as u32,
                 });
                 trace!(
                     " -> loop header, pushing; depth now {}",
@@ -178,141 +176,60 @@ impl<'a> Elaborator<'a> {
         }
 
         self.cur_block = Some(block);
-        for &(id, ty) in block_params {
-            let value = self.func.dfg.append_block_param(block, ty);
-            trace!(" -> block param id {:?} value {:?}", id, value);
-            self.id_to_value.insert_if_absent(
-                id,
-                IdValue::Value {
-                    depth: self.cur_loop_depth(),
-                    block,
-                    value,
-                },
-            );
-        }
-    }
-
-    fn add_node(&mut self, node: &Node, args: &[Value], to_block: Block) -> ValueList {
-        let (instdata, result_ty, arity) = match node {
-            Node::Pure { op, ty, arity, .. } | Node::Inst { op, ty, arity, .. } => (
-                op.with_args(args, &mut self.func.dfg.value_lists),
-                *ty,
-                *arity,
-            ),
-            Node::Load { op, ty, .. } => {
-                (op.with_args(args, &mut self.func.dfg.value_lists), *ty, 1)
-            }
-            _ => panic!("Cannot `add_node()` on block param or projection"),
-        };
-        let srcloc = match node {
-            Node::Inst { srcloc, .. } | Node::Load { srcloc, .. } => *srcloc,
-            _ => RelSourceLoc::default(),
-        };
-        let opcode = instdata.opcode();
-        // Is this instruction either an actual terminator (an
-        // instruction that must end the block), or at least in the
-        // group of branches at the end (including conditional
-        // branches that may be followed by an actual terminator)? We
-        // call this the "terminator group", and we record the first
-        // inst in this group (`first_branch` below) so that we do not
-        // insert instructions needed only by args of later
-        // instructions in the terminator group in the middle of the
-        // terminator group.
-        //
-        // E.g., for the original sequence
-        //   v1 = op ...
-        //   brnz vCond, block1
-        //   jump block2(v1)
-        //
-        // elaboration would naively produce
-        //
-        //   brnz vCond, block1
-        //   v1 = op ...
-        //   jump block2(v1)
-        //
-        // but we use the `first_branch` mechanism below to ensure
-        // that once we've emitted at least one branch, all other
-        // elaborated insts have to go before that. So we emit brnz
-        // first, then as we elaborate the jump, we find we need the
-        // `op`; we `insert_inst` it *before* the brnz (which is the
-        // `first_branch`).
-        let is_terminator_group_inst =
-            opcode.is_branch() || opcode.is_return() || opcode == Opcode::Trap;
-        let inst = self.func.dfg.make_inst(instdata);
-        self.func.srclocs[inst] = srcloc;
-
-        if arity == 1 {
-            self.func.dfg.append_result(inst, result_ty);
-        } else {
-            for _ in 0..arity {
-                self.func.dfg.append_result(inst, crate::ir::types::INVALID);
-            }
-        }
-
-        if is_terminator_group_inst {
-            self.func.layout.append_inst(inst, to_block);
-            if self.first_branch[to_block].is_none() {
-                self.first_branch[to_block] = Some(inst).into();
-            }
-        } else if let Some(branch) = self.first_branch[to_block].into() {
-            self.func.layout.insert_inst(inst, branch);
-        } else {
-            self.func.layout.append_inst(inst, to_block);
-        }
-        self.func.dfg.inst_results_list(inst)
     }
 
     fn compute_best_nodes(&mut self) {
-        let best = &mut self.id_to_best_cost_and_node;
-        for (eclass_id, eclass) in &self.egraph.classes {
-            trace!("computing best for eclass {:?}", eclass_id);
-            if let Some(child1) = eclass.child1() {
-                trace!(" -> child {:?}", child1);
-                best[eclass_id] = best[child1];
-            }
-            if let Some(child2) = eclass.child2() {
-                trace!(" -> child {:?}", child2);
-                if best[child2].0 < best[eclass_id].0 {
-                    best[eclass_id] = best[child2];
+        let best = &mut self.value_to_best_value;
+        for (value, def) in self.func.dfg.values_and_defs() {
+            trace!("computing best for value {:?} def {:?}", value, def);
+            match def {
+                ValueDef::Union(x, y) => {
+                    // Pick the best of the two options based on
+                    // min-cost. This works because each element of `best`
+                    // is a `(cost, value)` tuple; `cost` comes first so
+                    // the natural comparison works based on cost, and
+                    // breaks ties based on value number.
+                    trace!(" -> best of {:?} and {:?}", best[x], best[y]);
+                    best[value] = std::cmp::min(best[x], best[y]);
+                    trace!(" -> {:?}", best[value]);
                 }
-            }
-            if let Some(node_key) = eclass.get_node() {
-                let node = node_key.node(&self.egraph.nodes);
-                trace!(" -> eclass {:?}: node {:?}", eclass_id, node);
-                let (cost, id) = match node {
-                    Node::Param { .. }
-                    | Node::Inst { .. }
-                    | Node::Load { .. }
-                    | Node::Result { .. } => (Cost::zero(), eclass_id),
-                    Node::Pure { op, .. } => {
-                        let args_cost = self
-                            .node_ctx
-                            .children(node)
+                ValueDef::Param(_, _) => {
+                    best[value] = (Cost::zero(), value);
+                }
+                // If the Inst is inserted into the layout (which is,
+                // at this point, only the side-effecting skeleton),
+                // then it must be computed and thus we give it zero
+                // cost.
+                ValueDef::Result(inst, _) if self.func.layout.inst_block(inst).is_some() => {
+                    best[value] = (Cost::zero(), value);
+                }
+                ValueDef::Result(inst, _) => {
+                    trace!(" -> value {}: result, computing cost", value);
+                    let inst_data = &self.func.dfg[inst];
+                    let level = self.analysis_values[value].loop_level;
+                    // N.B.: at this point we know that the opcode is
+                    // pure, so `pure_op_cost`'s precondition is
+                    // satisfied.
+                    let cost = pure_op_cost(inst_data.opcode()).at_level(level)
+                        + self
+                            .func
+                            .dfg
+                            .inst_args(inst)
                             .iter()
-                            .map(|&arg_id| {
-                                trace!("  -> arg {:?}", arg_id);
-                                best[arg_id].0
-                            })
+                            .map(|value| best[*value].0)
                             // Can't use `.sum()` for `Cost` types; do
                             // an explicit reduce instead.
                             .fold(Cost::zero(), Cost::add);
-                        let level = self.egraph.analysis_value(eclass_id).loop_level;
-                        let cost = op_cost(op).at_level(level) + args_cost;
-                        (cost, eclass_id)
-                    }
-                };
-
-                if cost < best[eclass_id].0 {
-                    best[eclass_id] = (cost, id);
+                    best[value] = (cost, value);
                 }
-            }
-            debug_assert_ne!(best[eclass_id].0, Cost::infinity());
-            debug_assert_ne!(best[eclass_id].1, Id::invalid());
-            trace!("best for eclass {:?}: {:?}", eclass_id, best[eclass_id]);
+            };
+            debug_assert_ne!(best[value].0, Cost::infinity());
+            debug_assert_ne!(best[value].1, Value::reserved_value());
+            trace!("best for eclass {:?}: {:?}", value, best[value]);
         }
     }
 
-    fn elaborate_eclass_use(&mut self, id: Id) {
+    fn elaborate_eclass_use(&mut self, value: Value) {
         self.elab_stack.push(ElabStackEntry::Start { id });
         self.process_elab_stack();
         debug_assert_eq!(self.elab_result_stack.len(), 1);
