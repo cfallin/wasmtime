@@ -45,6 +45,26 @@ pub fn has_side_effect(func: &Function, inst: Inst) -> bool {
     trivially_has_side_effects(opcode) || is_load_with_defined_trapping(opcode, data)
 }
 
+/// Does the given instruction behave as a "pure" node with respect to
+/// aegraph semantics?
+///
+/// - Actual pure nodes (arithmetic, etc)
+/// - Loads with the `readonly` flag set
+pub fn is_pure_for_egraph(func: &Function, inst: Inst) -> bool {
+    let is_readonly_load = match func.dfg[inst] {
+        InstructionData::Load {
+            opcode: Opcode::Load,
+            flags,
+            ..
+        } => flags.readonly() && flags.notrap(),
+        _ => false,
+    };
+
+    let op = func.dfg[inst].opcode();
+
+    is_readonly_load || (!op.can_load() && !trivially_has_side_effects(op))
+}
+
 /// Does the given instruction have any side-effect as per [has_side_effect], or else is a load,
 /// but not the get_pinned_reg opcode?
 pub fn has_lowering_side_effect(func: &Function, inst: Inst) -> bool {

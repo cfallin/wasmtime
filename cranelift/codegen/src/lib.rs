@@ -113,6 +113,7 @@ mod simple_gvn;
 mod simple_preopt;
 mod unreachable_code;
 mod value_label;
+mod egraph_in_dfg;
 
 #[cfg(feature = "souper-harvest")]
 mod souper_harvest;

@@ -1,0 +1,21 @@
+Egraph-in-DFG work
+
+we need to incorporate:
+- egraph build
+- opt rule invocation
+- egraph elaboration
+
+- new Value kind: Union
+  - (x) add Union def
+  - print in CLIF
+  - parse in CLIF
+- Write a pass that subsumes the CLIF-to-egraph-to-CLIF process:
+  - (1 only) apply existing GVN
+  - (1) (x) removes non-skeleton nodes from Layout
+  - (2) tracks analysis values for every Value
+  - (2) does a GVN
+    - eventually also: does rule application during GVN pass
+  - (2) chooses best value out of every eclass (union tree)
+  - (1) place nodes back into layout based on elaboration
+
+- (3) add opt rule invocation
