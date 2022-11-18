@@ -43,7 +43,7 @@ cranelift-isle = { path = "../isle/isle", version = "=0.91.0" }
 miette = { version = "5.1.0", features = ["fancy"], optional = true }
 
 [features]
-default = ["std", "unwind"]
+default = ["std", "unwind", "trace-log"]
 
 # The "std" feature enables use of libstd. The "core" feature enables use
 # of some minimal std-like replacement libraries. At least one of these two

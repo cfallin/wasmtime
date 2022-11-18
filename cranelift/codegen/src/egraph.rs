@@ -357,6 +357,14 @@ impl Default for AnalysisValue {
     }
 }
 
+impl AnalysisValue {
+    fn meet(x: &AnalysisValue, y: &AnalysisValue) -> AnalysisValue {
+        AnalysisValue {
+            loop_level: std::cmp::max(x.loop_level, y.loop_level),
+        }
+    }
+}
+
 impl cranelift_egraph::Analysis for Analysis {
     type L = NodeCtx;
     type Value = AnalysisValue;

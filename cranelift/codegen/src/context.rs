@@ -193,7 +193,7 @@ impl Context {
                 &self.loop_analysis,
                 &self.cfg,
             );
-            pass.elaborate();
+            pass.run();
             log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {

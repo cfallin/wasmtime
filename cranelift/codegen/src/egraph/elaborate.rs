@@ -3,9 +3,9 @@
 
 use super::domtree::DomTreeWithChildren;
 use super::node::{pure_op_cost, Cost};
-use super::AnalysisValue;
 use super::Stats;
 use crate::dominator_tree::DominatorTree;
+use crate::egraph_in_dfg::AnalysisValue;
 use crate::fx::FxHashSet;
 use crate::ir::ValueDef;
 use crate::ir::{Block, Function, Inst, Value};
@@ -253,7 +253,12 @@ impl<'a> Elaborator<'a> {
 
                     self.stats.elaborate_visit_node += 1;
                     let canonical_value = self.eclasses.find(value);
-                    trace!("elaborate: value {} before {}", value, before);
+                    trace!(
+                        "elaborate: value {} canonical {} before {}",
+                        value,
+                        canonical_value,
+                        before
+                    );
 
                     let remat = if let Some((elab_block, elab_val)) =
                         self.value_to_elaborated_value.get(&canonical_value)
@@ -281,7 +286,9 @@ impl<'a> Elaborator<'a> {
                         // Value not available; but still look up
                         // whether it's been flagged for remat because
                         // this affects placement.
-                        self.remat_values.contains(&canonical_value)
+                        let remat = self.remat_values.contains(&canonical_value);
+                        trace!(" -> not present in map; remat = {}", remat);
+                        remat
                     };
                     self.stats.elaborate_memoize_miss += 1;
 
@@ -346,6 +353,15 @@ impl<'a> Elaborator<'a> {
                 } => {
                     self.elab_stack.pop();
 
+                    trace!(
+                        "PendingInst: {} result {} args {} remat {} before {}",
+                        inst,
+                        result_idx,
+                        num_args,
+                        remat,
+                        before
+                    );
+
                     // We should have all args resolved at this
                     // point. Grab them and drain them out, removing
                     // them.
@@ -354,9 +370,18 @@ impl<'a> Elaborator<'a> {
 
                     // Compute max loop depth.
                     let max_loop_depth = arg_values
-                        .map(|value| self.analysis_values[value].loop_level)
+                        .map(|value| {
+                            let level = self.analysis_values[value].loop_level;
+                            trace!(" -> arg {}: loop level {:?}", value, level);
+                            level
+                        })
                         .max()
                         .unwrap_or(LoopLevel::root());
+                    trace!(
+                        " -> max loop depth: {:?}; cur loop depth: {:?}",
+                        max_loop_depth,
+                        self.cur_loop_depth()
+                    );
 
                     // We know that this is a pure inst, because
                     // non-pure roots have already been placed in the
@@ -408,6 +433,13 @@ impl<'a> Elaborator<'a> {
                     // Loop scopes are a subset of all scopes.
                     debug_assert!(scope_depth >= loop_depth.level());
 
+                    trace!(
+                        " -> decided to place: loop_depth {:?} before {} insert_block {}",
+                        loop_depth,
+                        before,
+                        insert_block
+                    );
+
                     //  Now we need to place `inst` at the computed
                     //  location (just before `before`). Note that
                     //  `inst` may already have been placed somewhere
@@ -416,9 +448,15 @@ impl<'a> Elaborator<'a> {
                     //  duplicate the instruction (and return the
                     //  `Value`s for that duplicated instance
                     //  instead).
+                    trace!("need inst {} before {}", inst, before);
                     let inst = if self.func.layout.inst_block(inst).is_some() {
                         // Clone the inst!
                         let new_inst = self.func.dfg.clone_inst(inst);
+                        trace!(
+                            " -> inst {} already has a location; cloned to {}",
+                            inst,
+                            new_inst
+                        );
                         // Create mappings in the
                         // value-to-elab'd-value map from original
                         // results to cloned results.
@@ -434,9 +472,15 @@ impl<'a> Elaborator<'a> {
                                 (insert_block, new_result),
                                 scope_depth,
                             );
+                            trace!(
+                                " -> cloned inst has new result {} for orig {}",
+                                new_result,
+                                result
+                            );
                         }
                         new_inst
                     } else {
+                        trace!(" -> no location; using original inst");
                         // Create identity mappings from result values
                         // to themselves in this scope, since we're
                         // using the original inst.
@@ -446,6 +490,7 @@ impl<'a> Elaborator<'a> {
                                 (insert_block, result),
                                 scope_depth,
                             );
+                            trace!(" -> inserting identity mapping for {}", result);
                         }
                         inst
                     };

@@ -19,3 +19,11 @@ we need to incorporate:
   - (1) place nodes back into layout based on elaboration
 
 - (3) add opt rule invocation
+
+----
+
+- resolve aliases (or add aliases to eclass unionfind groups)
+- rewrite inst args to use new args from result stack
+- invalid values (not added to eclass UF) still present
+- add an assert that canonical value is not invalid
+
