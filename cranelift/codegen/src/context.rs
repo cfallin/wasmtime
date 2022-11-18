@@ -12,7 +12,7 @@
 use crate::alias_analysis::AliasAnalysis;
 use crate::dce::do_dce;
 use crate::dominator_tree::DominatorTree;
-use crate::egraph::FuncEGraph;
+use crate::egraph_in_dfg::EgraphPass;
 use crate::flowgraph::ControlFlowGraph;
 use crate::ir::Function;
 use crate::isa::TargetIsa;
@@ -187,10 +187,15 @@ impl Context {
                 self.func.display()
             );
             self.compute_loop_analysis();
-            let mut eg = FuncEGraph::new(&self.func, &self.domtree, &self.loop_analysis, &self.cfg);
-            eg.elaborate(&mut self.func);
+            let mut pass = EgraphPass::new(
+                &mut self.func,
+                &self.domtree,
+                &self.loop_analysis,
+                &self.cfg,
+            );
+            pass.elaborate();
+            log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
-            log::info!("egraph stats: {:?}", eg.stats);
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {
             self.replace_redundant_loads()?;
             self.simple_gvn(isa)?;

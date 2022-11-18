@@ -45,7 +45,7 @@ pub struct EgraphPass<'a> {
     /// i.e. tree of union value-nodes).
     remat_values: FxHashSet<Value>,
     /// Stats collected while we run this pass.
-    stats: Stats,
+    pub(crate) stats: Stats,
     /// Union-find that maps all members of a Union tree (eclass) back
     /// to the *oldest* (lowest-numbered) `Value`.
     eclasses: UnionFind<Value>,
@@ -118,7 +118,7 @@ impl<'a> EgraphPass<'a> {
     /// thus computed "as late as possible", but then memoized into
     /// the Id-to-Value map and available to all dominated blocks and
     /// for the rest of this block. (This subsumes GVN.)
-    fn elaborate(&mut self) {
+    pub fn elaborate(&mut self) {
         let mut elaborator = Elaborator::new(
             self.func,
             self.domtree,
