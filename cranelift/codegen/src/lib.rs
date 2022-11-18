@@ -98,6 +98,7 @@ mod context;
 mod dce;
 mod divconst_magic_numbers;
 mod egraph;
+mod egraph_in_dfg;
 mod fx;
 mod inst_predicates;
 mod isle_prelude;
@@ -111,9 +112,9 @@ mod result;
 mod scoped_hash_map;
 mod simple_gvn;
 mod simple_preopt;
+mod unionfind;
 mod unreachable_code;
 mod value_label;
-mod egraph_in_dfg;
 
 #[cfg(feature = "souper-harvest")]
 mod souper_harvest;

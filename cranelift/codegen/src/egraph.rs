@@ -17,11 +17,10 @@ use cranelift_entity::EntityList;
 use cranelift_entity::SecondaryMap;
 
 mod domtree;
-mod elaborate;
+pub(crate) mod elaborate;
 mod node;
 mod stores;
 
-use elaborate::Elaborator;
 pub use node::{Node, NodeCtx};
 pub use stores::{AliasAnalysis, MemoryState};
 
@@ -336,7 +335,7 @@ impl<'a> FuncEGraph<'a> {
     }
 
     /// This doc comment has been cannibalized.
-    pub fn elaborate(&mut self, func: &mut Function) {
+    pub fn elaborate(&mut self, _func: &mut Function) {
         panic!("I have been cannibalized")
     }
 }

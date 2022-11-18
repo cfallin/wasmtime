@@ -120,23 +120,6 @@ impl DataFlowGraph {
         self.immediates.clear();
     }
 
-    /// Clear all instructions, but keep blocks and other metadata
-    /// (signatures, constants, immediates). Everything to do with
-    /// `Value`s is cleared, including block params and debug info.
-    ///
-    /// Used during egraph-based optimization to clear out the pre-opt
-    /// body so that we can regenerate it from the egraph.
-    pub(crate) fn clear_insts(&mut self) {
-        self.insts.clear();
-        self.results.clear();
-        self.value_lists.clear();
-        self.values.clear();
-        self.values_labels = None;
-        for block in self.blocks.values_mut() {
-            block.params = ValueList::new();
-        }
-    }
-
     /// Get the total number of instructions created in this function, whether they are currently
     /// inserted in the layout or not.
     ///
@@ -634,8 +617,11 @@ impl From<ValueDataPacked> for ValueData {
 impl DataFlowGraph {
     /// Create a new instruction.
     ///
-    /// The type of the first result is indicated by `data.ty`. If the instruction produces
-    /// multiple results, also call `make_inst_results` to allocate value table entries.
+    /// The type of the first result is indicated by `data.ty`. If the
+    /// instruction produces multiple results, also call
+    /// `make_inst_results` to allocate value table entries. (It is
+    /// always safe to call `make_inst_results`, regardless of how
+    /// many results the instruction has.)
     pub fn make_inst(&mut self, data: InstructionData) -> Inst {
         let n = self.num_insts() + 1;
         self.results.resize(n);
@@ -874,6 +860,19 @@ impl DataFlowGraph {
             .expect("the instruction doesn't have value arguments");
         branch_values.push(new_arg, &mut self.value_lists);
         self.insts[inst].put_value_list(branch_values)
+    }
+
+    /// Clone an instruction, attaching new result `Value`s and
+    /// returning them.
+    pub fn clone_inst(&mut self, inst: Inst) -> Inst {
+        // First, add a clone of the InstructionData.
+        let inst_data = self[inst].clone();
+        let new_inst = self.make_inst(inst_data);
+        // Get the controlling type variable.
+        let ctrl_typevar = self.ctrl_typevar(inst);
+        // Create new result values.
+        self.make_inst_results(new_inst, ctrl_typevar);
+        new_inst
     }
 
     /// Get the first result of an instruction.

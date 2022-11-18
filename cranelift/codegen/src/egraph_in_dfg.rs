@@ -3,12 +3,15 @@
 use crate::cursor::{Cursor, FuncCursor};
 use crate::dominator_tree::DominatorTree;
 use crate::egraph::elaborate::Elaborator;
+use crate::egraph::AnalysisValue;
 use crate::egraph::Stats;
 use crate::flowgraph::ControlFlowGraph;
 use crate::fx::FxHashSet;
 use crate::inst_predicates::is_pure_for_egraph;
 use crate::ir::{Function, Value};
-use crate::loop_analysis::{LoopAnalysis, LoopLevel};
+use crate::loop_analysis::LoopAnalysis;
+use crate::unionfind::UnionFind;
+use cranelift_entity::SecondaryMap;
 
 /// Pass over a Function that does the whole aegraph thing.
 ///
@@ -40,8 +43,14 @@ pub struct EgraphPass<'a> {
     ///
     /// (A canonical Value is the *oldest* Value in an eclass,
     /// i.e. tree of union value-nodes).
-    pub(crate) remat_values: FxHashSet<Value>,
+    remat_values: FxHashSet<Value>,
+    /// Stats collected while we run this pass.
     stats: Stats,
+    /// Union-find that maps all members of a Union tree (eclass) back
+    /// to the *oldest* (lowest-numbered) `Value`.
+    eclasses: UnionFind<Value>,
+    /// Analysis values per `Value`.
+    analysis_values: SecondaryMap<Value, AnalysisValue>,
 }
 
 impl<'a> EgraphPass<'a> {
@@ -53,12 +62,15 @@ impl<'a> EgraphPass<'a> {
         // Only used for AliasAnalysis (TODO).
         _cfg: &ControlFlowGraph,
     ) -> Self {
+        let num_values = func.dfg.num_values();
         Self {
             func,
             domtree,
             loop_analysis,
-            cfg,
             stats: Stats::default(),
+            eclasses: UnionFind::with_capacity(num_values),
+            remat_values: FxHashSet::default(),
+            analysis_values: SecondaryMap::with_capacity(num_values),
         }
     }
 
@@ -107,13 +119,15 @@ impl<'a> EgraphPass<'a> {
     /// the Id-to-Value map and available to all dominated blocks and
     /// for the rest of this block. (This subsumes GVN.)
     fn elaborate(&mut self) {
-        let elaborator = Elaborator::new(
+        let mut elaborator = Elaborator::new(
             self.func,
             self.domtree,
             self.loop_analysis,
-            &mut self.remat_ids,
+            &mut self.remat_values,
+            &self.analysis_values,
+            &self.eclasses,
             &mut self.stats,
         );
-        elab.elaborate();
+        elaborator.elaborate();
     }
 }
