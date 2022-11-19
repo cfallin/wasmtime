@@ -231,7 +231,7 @@ impl<'a> Elaborator<'a> {
     /// instructions before the given inst `before`. Should only be
     /// given values corresponding to results of instructions or
     /// blockparams.
-    fn elaborate_eclass_use(&mut self, value: Value, before: Inst) {
+    fn elaborate_eclass_use(&mut self, value: Value, before: Inst) -> Value {
         // Kick off the process by requesting this result
         // value.
         self.elab_stack
@@ -241,7 +241,7 @@ impl<'a> Elaborator<'a> {
         // the root.
         self.process_elab_stack();
         debug_assert_eq!(self.elab_result_stack.len(), 1);
-        self.elab_result_stack.clear();
+        self.elab_result_stack.pop().unwrap()
     }
 
     fn process_elab_stack(&mut self) {
@@ -251,8 +251,11 @@ impl<'a> Elaborator<'a> {
                     // We always replace the Start entry, so pop it now.
                     self.elab_stack.pop();
 
+                    let value = self.func.dfg.resolve_aliases(value);
+
                     self.stats.elaborate_visit_node += 1;
                     let canonical_value = self.eclasses.find(value);
+                    debug_assert_ne!(canonical_value, Value::reserved_value());
                     trace!(
                         "elaborate: value {} canonical {} before {}",
                         value,
@@ -302,12 +305,21 @@ impl<'a> Elaborator<'a> {
                     // Now resolve the value to its definition to see
                     // how we can compute it.
                     let (inst, result_idx) = match self.func.dfg.value_def(best_value) {
-                        ValueDef::Result(inst, result_idx) => (inst, result_idx),
+                        ValueDef::Result(inst, result_idx) => {
+                            trace!(
+                                " -> value {} is result {} of {}",
+                                best_value,
+                                result_idx,
+                                inst
+                            );
+                            (inst, result_idx)
+                        }
                         ValueDef::Param(_, _) => {
                             // We don't need to do anything to compute
                             // this value; just push its result on the
                             // result stack (blockparams are already
                             // available).
+                            trace!(" -> value {} is a blockparam", best_value);
                             self.elab_result_stack.push(best_value);
                             continue;
                         }
@@ -366,11 +378,13 @@ impl<'a> Elaborator<'a> {
                     // point. Grab them and drain them out, removing
                     // them.
                     let arg_idx = self.elab_result_stack.len() - num_args;
-                    let arg_values = self.elab_result_stack.drain(arg_idx..);
+                    let arg_values = &self.elab_result_stack[arg_idx..];
 
                     // Compute max loop depth.
                     let max_loop_depth = arg_values
-                        .map(|value| {
+                        .iter()
+                        .map(|&value| {
+                            let value = self.func.dfg.resolve_aliases(value);
                             let level = self.analysis_values[value].loop_level;
                             trace!(" -> arg {}: loop level {:?}", value, level);
                             level
@@ -497,6 +511,14 @@ impl<'a> Elaborator<'a> {
                     // Place the inst just before `before`.
                     self.func.layout.insert_inst(inst, before);
 
+                    // Update the inst's arguments.
+                    let args_dest = self.func.dfg.inst_args_mut(inst);
+                    args_dest.copy_from_slice(arg_values);
+
+                    // Now that we've consumed the arg values, pop
+                    // them off the stack.
+                    self.elab_result_stack.truncate(arg_idx);
+
                     // Push the requested result index of the
                     // instruction onto the elab-results stack.
                     self.elab_result_stack
@@ -532,8 +554,10 @@ impl<'a> Elaborator<'a> {
                 // Don't borrow across the below.
                 let arg = self.func.dfg.inst_args(inst)[i];
                 // Elaborate the arg, placing any newly-inserted insts
-                // before `before`.
-                self.elaborate_eclass_use(arg, before);
+                // before `before`. Get the updated value, which may
+                // be different than the original.
+                let arg = self.elaborate_eclass_use(arg, before);
+                self.func.dfg.inst_args_mut(inst)[i] = arg;
             }
 
             // We need to put the results of this instruction in the

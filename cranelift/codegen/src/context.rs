@@ -196,6 +196,7 @@ impl Context {
             pass.run();
             log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
+            self.verify(isa).expect("CLIF should verify after elaboration");
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {
             self.replace_redundant_loads()?;
             self.simple_gvn(isa)?;

@@ -22,8 +22,6 @@ we need to incorporate:
 
 ----
 
-- resolve aliases (or add aliases to eclass unionfind groups)
-- rewrite inst args to use new args from result stack
 - invalid values (not added to eclass UF) still present
 - add an assert that canonical value is not invalid
 
