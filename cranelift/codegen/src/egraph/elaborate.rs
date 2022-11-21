@@ -175,6 +175,8 @@ impl<'a> Elaborator<'a> {
             );
         }
 
+        trace!("block {}: loop stack is {:?}", block, self.loop_stack);
+
         self.cur_block = block;
     }
 

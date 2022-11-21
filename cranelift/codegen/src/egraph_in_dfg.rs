@@ -186,6 +186,7 @@ impl<'a> EgraphPass<'a> {
             }
         };
 
+        trace!("Analysis value for {} is {:?}", value, aval);
         analysis_values[value] = aval;
     }
 }
@@ -253,19 +254,25 @@ impl PseudoLoopLevels {
             let is_header = cfg
                 .pred_iter(entry.block)
                 .any(|pred| domtree.dominates(entry.block, pred.block, layout));
-            let child_level = if is_header {
+            let this_level = if is_header {
                 headers.insert(entry.block);
                 entry.level.inc()
             } else {
                 entry.level
             };
 
-            levels[entry.block] = entry.level;
+            levels[entry.block] = this_level;
+            trace!(
+                "PseudoLoopLevels::compute: block {} level {:?} is_header {}",
+                entry.block,
+                this_level,
+                is_header
+            );
 
             for child in domtree_children.children(entry.block) {
                 stack.push(StackEntry {
                     block: child,
-                    level: child_level,
+                    level: this_level,
                 });
             }
         }
@@ -303,6 +310,11 @@ impl AnalysisValue {
 
     fn for_block(loop_analysis: &PseudoLoopLevels, block: Block) -> AnalysisValue {
         let pseudo_loop_level = loop_analysis.pseudo_loop_level(block);
+        trace!(
+            "AnalysisValue::for_block: block {} -> level {:?}",
+            block,
+            pseudo_loop_level
+        );
         AnalysisValue { pseudo_loop_level }
     }
 }
