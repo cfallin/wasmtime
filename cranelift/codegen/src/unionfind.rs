@@ -1,0 +1,98 @@
+//! Simple union-find data structure.
+
+use crate::trace;
+use cranelift_entity::{packed_option::ReservedValue, EntityRef, SecondaryMap};
+use std::hash::{Hash, Hasher};
+
+/// A union-find data structure. The data structure can allocate
+/// `Id`s, indicating eclasses, and can merge eclasses together.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnionFind<Idx: EntityRef> {
+    parent: SecondaryMap<Idx, Val<Idx>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Val<Idx>(Idx);
+impl<Idx: EntityRef + ReservedValue> Default for Val<Idx> {
+    fn default() -> Self {
+        Self(Idx::reserved_value())
+    }
+}
+
+impl<Idx: EntityRef + Hash + std::fmt::Display + Ord + ReservedValue> UnionFind<Idx> {
+    /// Create a new `UnionFind`.
+    pub fn new() -> Self {
+        UnionFind {
+            parent: SecondaryMap::new(),
+        }
+    }
+
+    /// Create a new `UnionFind` with the given capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        UnionFind {
+            parent: SecondaryMap::with_capacity(cap),
+        }
+    }
+
+    /// Clear all contents.
+    pub fn clear(&mut self) {
+        self.parent.clear();
+    }
+
+    /// Add an `Idx` to the `UnionFind`, with its own equivalence class
+    /// initially. All `Idx`s must be added before being queried or
+    /// unioned.
+    pub fn add(&mut self, id: Idx) {
+        self.parent[id] = Val(id);
+    }
+
+    /// Find the canonical `Idx` of a given `Idx`.
+    pub fn find(&self, mut node: Idx) -> Idx {
+        while node != self.parent[node].0 {
+            node = self.parent[node].0;
+        }
+        node
+    }
+
+    /// Find the canonical `Idx` of a given `Idx`, updating the data
+    /// structure in the process so that future queries for this `Idx`
+    /// (and others in its chain up to the root of the equivalence
+    /// class) will be faster.
+    pub fn find_and_update(&mut self, mut node: Idx) -> Idx {
+        // "Path splitting" mutating find (Tarjan and Van Leeuwen).
+        let orig = node;
+        while node != self.parent[node].0 {
+            let next = self.parent[self.parent[node].0].0;
+            self.parent[node] = Val(next);
+            node = next;
+        }
+        trace!("find_and_update: {} -> {}", orig, node);
+        node
+    }
+
+    /// Merge the equivalence classes of the two `Idx`s.
+    pub fn union(&mut self, a: Idx, b: Idx) {
+        let a = self.find_and_update(a);
+        let b = self.find_and_update(b);
+        let (a, b) = (std::cmp::min(a, b), std::cmp::max(a, b));
+        if a != b {
+            // Always canonicalize toward lower IDs.
+            self.parent[b] = Val(a);
+            trace!("union: {}, {}", a, b);
+        }
+    }
+
+    /// Determine if two `Idx`s are equivalent, after
+    /// canonicalizing. Update union-find data structure during our
+    /// canonicalization to make future lookups faster.
+    pub fn equiv_id_mut(&mut self, a: Idx, b: Idx) -> bool {
+        self.find_and_update(a) == self.find_and_update(b)
+    }
+
+    /// Hash an `Idx` after canonicalizing it. Update union-find data
+    /// structure to make future lookups/hashing faster.
+    pub fn hash_id_mut<H: Hasher>(&mut self, hash: &mut H, id: Idx) {
+        let id = self.find_and_update(id);
+        id.hash(hash);
+    }
+}
