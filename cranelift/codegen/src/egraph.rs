@@ -16,7 +16,7 @@ use cranelift_egraph::{EGraph, Id, Language, NewOrExisting};
 use cranelift_entity::EntityList;
 use cranelift_entity::SecondaryMap;
 
-mod domtree;
+pub(crate) mod domtree;
 pub(crate) mod elaborate;
 mod node;
 mod stores;

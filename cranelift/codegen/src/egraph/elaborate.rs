@@ -5,11 +5,10 @@ use super::domtree::DomTreeWithChildren;
 use super::node::{pure_op_cost, Cost};
 use super::Stats;
 use crate::dominator_tree::DominatorTree;
-use crate::egraph_in_dfg::AnalysisValue;
+use crate::egraph_in_dfg::{AnalysisValue, PseudoLoopLevel, PseudoLoopLevels};
 use crate::fx::FxHashSet;
 use crate::ir::ValueDef;
 use crate::ir::{Block, Function, Inst, Value};
-use crate::loop_analysis::{LoopAnalysis, LoopLevel};
 use crate::scoped_hash_map::ScopedHashMap;
 use crate::trace;
 use crate::unionfind::UnionFind;
@@ -21,7 +20,8 @@ use std::ops::Add;
 pub(crate) struct Elaborator<'a> {
     func: &'a mut Function,
     domtree: &'a DominatorTree,
-    loop_analysis: &'a LoopAnalysis,
+    domtree_children: &'a DomTreeWithChildren,
+    pseudo_loop_levels: &'a PseudoLoopLevels,
     analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
     eclasses: &'a UnionFind<Value>,
     /// Map from Value that is produced by a pure Inst ( and was thus
@@ -47,7 +47,7 @@ pub(crate) struct Elaborator<'a> {
     value_to_best_value: SecondaryMap<Value, (Cost, Value)>,
     /// Stack of blocks and loops in current elaboration path.
     loop_stack: SmallVec<[LoopStackEntry; 8]>,
-    cur_block: Option<Block>,
+    cur_block: Block,
     first_branch: SecondaryMap<Block, PackedOption<Inst>>,
     /// Values that opt rules have indicated should be rematerialized
     /// in every block they are used (e.g., immediates or other
@@ -102,7 +102,8 @@ impl<'a> Elaborator<'a> {
     pub(crate) fn new(
         func: &'a mut Function,
         domtree: &'a DominatorTree,
-        loop_analysis: &'a LoopAnalysis,
+        domtree_children: &'a DomTreeWithChildren,
+        pseudo_loop_levels: &'a PseudoLoopLevels,
         remat_values: &'a FxHashSet<Value>,
         analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
         eclasses: &'a UnionFind<Value>,
@@ -116,12 +117,13 @@ impl<'a> Elaborator<'a> {
         Self {
             func,
             domtree,
-            loop_analysis,
+            domtree_children,
+            pseudo_loop_levels,
             eclasses,
             value_to_elaborated_value: ScopedHashMap::with_capacity(num_values),
             value_to_best_value,
             loop_stack: smallvec![],
-            cur_block: None,
+            cur_block: Block::reserved_value(),
             first_branch: SecondaryMap::with_capacity(num_blocks),
             remat_values,
             elab_stack: vec![],
@@ -132,8 +134,8 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    fn cur_loop_depth(&self) -> LoopLevel {
-        LoopLevel::clamped(self.loop_stack.len())
+    fn cur_loop_depth(&self) -> PseudoLoopLevel {
+        self.pseudo_loop_levels.pseudo_loop_level(self.cur_block)
     }
 
     fn start_block(&mut self, idom: Option<Block>, block: Block) {
@@ -152,7 +154,7 @@ impl<'a> Elaborator<'a> {
         // `LoopAnalysis` will otherwise still make note of this loop
         // and loop depths will not match.
         if let Some(idom) = idom {
-            if self.loop_analysis.is_loop_header(block).is_some() {
+            if self.pseudo_loop_levels.is_loop_header(block) {
                 self.loop_stack.push(LoopStackEntry {
                     // Any code hoisted out of this loop will have code
                     // placed in `idom`, and will have def mappings
@@ -168,12 +170,12 @@ impl<'a> Elaborator<'a> {
             }
         } else {
             debug_assert!(
-                self.loop_analysis.is_loop_header(block).is_none(),
+                !self.pseudo_loop_levels.is_loop_header(block),
                 "Entry block (domtree root) cannot be a loop header!"
             );
         }
 
-        self.cur_block = Some(block);
+        self.cur_block = block;
     }
 
     fn compute_best_values(&mut self) {
@@ -204,11 +206,11 @@ impl<'a> Elaborator<'a> {
                 ValueDef::Result(inst, _) => {
                     trace!(" -> value {}: result, computing cost", value);
                     let inst_data = &self.func.dfg[inst];
-                    let level = self.analysis_values[value].loop_level;
+                    let level = self.analysis_values[value].pseudo_loop_level;
                     // N.B.: at this point we know that the opcode is
                     // pure, so `pure_op_cost`'s precondition is
                     // satisfied.
-                    let cost = pure_op_cost(inst_data.opcode()).at_level(level)
+                    let cost = pure_op_cost(inst_data.opcode()).at_level(level.level())
                         + self
                             .func
                             .dfg
@@ -271,7 +273,7 @@ impl<'a> Elaborator<'a> {
                         // allows rematerialization if the value comes
                         // from another block. If so, ignore the hit
                         // and recompute below.
-                        let remat = *elab_block != self.cur_block.unwrap()
+                        let remat = *elab_block != self.cur_block
                             && self.remat_values.contains(&canonical_value);
                         if !remat {
                             trace!("elaborate: value {} -> {:?}", value, elab_val);
@@ -385,12 +387,12 @@ impl<'a> Elaborator<'a> {
                         .iter()
                         .map(|&value| {
                             let value = self.func.dfg.resolve_aliases(value);
-                            let level = self.analysis_values[value].loop_level;
+                            let level = self.analysis_values[value].pseudo_loop_level;
                             trace!(" -> arg {}: loop level {:?}", value, level);
                             level
                         })
                         .max()
-                        .unwrap_or(LoopLevel::root());
+                        .unwrap_or(PseudoLoopLevel::default());
                     trace!(
                         " -> max loop depth: {:?}; cur loop depth: {:?}",
                         max_loop_depth,
@@ -616,11 +618,10 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(crate) fn elaborate(&mut self) {
-        let domtree = DomTreeWithChildren::new(self.func, self.domtree);
         self.stats.elaborate_func += 1;
         self.stats.elaborate_func_pre_insts += self.func.dfg.num_insts() as u64;
         self.compute_best_values();
-        self.elaborate_domtree(&domtree);
+        self.elaborate_domtree(&self.domtree_children);
         self.stats.elaborate_func_post_insts += self.func.dfg.num_insts() as u64;
     }
 }

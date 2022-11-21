@@ -190,7 +190,6 @@ impl Context {
             let mut pass = EgraphPass::new(
                 &mut self.func,
                 &self.domtree,
-                &self.loop_analysis,
                 &self.cfg,
             );
             pass.run();
