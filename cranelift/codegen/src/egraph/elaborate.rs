@@ -23,7 +23,7 @@ pub(crate) struct Elaborator<'a> {
     domtree_children: &'a DomTreeWithChildren,
     pseudo_loop_levels: &'a PseudoLoopLevels,
     analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
-    eclasses: &'a UnionFind<Value>,
+    eclasses: &'a mut UnionFind<Value>,
     /// Map from Value that is produced by a pure Inst ( and was thus
     /// not in the side-effecting skeleton) to the value produced by
     /// an elaborated inst (placed in the layout) to whose results we
@@ -106,7 +106,7 @@ impl<'a> Elaborator<'a> {
         pseudo_loop_levels: &'a PseudoLoopLevels,
         remat_values: &'a FxHashSet<Value>,
         analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
-        eclasses: &'a UnionFind<Value>,
+        eclasses: &'a mut UnionFind<Value>,
         stats: &'a mut Stats,
     ) -> Self {
         let num_blocks = func.dfg.num_blocks();
@@ -389,7 +389,8 @@ impl<'a> Elaborator<'a> {
                         .iter()
                         .map(|&value| {
                             let value = self.func.dfg.resolve_aliases(value);
-                            let level = self.analysis_values[value].pseudo_loop_level;
+                            let canonical = self.eclasses.find(value);
+                            let level = self.analysis_values[canonical].pseudo_loop_level;
                             trace!(" -> arg {}: loop level {:?}", value, level);
                             level
                         })
@@ -490,6 +491,10 @@ impl<'a> Elaborator<'a> {
                                 (insert_block, new_result),
                                 scope_depth,
                             );
+
+                            self.eclasses.add(new_result);
+                            self.eclasses.union(result, new_result);
+
                             trace!(
                                 " -> cloned inst has new result {} for orig {}",
                                 new_result,

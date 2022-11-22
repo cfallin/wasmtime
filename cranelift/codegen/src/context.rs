@@ -186,16 +186,15 @@ impl Context {
                 "About to optimize with egraph phase:\n{}",
                 self.func.display()
             );
+            self.verify(isa)
+                .expect("CLIF should verify before elaboration");
             self.compute_loop_analysis();
-            let mut pass = EgraphPass::new(
-                &mut self.func,
-                &self.domtree,
-                &self.cfg,
-            );
+            let mut pass = EgraphPass::new(&mut self.func, &self.domtree, &self.cfg);
             pass.run();
             log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
-            self.verify(isa).expect("CLIF should verify after elaboration");
+            self.verify(isa)
+                .expect("CLIF should verify after elaboration");
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {
             self.replace_redundant_loads()?;
             self.simple_gvn(isa)?;

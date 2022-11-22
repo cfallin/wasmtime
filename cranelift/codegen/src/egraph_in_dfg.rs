@@ -157,7 +157,7 @@ impl<'a> EgraphPass<'a> {
             &self.pseudo_loop_levels,
             &mut self.remat_values,
             &self.analysis_values,
-            &self.eclasses,
+            &mut self.eclasses,
             &mut self.stats,
         );
         elaborator.elaborate();
