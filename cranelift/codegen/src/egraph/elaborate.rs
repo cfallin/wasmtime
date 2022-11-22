@@ -354,7 +354,7 @@ impl<'a> Elaborator<'a> {
                     });
                     // Push args in reverse order so we process the
                     // first arg first.
-                    for &arg in args {
+                    for &arg in args.iter().rev() {
                         self.elab_stack
                             .push(ElabStackEntry::Start { value: arg, before });
                     }
