@@ -1,6 +1,6 @@
 //! Support for egraphs represented in the DataFlowGraph.
 
-use crate::ctxhash::{CtxEq, CtxHash, CtxHashMap, Entry as CtxHashEntry};
+use crate::ctxhash::{CtxEq, CtxHash, CtxHashMap};
 use crate::cursor::{Cursor, FuncCursor};
 use crate::dominator_tree::DominatorTree;
 use crate::egraph::domtree::DomTreeWithChildren;
@@ -228,6 +228,7 @@ impl<'a> EgraphPass<'a> {
                 value_lists: &func.dfg.value_lists,
             };
             gvn_map.insert(func.dfg[inst].clone(), opt_value, &gvn_context);
+            value_to_opt_value[result] = opt_value;
         }
     }
 
@@ -240,11 +241,11 @@ impl<'a> EgraphPass<'a> {
     /// TODO: wrap up args into a context struct (here and above in
     /// insert_pure_enode).
     fn optimize_pure_enode(
-        func: &mut Function,
-        inst: Inst,
-        value_to_opt_value: &mut SecondaryMap<Value, Value>,
-        gvn_map: &mut CtxHashMap<InstructionData, Value>,
-        eclasses: &mut UnionFind<Value>,
+        _func: &mut Function,
+        _inst: Inst,
+        _value_to_opt_value: &mut SecondaryMap<Value, Value>,
+        _gvn_map: &mut CtxHashMap<InstructionData, Value>,
+        _eclasses: &mut UnionFind<Value>,
     ) -> Value {
         todo!()
     }
