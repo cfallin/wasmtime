@@ -541,6 +541,7 @@ dependencies = [
  "cranelift-entity",
  "cranelift-isle",
  "criterion",
+ "fxhash",
  "gimli",
  "hashbrown",
  "log",

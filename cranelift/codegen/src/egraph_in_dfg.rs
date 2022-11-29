@@ -1,5 +1,6 @@
 //! Support for egraphs represented in the DataFlowGraph.
 
+use crate::ctxhash::{CtxEq, CtxHash, CtxHashMap, Entry as CtxHashEntry};
 use crate::cursor::{Cursor, FuncCursor};
 use crate::dominator_tree::DominatorTree;
 use crate::egraph::domtree::DomTreeWithChildren;
@@ -8,10 +9,12 @@ use crate::egraph::Stats;
 use crate::flowgraph::ControlFlowGraph;
 use crate::fx::FxHashSet;
 use crate::inst_predicates::is_pure_for_egraph;
-use crate::ir::{Block, Function, Layout, Value, ValueDef};
+use crate::ir::{Block, Function, Inst, InstructionData, Layout, Value, ValueDef, ValueListPool};
 use crate::trace;
 use crate::unionfind::UnionFind;
+use cranelift_entity::packed_option::ReservedValue;
 use cranelift_entity::SecondaryMap;
+use std::hash::Hasher;
 
 /// Pass over a Function that does the whole aegraph thing.
 ///
@@ -82,16 +85,36 @@ impl<'a> EgraphPass<'a> {
 
     /// Run the process.
     pub fn run(&mut self) {
-        self.remove_pure();
+        self.remove_pure_and_optimize();
         self.elaborate();
     }
 
     /// Remove pure nodes from the `Layout` of the function, ensuring
-    /// that only the "side-effect skeleton" remains. This is the
-    /// first step of egraph-based processing and allows the egraph to
-    /// reason about pure nodes and move them freely.
-    fn remove_pure(&mut self) {
+    /// that only the "side-effect skeleton" remains, and also
+    /// optimize the pure nodes. This is the first step of
+    /// egraph-based processing and turns the pure CFG-based CLIF into
+    /// a CFG skeleton with a sea of (optimized) nodes tying it
+    /// together.
+    ///
+    /// As we walk through the code, we eagerly apply optimization
+    /// rules; at any given point we have a "latest version" of an
+    /// eclass of possible representations for a `Value` in the
+    /// original program, which is itself a `Value` at the root of a
+    /// union-tree. We keep a map from the original values to these
+    /// optimized values. When we encounter any instruction (pure or
+    /// side-effecting skeleton) we rewrite its arguments to capture
+    /// the "latest" optimized forms of these values. (We need to do
+    /// this as part of this pass, and not later using a finished map,
+    /// because the eclass can continue to be updated and we need to
+    /// only refer to its subset that exists at this stage, to
+    /// maintain acyclicity.)
+    fn remove_pure_and_optimize(&mut self) {
         let mut cursor = FuncCursor::new(self.func);
+        let mut value_to_opt_value: SecondaryMap<Value, Value> =
+            SecondaryMap::with_default(Value::reserved_value());
+        let mut gvn_map: CtxHashMap<InstructionData, Inst> =
+            CtxHashMap::with_capacity(cursor.func.dfg.num_insts());
+
         while let Some(block) = cursor.next_block() {
             for &param in cursor.func.dfg.block_params(block) {
                 trace!("creating initial singleton eclass for {}", param);
@@ -102,6 +125,7 @@ impl<'a> EgraphPass<'a> {
                     &mut self.analysis_values,
                     param,
                 );
+                value_to_opt_value[param] = param;
             }
             while let Some(inst) = cursor.next_inst() {
                 // While we're passing over all insts, create initial
@@ -119,11 +143,60 @@ impl<'a> EgraphPass<'a> {
                     );
                 }
 
+                // Rewrite args of *all* instructions using the
+                // value-to-opt-value map.
+                for arg in cursor.func.dfg.inst_args_mut(inst) {
+                    *arg = value_to_opt_value[*arg];
+                }
+
                 if is_pure_for_egraph(cursor.func, inst) {
+                    // Optimize!
+                    Self::optimize_pure_enode(
+                        cursor.func,
+                        inst,
+                        &mut value_to_opt_value,
+                        &mut gvn_map,
+                    );
+                    // We've now rewritten all uses, or will when we
+                    // see them, and the instruction exists as a pure
+                    // enode in the eclass, so we can remove it.
                     cursor.remove_inst_and_step_back();
+                } else {
+                    // Not pure, but may still be a store: add it to
+                    // the store-map if so so store-to-load forwarding
+                    // can work properly.
+                    todo!("store-map update");
                 }
             }
         }
+    }
+
+    /// Optimization of a single instruction.
+    ///
+    /// This does a few things:
+    /// - Looks up the instruction in the GVN deduplication map. If we
+    ///   already have the same instruction somewhere else, with the
+    ///   same args, then we can alias the original instruction's
+    ///   results and omit this instruction entirely.
+    ///   - Note that we do this canonicalization based on the
+    ///     instruction with its arguments as *canonical* eclass IDs,
+    ///     that is, the oldest (smallest index) `Value` reachable in
+    ///     the tree-of-unions (whole eclass). This ensures that we
+    ///     properly canonicalize newer nodes that use newer "versions"
+    ///     of a value that are still equal to the older versions.
+    /// - If the instruction is "new" (not deduplicated), then apply
+    ///   optimization rules:
+    ///   - All of the mid-end rules written in ISLE.
+    ///   - Store-to-load forwarding.
+    /// - Update the value-to-opt-value map, and update the eclass
+    ///   union-find, if we rewrote the value to different form(s).
+    fn optimize_pure_enode(
+        _func: &mut Function,
+        _inst: Inst,
+        _value_to_opt_value: &mut SecondaryMap<Value, Value>,
+        _gvn_map: &mut CtxHashMap<InstructionData, Inst>,
+    ) {
+        todo!()
     }
 
     /// Scoped elaboration: compute a final ordering of op computation
@@ -188,6 +261,31 @@ impl<'a> EgraphPass<'a> {
 
         trace!("Analysis value for {} is {:?}", value, aval);
         analysis_values[value] = aval;
+    }
+}
+
+/// Implementation of external-context equality and hashing on
+/// InstructionData. This allows us to deduplicate instructions given
+/// some context that lets us see its value lists and the mapping from
+/// any value to "canonical value" (in an eclass).
+struct GVNContext<'a> {
+    value_lists: &'a ValueListPool,
+    union_find: &'a UnionFind<Value>,
+}
+
+impl<'a> CtxEq<InstructionData, InstructionData> for GVNContext<'a> {
+    fn ctx_eq(&self, a: &InstructionData, b: &InstructionData) -> bool {
+        a.eq(b, self.value_lists, |value| self.union_find.find(value))
+    }
+}
+
+impl<'a> CtxHash<InstructionData> for GVNContext<'a> {
+    fn ctx_hash(&self, inst: &InstructionData) -> u64 {
+        let mut state = crate::fx::FxHasher::default();
+        inst.hash(&mut state, self.value_lists, |value| {
+            self.union_find.find(value)
+        });
+        state.finish()
     }
 }
 

@@ -95,6 +95,7 @@ mod alias_analysis;
 mod bitset;
 mod constant_hash;
 mod context;
+mod ctxhash;
 mod dce;
 mod divconst_magic_numbers;
 mod egraph;

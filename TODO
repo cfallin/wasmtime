@@ -22,6 +22,10 @@ we need to incorporate:
 
 ----
 
-- invalid values (not added to eclass UF) still present
-- add an assert that canonical value is not invalid
+misc cleanup:
+- "unreachable blocks" not "unreachable code"
+- do const prop + branch folding before DCE?
 
+- revisit pseudo-loops; can we do LICM properly?
+
+- factor unsafe code in ctxhash out to separate crate?

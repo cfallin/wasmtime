@@ -401,8 +401,12 @@ fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter
 
             This operation requires a reference to a `ValueListPool` to
             determine if the contents of any `ValueLists` are equal.
+
+            This operation takes a closure that is allowed to map each
+            argument value to some other value before the instructions
+            are compared. This allows various forms of canonicalization.
         "#);
-        fmt.line("pub fn eq(&self, other: &Self, pool: &ir::ValueListPool) -> bool {");
+        fmt.line("pub fn eq<F: Fn(Value) -> Value>(&self, other: &Self, pool: &ir::ValueListPool, mapper: F) -> bool {");
         fmt.indent(|fmt| {
             fmt.line("if ::core::mem::discriminant(self) != ::core::mem::discriminant(other) {");
             fmt.indent(|fmt| {
@@ -418,13 +422,13 @@ fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter
 
                     let args_eq = if format.has_value_list {
                         members.push("args");
-                        Some("args1.as_slice(pool) == args2.as_slice(pool)")
+                        Some("args1.as_slice(pool).iter().zip(args2.as_slice(pool).iter()).all(|(a, b)| mapper(*a) == mapper(*b))")
                     } else if format.num_value_operands == 1 {
                         members.push("arg");
-                        Some("arg1 == arg2")
+                        Some("mapper(*arg1) == mapper(*arg2)")
                     } else if format.num_value_operands > 0 {
                         members.push("args");
-                        Some("args1 == args2")
+                        Some("args1.iter().zip(args2.iter()).all(|(a, b)| mapper(*a) == mapper(*b))")
                     } else {
                         None
                     };
@@ -459,8 +463,12 @@ fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter
 
             This operation requires a reference to a `ValueListPool` to
             hash the contents of any `ValueLists`.
+
+            This operation takes a closure that is allowed to map each
+            argument value to some other value before it is hashed. This
+            allows various forms of canonicalization.
         "#);
-        fmt.line("pub fn hash<H: ::core::hash::Hasher>(&self, state: &mut H, pool: &ir::ValueListPool) {");
+        fmt.line("pub fn hash<H: ::core::hash::Hasher, F: Fn(Value) -> Value>(&self, state: &mut H, pool: &ir::ValueListPool, mapper: F) {");
         fmt.indent(|fmt| {
             fmt.line("match *self {");
             fmt.indent(|fmt| {
@@ -468,17 +476,17 @@ fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter
                     let name = format!("Self::{}", format.name);
                     let mut members = vec!["opcode"];
 
-                    let args = if format.has_value_list {
+                    let (args, len) = if format.has_value_list {
                         members.push("ref args");
-                        "args.as_slice(pool)"
+                        ("args.as_slice(pool)", "args.len(pool)")
                     } else if format.num_value_operands == 1 {
                         members.push("ref arg");
-                        "arg"
-                    } else if format.num_value_operands > 0{
+                        ("std::slice::from_ref(arg)", "1")
+                    } else if format.num_value_operands > 0 {
                         members.push("ref args");
-                        "args"
+                        ("args", "args.len()")
                     } else {
-                        "&()"
+                        ("&[]", "0")
                     };
 
                     for field in &format.imm_fields {
@@ -493,7 +501,13 @@ fn gen_instruction_data_impl(formats: &[&InstructionFormat], fmt: &mut Formatter
                         for field in &format.imm_fields {
                             fmtln!(fmt, "::core::hash::Hash::hash(&{}, state);", field.member);
                         }
-                        fmtln!(fmt, "::core::hash::Hash::hash({}, state);", args);
+                        fmtln!(fmt, "::core::hash::Hash::hash(&{}, state);", len);
+                        fmtln!(fmt, "for &arg in {} {{", args);
+                        fmt.indent(|fmt| {
+                            fmtln!(fmt, "let arg = mapper(arg);");
+                            fmtln!(fmt, "::core::hash::Hash::hash(&arg, state);");
+                        });
+                        fmtln!(fmt, "}");
                     });
                     fmtln!(fmt, "}");
                 }
