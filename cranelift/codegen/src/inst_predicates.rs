@@ -59,10 +59,19 @@ pub fn is_pure_for_egraph(func: &Function, inst: Inst) -> bool {
         } => flags.readonly() && flags.notrap(),
         _ => false,
     };
+    // Multi-value results do not play nicely with much of the egraph
+    // infrastructure. They are in practice used only for multi-return
+    // calls and some other odd instructions (e.g. iadd_cout) which,
+    // for now, we can afford to leave in place as opaque
+    // side-effecting ops. So if more than one result, then the inst
+    // is "not pure". Similarly, ops with zero results can be used
+    // only for their side-effects, so are never pure. (Or if they
+    // are, we can always trivially eliminate them with no effect.)
+    let has_one_result = func.dfg.inst_results(inst).len() == 1;
 
     let op = func.dfg[inst].opcode();
 
-    is_readonly_load || (!op.can_load() && !trivially_has_side_effects(op))
+    has_one_result && (is_readonly_load || (!op.can_load() && !trivially_has_side_effects(op)))
 }
 
 /// Does the given instruction have any side-effect as per [has_side_effect], or else is a load,

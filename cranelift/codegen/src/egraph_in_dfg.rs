@@ -112,8 +112,8 @@ impl<'a> EgraphPass<'a> {
         let mut cursor = FuncCursor::new(self.func);
         let mut value_to_opt_value: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
-        let mut gvn_map: CtxHashMap<InstructionData, Inst> =
-            CtxHashMap::with_capacity(cursor.func.dfg.num_insts());
+        let mut gvn_map: CtxHashMap<InstructionData, Value> =
+            CtxHashMap::with_capacity(cursor.func.dfg.num_values());
 
         while let Some(block) = cursor.next_block() {
             for &param in cursor.func.dfg.block_params(block) {
@@ -150,12 +150,15 @@ impl<'a> EgraphPass<'a> {
                 }
 
                 if is_pure_for_egraph(cursor.func, inst) {
-                    // Optimize!
-                    Self::optimize_pure_enode(
+                    // Insert into GVN map and optimize any new nodes
+                    // inserted (recursively performing this work for
+                    // any nodes the optimization rules produce).
+                    Self::insert_pure_enode(
                         cursor.func,
                         inst,
                         &mut value_to_opt_value,
                         &mut gvn_map,
+                        &mut self.eclasses,
                     );
                     // We've now rewritten all uses, or will when we
                     // see them, and the instruction exists as a pure
@@ -190,12 +193,59 @@ impl<'a> EgraphPass<'a> {
     ///   - Store-to-load forwarding.
     /// - Update the value-to-opt-value map, and update the eclass
     ///   union-find, if we rewrote the value to different form(s).
-    fn optimize_pure_enode(
-        _func: &mut Function,
-        _inst: Inst,
-        _value_to_opt_value: &mut SecondaryMap<Value, Value>,
-        _gvn_map: &mut CtxHashMap<InstructionData, Inst>,
+    fn insert_pure_enode(
+        func: &mut Function,
+        inst: Inst,
+        value_to_opt_value: &mut SecondaryMap<Value, Value>,
+        gvn_map: &mut CtxHashMap<InstructionData, Value>,
+        eclasses: &mut UnionFind<Value>,
     ) {
+        // Create the external context for looking up and updating the
+        // GVN map. This is necessary so that instructions themselves
+        // do not have to carry all the references or data for a full
+        // `Eq` or `Hash` impl.
+        let gvn_context = GVNContext {
+            union_find: eclasses,
+            value_lists: &func.dfg.value_lists,
+        };
+
+        // Required for proper logic below.
+        debug_assert_eq!(func.dfg.inst_results(inst).len(), 1);
+        let result = func.dfg.inst_results(inst)[0];
+
+        // Does this instruction already exist? If so, add entries to
+        // the value-map to rewrite uses of its results to the results
+        // of the original (existing) instruction. If not, optimize
+        // the new instruction.
+        if let Some(&orig_result) = gvn_map.get(&func.dfg[inst], &gvn_context) {
+            value_to_opt_value[result] = orig_result;
+            eclasses.union(result, orig_result);
+        } else {
+            let opt_value =
+                Self::optimize_pure_enode(func, inst, value_to_opt_value, gvn_map, eclasses);
+            let gvn_context = GVNContext {
+                union_find: eclasses,
+                value_lists: &func.dfg.value_lists,
+            };
+            gvn_map.insert(func.dfg[inst].clone(), opt_value, &gvn_context);
+        }
+    }
+
+    /// Optimizes an enode by applying any matching mid-end rewrite
+    /// rules (or store-to-load forwarding, which is a special case),
+    /// unioning together all possible optimized (or rewritten) forms
+    /// of this expression into an eclass and returning the `Value`
+    /// that represents that eclass.
+    ///
+    /// TODO: wrap up args into a context struct (here and above in
+    /// insert_pure_enode).
+    fn optimize_pure_enode(
+        func: &mut Function,
+        inst: Inst,
+        value_to_opt_value: &mut SecondaryMap<Value, Value>,
+        gvn_map: &mut CtxHashMap<InstructionData, Value>,
+        eclasses: &mut UnionFind<Value>,
+    ) -> Value {
         todo!()
     }
 
