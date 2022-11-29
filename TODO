@@ -29,3 +29,5 @@ misc cleanup:
 - revisit pseudo-loops; can we do LICM properly?
 
 - factor unsafe code in ctxhash out to separate crate?
+
+- remove InstructionImms from generated code

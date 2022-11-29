@@ -899,6 +899,14 @@ impl DataFlowGraph {
         self.results[inst]
     }
 
+    /// Create a union of two values.
+    pub fn union(&mut self, x: Value, y: Value) -> Value {
+        // Get the type.
+        let ty = self.value_type(x);
+        debug_assert_eq!(ty, self.value_type(y));
+        self.make_value(ValueData::Union { ty, x, y })
+    }
+
     /// Get the call signature of a direct or indirect call instruction.
     /// Returns `None` if `inst` is not a call instruction.
     pub fn call_signature(&self, inst: Inst) -> Option<SigRef> {

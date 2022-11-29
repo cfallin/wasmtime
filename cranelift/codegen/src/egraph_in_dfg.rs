@@ -9,7 +9,11 @@ use crate::egraph::Stats;
 use crate::flowgraph::ControlFlowGraph;
 use crate::fx::FxHashSet;
 use crate::inst_predicates::is_pure_for_egraph;
-use crate::ir::{Block, Function, Inst, InstructionData, Layout, Value, ValueDef, ValueListPool};
+use crate::ir::{
+    Block, DataFlowGraph, Function, Inst, InstructionData, Layout, Type, Value, ValueDef,
+    ValueListPool,
+};
+use crate::opts::IsleContext;
 use crate::trace;
 use crate::unionfind::UnionFind;
 use cranelift_entity::packed_option::ReservedValue;
@@ -58,6 +62,197 @@ pub struct EgraphPass<'a> {
     eclasses: UnionFind<Value>,
     /// Analysis values per `Value`.
     analysis_values: SecondaryMap<Value, AnalysisValue>,
+}
+
+/// Context passed through node insertion and optimization.
+pub(crate) struct OptimizeCtx<'a> {
+    // Borrowed from EgraphPass:
+    pub(crate) func: &'a mut Function,
+    pub(crate) value_to_opt_value: &'a mut SecondaryMap<Value, Value>,
+    pub(crate) gvn_map: &'a mut CtxHashMap<InstructionData, Value>,
+    pub(crate) eclasses: &'a mut UnionFind<Value>,
+    pub(crate) analysis_values: &'a mut SecondaryMap<Value, AnalysisValue>,
+    pub(crate) pseudo_loop_levels: &'a PseudoLoopLevels,
+    pub(crate) remat_values: &'a mut FxHashSet<Value>,
+    // Held locally during optimization of one node (recursively):
+    pub(crate) rewrite_depth: usize,
+    pub(crate) subsume_values: FxHashSet<Value>,
+}
+
+/// For passing to `insert_pure_enode`. Sometimes the enode already
+/// exists as an Inst (from the original CLIF), and sometimes we're in
+/// the middle of creating it and want to avoid inserting it if
+/// possible until we know we need it.
+pub(crate) enum NewOrExistingInst {
+    New(InstructionData, Type),
+    Existing(Inst),
+}
+
+impl NewOrExistingInst {
+    fn get_inst_data<'a>(&'a self, dfg: &'a DataFlowGraph) -> &'a InstructionData {
+        match self {
+            NewOrExistingInst::New(data, _) => data,
+            NewOrExistingInst::Existing(inst) => dfg[*inst],
+        }
+    }
+}
+
+impl<'a> OptimizeCtx<'a> {
+    /// Optimization of a single instruction.
+    ///
+    /// This does a few things:
+    /// - Looks up the instruction in the GVN deduplication map. If we
+    ///   already have the same instruction somewhere else, with the
+    ///   same args, then we can alias the original instruction's
+    ///   results and omit this instruction entirely.
+    ///   - Note that we do this canonicalization based on the
+    ///     instruction with its arguments as *canonical* eclass IDs,
+    ///     that is, the oldest (smallest index) `Value` reachable in
+    ///     the tree-of-unions (whole eclass). This ensures that we
+    ///     properly canonicalize newer nodes that use newer "versions"
+    ///     of a value that are still equal to the older versions.
+    /// - If the instruction is "new" (not deduplicated), then apply
+    ///   optimization rules:
+    ///   - All of the mid-end rules written in ISLE.
+    ///   - Store-to-load forwarding.
+    /// - Update the value-to-opt-value map, and update the eclass
+    ///   union-find, if we rewrote the value to different form(s).
+    pub(crate) fn insert_pure_enode(&mut self, inst: NewOrExistingInst) -> Value {
+        // Create the external context for looking up and updating the
+        // GVN map. This is necessary so that instructions themselves
+        // do not have to carry all the references or data for a full
+        // `Eq` or `Hash` impl.
+        let gvn_context = GVNContext {
+            union_find: self.eclasses,
+            value_lists: &self.func.dfg.value_lists,
+        };
+
+        // Does this instruction already exist? If so, add entries to
+        // the value-map to rewrite uses of its results to the results
+        // of the original (existing) instruction. If not, optimize
+        // the new instruction.
+        if let Some(&orig_result) = self
+            .gvn_map
+            .get(inst.get_inst_data(&self.func.dfg), &gvn_context)
+        {
+            if let NewOrExistingInst::Existing(inst) = inst {
+                debug_assert_eq!(self.func.dfg.inst_results(inst).len(), 1);
+                let result = self.func.dfg.inst_results(inst)[0];
+                self.value_to_opt_value[result] = orig_result;
+                self.eclasses.union(result, orig_result);
+                result
+            } else {
+                orig_result
+            }
+        } else {
+            // Now actually insert the InstructionData and attach
+            // result value (exactly one).
+            let (inst, result) = match inst {
+                NewOrExistingInst::New(data, typevar) => {
+                    let inst = self.func.dfg.make_inst(data);
+                    let results = self.func.dfg.make_inst_results(inst, typevar);
+                    let result = results.as_slice(&self.func.dfg.value_lists)[0];
+                    // New inst. We need to do the analysis of its result.
+                    Self::compute_analysis_value(
+                        self.func,
+                        &self.pseudo_loop_levels,
+                        &mut self.analysis_values,
+                        result,
+                    );
+                    (inst, result)
+                }
+                NewOrExistingInst::Existing(inst) => {
+                    let result = self.func.dfg.inst_results(inst)[0];
+                    (inst, result)
+                }
+            };
+
+            let opt_value = self.optimize_pure_enode(inst);
+            let gvn_context = GVNContext {
+                union_find: self.eclasses,
+                value_lists: &self.func.dfg.value_lists,
+            };
+            self.gvn_map
+                .insert(self.func.dfg[inst].clone(), opt_value, &gvn_context);
+            self.value_to_opt_value[result] = opt_value;
+            opt_value
+        }
+    }
+
+    /// Optimizes an enode by applying any matching mid-end rewrite
+    /// rules (or store-to-load forwarding, which is a special case),
+    /// unioning together all possible optimized (or rewritten) forms
+    /// of this expression into an eclass and returning the `Value`
+    /// that represents that eclass.
+    fn optimize_pure_enode(&mut self, inst: Inst) -> Value {
+        // TODO: integrate store-to-load forwarding.
+
+        // A pure node always has exactly one result.
+        let orig_value = self.func.dfg.inst_results(inst)[0];
+
+        // Limit rewrite depth. When we apply optimization rules, they
+        // may create new nodes (values) and those are, recursively,
+        // optimized eagerly as soon as they are created. So we may
+        // have more than one ISLE invocation on the stack. (This is
+        // necessary so that as the toplevel builds the
+        // right-hand-side expression bottom-up, it uses the "latest"
+        // optimized values for all the constituent parts.) To avoid
+        // infinite or problematic recursion, we bound the rewrite
+        // depth to a small constant here.
+        const REWRITE_LIMIT: usize = 5;
+        if self.rewrite_depth > REWRITE_LIMIT {
+            return orig_value;
+        }
+        self.rewrite_depth += 1;
+
+        let isle_ctx = IsleContext { ctx: self };
+
+        // Invoke the ISLE toplevel constructor, getting all new
+        // values produced as equivalents to this value.
+        let optimized_values =
+            crate::opts::generated_code::constructor_simplify(&mut isle_ctx, orig_value);
+
+        // Create a union of all new values with the original (or
+        // maybe just one new value marked as "subsuming" the
+        // original, if present.)
+        let mut union_value = orig_value;
+        if let Some(mut optimized_values) = optimized_values {
+            while let Some(optimized_value) = optimized_values.next(&mut isle_ctx) {
+                if isle_ctx.ctx.subsume_values.contains(&optimized_value) {
+                    // Merge in the unionfind so canonicalization
+                    // still works, but take *only* the subsuming
+                    // value, and break now.
+                    isle_ctx.ctx.union_find.union(optimized_value, union_value);
+                    union_value = optimized_value;
+                    break;
+                }
+
+                let old_union_value = union_value;
+                union_value = isle_ctx
+                    .ctx
+                    .func
+                    .dfg
+                    .union(old_union_value, optimized_value);
+                isle_ctx.ctx.union_find.add(union_value);
+                isle_ctx
+                    .ctx
+                    .union_find
+                    .union(old_union_value, optimized_value);
+                isle_ctx.ctx.union_find.union(old_union_value, union_value);
+
+                Self::compute_analysis_value(
+                    self.func,
+                    &self.pseudo_loop_levels,
+                    &mut self.analysis_values,
+                    union_value,
+                );
+            }
+        }
+
+        self.rewrite_depth -= 1;
+
+        union_value
+    }
 }
 
 impl<'a> EgraphPass<'a> {
@@ -153,13 +348,18 @@ impl<'a> EgraphPass<'a> {
                     // Insert into GVN map and optimize any new nodes
                     // inserted (recursively performing this work for
                     // any nodes the optimization rules produce).
-                    Self::insert_pure_enode(
-                        cursor.func,
-                        inst,
-                        &mut value_to_opt_value,
-                        &mut gvn_map,
-                        &mut self.eclasses,
-                    );
+                    let mut ctx = OptimizeCtx {
+                        func: cursor.func,
+                        value_to_opt_value: &mut value_to_opt_value,
+                        gvn_map: &mut gvn_map,
+                        eclasses: &mut self.eclasses,
+                        rewrite_depth: 0,
+                        subsume_values: FxHashSet::default(),
+                        remat_values: FxHashSet::default(),
+                    };
+                    let typevar = cursor.func.dfg.ctrl_typevar(inst);
+                    let inst = NewOrExistingInst::Existing(inst, typevar);
+                    ctx.insert_pure_enode(inst);
                     // We've now rewritten all uses, or will when we
                     // see them, and the instruction exists as a pure
                     // enode in the eclass, so we can remove it.
@@ -172,82 +372,6 @@ impl<'a> EgraphPass<'a> {
                 }
             }
         }
-    }
-
-    /// Optimization of a single instruction.
-    ///
-    /// This does a few things:
-    /// - Looks up the instruction in the GVN deduplication map. If we
-    ///   already have the same instruction somewhere else, with the
-    ///   same args, then we can alias the original instruction's
-    ///   results and omit this instruction entirely.
-    ///   - Note that we do this canonicalization based on the
-    ///     instruction with its arguments as *canonical* eclass IDs,
-    ///     that is, the oldest (smallest index) `Value` reachable in
-    ///     the tree-of-unions (whole eclass). This ensures that we
-    ///     properly canonicalize newer nodes that use newer "versions"
-    ///     of a value that are still equal to the older versions.
-    /// - If the instruction is "new" (not deduplicated), then apply
-    ///   optimization rules:
-    ///   - All of the mid-end rules written in ISLE.
-    ///   - Store-to-load forwarding.
-    /// - Update the value-to-opt-value map, and update the eclass
-    ///   union-find, if we rewrote the value to different form(s).
-    fn insert_pure_enode(
-        func: &mut Function,
-        inst: Inst,
-        value_to_opt_value: &mut SecondaryMap<Value, Value>,
-        gvn_map: &mut CtxHashMap<InstructionData, Value>,
-        eclasses: &mut UnionFind<Value>,
-    ) {
-        // Create the external context for looking up and updating the
-        // GVN map. This is necessary so that instructions themselves
-        // do not have to carry all the references or data for a full
-        // `Eq` or `Hash` impl.
-        let gvn_context = GVNContext {
-            union_find: eclasses,
-            value_lists: &func.dfg.value_lists,
-        };
-
-        // Required for proper logic below.
-        debug_assert_eq!(func.dfg.inst_results(inst).len(), 1);
-        let result = func.dfg.inst_results(inst)[0];
-
-        // Does this instruction already exist? If so, add entries to
-        // the value-map to rewrite uses of its results to the results
-        // of the original (existing) instruction. If not, optimize
-        // the new instruction.
-        if let Some(&orig_result) = gvn_map.get(&func.dfg[inst], &gvn_context) {
-            value_to_opt_value[result] = orig_result;
-            eclasses.union(result, orig_result);
-        } else {
-            let opt_value =
-                Self::optimize_pure_enode(func, inst, value_to_opt_value, gvn_map, eclasses);
-            let gvn_context = GVNContext {
-                union_find: eclasses,
-                value_lists: &func.dfg.value_lists,
-            };
-            gvn_map.insert(func.dfg[inst].clone(), opt_value, &gvn_context);
-            value_to_opt_value[result] = opt_value;
-        }
-    }
-
-    /// Optimizes an enode by applying any matching mid-end rewrite
-    /// rules (or store-to-load forwarding, which is a special case),
-    /// unioning together all possible optimized (or rewritten) forms
-    /// of this expression into an eclass and returning the `Value`
-    /// that represents that eclass.
-    ///
-    /// TODO: wrap up args into a context struct (here and above in
-    /// insert_pure_enode).
-    fn optimize_pure_enode(
-        _func: &mut Function,
-        _inst: Inst,
-        _value_to_opt_value: &mut SecondaryMap<Value, Value>,
-        _gvn_map: &mut CtxHashMap<InstructionData, Value>,
-        _eclasses: &mut UnionFind<Value>,
-    ) -> Value {
-        todo!()
     }
 
     /// Scoped elaboration: compute a final ordering of op computation
