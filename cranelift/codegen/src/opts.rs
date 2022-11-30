@@ -1,23 +1,21 @@
 //! Optimization driver using ISLE rewrite rules on an egraph.
 
-use crate::egraph::Analysis;
-use crate::egraph::FuncEGraph;
-pub use crate::egraph::{Node, NodeCtx};
 use crate::egraph_in_dfg::{NewOrExistingInst, OptimizeCtx};
 use crate::ir::condcodes;
 pub use crate::ir::condcodes::{FloatCC, IntCC};
+use crate::ir::dfg::ValueData;
 pub use crate::ir::immediates::{Ieee32, Ieee64, Imm64, Offset32, Uimm32, Uimm64, Uimm8};
 pub use crate::ir::types::*;
 pub use crate::ir::{
-    dynamic_to_fixed, AtomicRmwOp, Block, Constant, DynamicStackSlot, FuncRef, GlobalValue, Heap,
-    Immediate, InstructionData, JumpTable, MemFlags, Opcode, StackSlot, Table, TrapCode, Type,
-    Value, ValueData,
+    dynamic_to_fixed, AtomicRmwOp, Block, Constant, DataFlowGraph, DynamicStackSlot, FuncRef,
+    GlobalValue, Heap, Immediate, InstructionData, JumpTable, MemFlags, Opcode, StackSlot, Table,
+    TrapCode, Type, Value,
 };
 use crate::isle_common_prelude_methods;
 use crate::machinst::isle::*;
 use crate::trace;
-use cranelift_entity::{EntityList, EntityRef};
 use smallvec::{smallvec, SmallVec};
+use std::marker::PhantomData;
 
 #[allow(dead_code)]
 pub type Unit = ();
@@ -31,7 +29,13 @@ pub(crate) mod generated_code;
 use generated_code::ContextIter;
 
 pub(crate) struct IsleContext<'a, 'b> {
-    ctx: &'a mut OptimizeCtx<'b>,
+    pub(crate) ctx: &'a mut OptimizeCtx<'b>,
+}
+
+impl<'a, 'b> IsleContext<'a, 'b> {
+    pub(crate) fn dfg(&self) -> &DataFlowGraph {
+        &self.ctx.func.dfg
+    }
 }
 
 /*
@@ -89,22 +93,29 @@ pub(crate) fn store_to_load<'a>(id: Id, egraph: &mut FuncEGraph<'a>) -> Id {
 }
 */
 
-struct NodesEtorIter {
+struct InstDataEtorIter<'a, 'b> {
     stack: SmallVec<[Value; 8]>,
+    _phantom1: PhantomData<&'a ()>,
+    _phantom2: PhantomData<&'b ()>,
 }
-impl NodesEtorIter {
+impl<'a, 'b> InstDataEtorIter<'a, 'b> {
     fn new(root: Value) -> Self {
         Self {
             stack: smallvec![root],
+            _phantom1: PhantomData,
+            _phantom2: PhantomData,
         }
     }
 }
 
-impl ContextIter for NodesEtorIter {
-    type Context<'a> = OptimizeCtx<'a>;
+impl<'a, 'b> ContextIter for InstDataEtorIter<'a, 'b>
+where
+    'b: 'a,
+{
+    type Context = IsleContext<'a, 'b>;
     type Output = (Type, InstructionData);
 
-    fn next(&mut self, ctx: &mut IsleContext<'_, '_>) -> Option<Self::Output> {
+    fn next(&mut self, ctx: &mut IsleContext<'a, 'b>) -> Option<Self::Output> {
         while let Some(value) = self.stack.pop() {
             let value = ctx.ctx.func.dfg.resolve_aliases(value);
             trace!("iter: value {:?}", value);
@@ -129,10 +140,6 @@ impl ContextIter for NodesEtorIter {
 impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
     isle_common_prelude_methods!();
 
-    fn eclass_type(&mut self, eclass: Value) -> Option<Type> {
-        Some(self.ctx.func.dfg.value_type(eclass))
-    }
-
     fn at_loop_level(&mut self, eclass: Value) -> (u8, Value) {
         (
             self.ctx.analysis_values[eclass].loop_level.level() as u8,
@@ -140,13 +147,13 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
         )
     }
 
-    type enodes_etor_iter = NodesEtorIter;
+    type inst_data_etor_iter = InstDataEtorIter<'a, 'b>;
 
-    fn enodes_etor(&mut self, eclass: Value) -> Option<NodesEtorIter> {
-        Some(NodesEtorIter::new(eclass))
+    fn inst_data_etor(&mut self, eclass: Value) -> Option<InstDataEtorIter<'a, 'b>> {
+        Some(InstDataEtorIter::new(eclass))
     }
 
-    fn pure_enode_ctor(&mut self, ty: Type, op: &InstructionData) -> Value {
+    fn make_inst_ctor(&mut self, ty: Type, op: &InstructionData) -> Value {
         self.ctx
             .insert_pure_enode(NewOrExistingInst::New(op.clone()))
     }

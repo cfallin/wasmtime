@@ -145,10 +145,10 @@
       (iadd ty x x))
 
 ;; x<<32>>32: uextend/sextend 32->64.
-(rule (simplify (ushr $I64 (ishl $I64 (uextend $I64 x @ (eclass_type $I32)) (iconst _ (simm32 32))) (iconst _ (simm32 32))))
+(rule (simplify (ushr $I64 (ishl $I64 (uextend $I64 x @ (value_type $I32)) (iconst _ (simm32 32))) (iconst _ (simm32 32))))
       (uextend $I64 x))
 
-(rule (simplify (sshr $I64 (ishl $I64 (uextend $I64 x @ (eclass_type $I32)) (iconst _ (simm32 32))) (iconst _ (simm32 32))))
+(rule (simplify (sshr $I64 (ishl $I64 (uextend $I64 x @ (value_type $I32)) (iconst _ (simm32 32))) (iconst _ (simm32 32))))
       (sextend $I64 x))
 
 ;; TODO: strength reduction: mul/div to shifts

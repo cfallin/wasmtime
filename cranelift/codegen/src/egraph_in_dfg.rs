@@ -92,7 +92,7 @@ impl NewOrExistingInst {
     fn get_inst_data<'a>(&'a self, dfg: &'a DataFlowGraph) -> &'a InstructionData {
         match self {
             NewOrExistingInst::New(data, _) => data,
-            NewOrExistingInst::Existing(inst) => dfg[*inst],
+            NewOrExistingInst::Existing(inst) => &dfg[*inst],
         }
     }
 }
@@ -150,8 +150,9 @@ impl<'a> OptimizeCtx<'a> {
             let (inst, result) = match inst {
                 NewOrExistingInst::New(data, typevar) => {
                     let inst = self.func.dfg.make_inst(data);
-                    let results = self.func.dfg.make_inst_results(inst, typevar);
-                    let result = results.as_slice(&self.func.dfg.value_lists)[0];
+                    // TODO: reuse return value?
+                    self.func.dfg.make_inst_results(inst, typevar);
+                    let result = self.func.dfg.inst_results(inst)[0];
                     // New inst. We need to do the analysis of its result.
                     Self::compute_analysis_value(
                         self.func,
