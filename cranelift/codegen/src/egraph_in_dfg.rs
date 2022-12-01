@@ -13,6 +13,7 @@ use crate::ir::{
     Block, DataFlowGraph, Function, Inst, InstructionData, Layout, Type, Value, ValueDef,
     ValueListPool,
 };
+use crate::opts::generated_code::ContextIter;
 use crate::opts::IsleContext;
 use crate::trace;
 use crate::unionfind::UnionFind;
@@ -154,7 +155,7 @@ impl<'a> OptimizeCtx<'a> {
                     self.func.dfg.make_inst_results(inst, typevar);
                     let result = self.func.dfg.inst_results(inst)[0];
                     // New inst. We need to do the analysis of its result.
-                    Self::compute_analysis_value(
+                    EgraphPass::compute_analysis_value(
                         self.func,
                         &self.pseudo_loop_levels,
                         &mut self.analysis_values,
@@ -191,6 +192,8 @@ impl<'a> OptimizeCtx<'a> {
         // A pure node always has exactly one result.
         let orig_value = self.func.dfg.inst_results(inst)[0];
 
+        let mut isle_ctx = IsleContext { ctx: self };
+
         // Limit rewrite depth. When we apply optimization rules, they
         // may create new nodes (values) and those are, recursively,
         // optimized eagerly as soon as they are created. So we may
@@ -201,12 +204,10 @@ impl<'a> OptimizeCtx<'a> {
         // infinite or problematic recursion, we bound the rewrite
         // depth to a small constant here.
         const REWRITE_LIMIT: usize = 5;
-        if self.rewrite_depth > REWRITE_LIMIT {
+        if isle_ctx.ctx.rewrite_depth > REWRITE_LIMIT {
             return orig_value;
         }
-        self.rewrite_depth += 1;
-
-        let isle_ctx = IsleContext { ctx: self };
+        isle_ctx.ctx.rewrite_depth += 1;
 
         // Invoke the ISLE toplevel constructor, getting all new
         // values produced as equivalents to this value.
@@ -223,7 +224,7 @@ impl<'a> OptimizeCtx<'a> {
                     // Merge in the unionfind so canonicalization
                     // still works, but take *only* the subsuming
                     // value, and break now.
-                    isle_ctx.ctx.union_find.union(optimized_value, union_value);
+                    isle_ctx.ctx.eclasses.union(optimized_value, union_value);
                     union_value = optimized_value;
                     break;
                 }
@@ -234,23 +235,23 @@ impl<'a> OptimizeCtx<'a> {
                     .func
                     .dfg
                     .union(old_union_value, optimized_value);
-                isle_ctx.ctx.union_find.add(union_value);
+                isle_ctx.ctx.eclasses.add(union_value);
                 isle_ctx
                     .ctx
-                    .union_find
+                    .eclasses
                     .union(old_union_value, optimized_value);
-                isle_ctx.ctx.union_find.union(old_union_value, union_value);
+                isle_ctx.ctx.eclasses.union(old_union_value, union_value);
 
-                Self::compute_analysis_value(
-                    self.func,
-                    &self.pseudo_loop_levels,
-                    &mut self.analysis_values,
+                EgraphPass::compute_analysis_value(
+                    isle_ctx.ctx.func,
+                    isle_ctx.ctx.pseudo_loop_levels,
+                    isle_ctx.ctx.analysis_values,
                     union_value,
                 );
             }
         }
 
-        self.rewrite_depth -= 1;
+        isle_ctx.ctx.rewrite_depth -= 1;
 
         union_value
     }
@@ -356,10 +357,11 @@ impl<'a> EgraphPass<'a> {
                         eclasses: &mut self.eclasses,
                         rewrite_depth: 0,
                         subsume_values: FxHashSet::default(),
-                        remat_values: FxHashSet::default(),
+                        remat_values: &mut self.remat_values,
+                        analysis_values: &mut self.analysis_values,
+                        pseudo_loop_levels: &mut self.pseudo_loop_levels,
                     };
-                    let typevar = cursor.func.dfg.ctrl_typevar(inst);
-                    let inst = NewOrExistingInst::Existing(inst, typevar);
+                    let inst = NewOrExistingInst::Existing(inst);
                     ctx.insert_pure_enode(inst);
                     // We've now rewritten all uses, or will when we
                     // see them, and the instruction exists as a pure

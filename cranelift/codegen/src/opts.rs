@@ -3,7 +3,7 @@
 use crate::egraph_in_dfg::{NewOrExistingInst, OptimizeCtx};
 use crate::ir::condcodes;
 pub use crate::ir::condcodes::{FloatCC, IntCC};
-use crate::ir::dfg::ValueData;
+use crate::ir::dfg::ValueDef;
 pub use crate::ir::immediates::{Ieee32, Ieee64, Imm64, Offset32, Uimm32, Uimm64, Uimm8};
 pub use crate::ir::types::*;
 pub use crate::ir::{
@@ -93,7 +93,7 @@ pub(crate) fn store_to_load<'a>(id: Id, egraph: &mut FuncEGraph<'a>) -> Id {
 }
 */
 
-struct InstDataEtorIter<'a, 'b> {
+pub(crate) struct InstDataEtorIter<'a, 'b> {
     stack: SmallVec<[Value; 8]>,
     _phantom1: PhantomData<&'a ()>,
     _phantom2: PhantomData<&'b ()>,
@@ -119,16 +119,15 @@ where
         while let Some(value) = self.stack.pop() {
             let value = ctx.ctx.func.dfg.resolve_aliases(value);
             trace!("iter: value {:?}", value);
-            match &ctx.ctx.func.dfg[value] {
-                &ValueData::Union { x, y, .. } => {
+            match ctx.ctx.func.dfg.value_def(value) {
+                ValueDef::Union(x, y) => {
                     self.stack.push(x);
                     self.stack.push(y);
                     continue;
                 }
-                &ValueData::Inst { ty, inst, .. }
-                    if ctx.ctx.func.dfg.inst_results(inst).len() == 1 =>
-                {
-                    return Some((ty, &ctx.ctx.func.dfg[inst]));
+                ValueDef::Result(inst, _) if ctx.ctx.func.dfg.inst_results(inst).len() == 1 => {
+                    let ty = ctx.ctx.func.dfg.value_type(value);
+                    return Some((ty, ctx.ctx.func.dfg[inst].clone()));
                 }
                 _ => {}
             }
@@ -142,7 +141,7 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
 
     fn at_loop_level(&mut self, eclass: Value) -> (u8, Value) {
         (
-            self.ctx.analysis_values[eclass].loop_level.level() as u8,
+            self.ctx.analysis_values[eclass].pseudo_loop_level.level() as u8,
             eclass,
         )
     }
@@ -155,7 +154,7 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
 
     fn make_inst_ctor(&mut self, ty: Type, op: &InstructionData) -> Value {
         self.ctx
-            .insert_pure_enode(NewOrExistingInst::New(op.clone()))
+            .insert_pure_enode(NewOrExistingInst::New(op.clone(), ty))
     }
 
     fn value_array_2_ctor(&mut self, arg0: Value, arg1: Value) -> ValueArray2 {
@@ -164,6 +163,11 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
 
     fn value_array_3_ctor(&mut self, arg0: Value, arg1: Value, arg2: Value) -> ValueArray3 {
         [arg0, arg1, arg2]
+    }
+
+    #[inline]
+    fn value_type(&mut self, val: Value) -> Type {
+        self.ctx.func.dfg.value_type(val)
     }
 
     fn remat(&mut self, value: Value) -> Value {

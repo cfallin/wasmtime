@@ -587,11 +587,6 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
-        fn value_type(&mut self, val: Value) -> Type {
-            self.lower_ctx.dfg().value_type(val)
-        }
-
-        #[inline]
         fn unpack_value_array_2(&mut self, arr: &ValueArray2) -> (Value, Value) {
             let [a, b] = *arr;
             (a, b)

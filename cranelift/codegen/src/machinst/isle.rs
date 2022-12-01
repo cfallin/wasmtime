@@ -56,6 +56,11 @@ macro_rules! isle_lower_prelude_methods {
         }
 
         #[inline]
+        fn value_type(&mut self, val: Value) -> Type {
+            self.lower_ctx.dfg().value_type(val)
+        }
+
+        #[inline]
         fn value_reg(&mut self, reg: Reg) -> ValueRegs {
             ValueRegs::one(reg)
         }

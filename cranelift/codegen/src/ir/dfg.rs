@@ -453,7 +453,7 @@ impl ValueDef {
 /// Internal table storage for extended values.
 #[derive(Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
-pub(crate) enum ValueData {
+enum ValueData {
     /// Value is defined by an instruction.
     Inst { ty: Type, num: u16, inst: Inst },
 
