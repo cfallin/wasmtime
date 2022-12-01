@@ -1,7 +1,7 @@
 //! Support for egraphs represented in the DataFlowGraph.
 
 use crate::ctxhash::{CtxEq, CtxHash, CtxHashMap};
-use crate::cursor::{Cursor, FuncCursor};
+use crate::cursor::{Cursor, CursorPosition, FuncCursor};
 use crate::dominator_tree::DominatorTree;
 use crate::egraph::domtree::DomTreeWithChildren;
 use crate::egraph::elaborate::Elaborator;
@@ -211,6 +211,7 @@ impl<'a> OptimizeCtx<'a> {
 
         // Invoke the ISLE toplevel constructor, getting all new
         // values produced as equivalents to this value.
+        trace!("Calling into ISLE with original value {}", orig_value);
         let optimized_values =
             crate::opts::generated_code::constructor_simplify(&mut isle_ctx, orig_value);
 
@@ -220,6 +221,11 @@ impl<'a> OptimizeCtx<'a> {
         let mut union_value = orig_value;
         if let Some(mut optimized_values) = optimized_values {
             while let Some(optimized_value) = optimized_values.next(&mut isle_ctx) {
+                trace!(
+                    "Returned from ISLE for {}, got {:?}",
+                    orig_value,
+                    optimized_value
+                );
                 if isle_ctx.ctx.subsume_values.contains(&optimized_value) {
                     // Merge in the unionfind so canonicalization
                     // still works, but take *only* the subsuming
@@ -312,9 +318,22 @@ impl<'a> EgraphPass<'a> {
         let mut gvn_map: CtxHashMap<InstructionData, Value> =
             CtxHashMap::with_capacity(cursor.func.dfg.num_values());
 
-        while let Some(block) = cursor.next_block() {
+        // In domtree preorder, visit blocks. (TODO: factor out an
+        // iterator from this and elaborator.)
+        let root = self.domtree_children.root();
+        let mut block_stack = vec![root];
+        while let Some(block) = block_stack.pop() {
+            // We popped this block; push children
+            // immediately, then process this block.
+            for child in self.domtree_children.children(block) {
+                block_stack.push(child);
+            }
+
+            trace!("Processing block {}", block);
+            cursor.set_position(CursorPosition::Before(block));
+
             for &param in cursor.func.dfg.block_params(block) {
-                trace!("creating initial singleton eclass for {}", param);
+                trace!("creating initial singleton eclass for blockparam {}", param);
                 self.eclasses.add(param);
                 Self::compute_analysis_value(
                     cursor.func,
@@ -325,6 +344,8 @@ impl<'a> EgraphPass<'a> {
                 value_to_opt_value[param] = param;
             }
             while let Some(inst) = cursor.next_inst() {
+                trace!("Processing inst {}", inst);
+
                 // While we're passing over all insts, create initial
                 // singleton eclasses for all result and blockparam
                 // values.  Also do initial analysis of all inst
@@ -342,8 +363,12 @@ impl<'a> EgraphPass<'a> {
 
                 // Rewrite args of *all* instructions using the
                 // value-to-opt-value map.
+                cursor.func.dfg.resolve_aliases_in_arguments(inst);
                 for arg in cursor.func.dfg.inst_args_mut(inst) {
-                    *arg = value_to_opt_value[*arg];
+                    let new_value = value_to_opt_value[*arg];
+                    trace!("rewriting arg {} of inst {} to {}", arg, inst, new_value);
+                    debug_assert_ne!(new_value, Value::reserved_value());
+                    *arg = new_value;
                 }
 
                 if is_pure_for_egraph(cursor.func, inst) {
@@ -371,7 +396,13 @@ impl<'a> EgraphPass<'a> {
                     // Not pure, but may still be a store: add it to
                     // the store-map if so so store-to-load forwarding
                     // can work properly.
-                    todo!("store-map update");
+                    //todo!("store-map update");
+
+                    // Set all results to identity-map to themselves
+                    // in the value-to-opt-value map.
+                    for &result in cursor.func.dfg.inst_results(inst) {
+                        value_to_opt_value[result] = result;
+                    }
                 }
             }
         }
@@ -423,10 +454,13 @@ impl<'a> EgraphPass<'a> {
     ) {
         let aval = match func.dfg.value_def(value) {
             ValueDef::Result(inst, _result_idx) => {
-                // TODO: get max loop level from args, rather than
-                // taking original block's loop level.
-                let block = func.layout.inst_block(inst).unwrap();
-                AnalysisValue::for_block(pseudo_loop_levels, block)
+                let args = func.dfg.inst_args(inst);
+                let max_loop_level_of_args = args
+                    .iter()
+                    .map(|&arg| analysis_values[func.dfg.resolve_aliases(arg)].pseudo_loop_level)
+                    .max()
+                    .unwrap_or_default();
+                AnalysisValue::new(max_loop_level_of_args)
             }
             ValueDef::Param(block, _idx) => AnalysisValue::for_block(pseudo_loop_levels, block),
             ValueDef::Union(x, y) => {
@@ -578,6 +612,10 @@ impl Default for AnalysisValue {
 }
 
 impl AnalysisValue {
+    fn new(pseudo_loop_level: PseudoLoopLevel) -> Self {
+        Self { pseudo_loop_level }
+    }
+
     fn meet(x: &AnalysisValue, y: &AnalysisValue) -> AnalysisValue {
         AnalysisValue {
             pseudo_loop_level: std::cmp::max(x.pseudo_loop_level, y.pseudo_loop_level),

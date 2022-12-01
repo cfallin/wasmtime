@@ -14,6 +14,7 @@ pub use crate::ir::{
 use crate::isle_common_prelude_methods;
 use crate::machinst::isle::*;
 use crate::trace;
+use cranelift_entity::packed_option::ReservedValue;
 use smallvec::{smallvec, SmallVec};
 use std::marker::PhantomData;
 
@@ -100,6 +101,7 @@ pub(crate) struct InstDataEtorIter<'a, 'b> {
 }
 impl<'a, 'b> InstDataEtorIter<'a, 'b> {
     fn new(root: Value) -> Self {
+        debug_assert_ne!(root, Value::reserved_value());
         Self {
             stack: smallvec![root],
             _phantom1: PhantomData,
@@ -117,10 +119,13 @@ where
 
     fn next(&mut self, ctx: &mut IsleContext<'a, 'b>) -> Option<Self::Output> {
         while let Some(value) = self.stack.pop() {
+            debug_assert_ne!(value, Value::reserved_value());
             let value = ctx.ctx.func.dfg.resolve_aliases(value);
             trace!("iter: value {:?}", value);
             match ctx.ctx.func.dfg.value_def(value) {
                 ValueDef::Union(x, y) => {
+                    debug_assert_ne!(x, Value::reserved_value());
+                    debug_assert_ne!(y, Value::reserved_value());
                     self.stack.push(x);
                     self.stack.push(y);
                     continue;
@@ -149,6 +154,7 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
     type inst_data_etor_iter = InstDataEtorIter<'a, 'b>;
 
     fn inst_data_etor(&mut self, eclass: Value) -> Option<InstDataEtorIter<'a, 'b>> {
+        trace!("inst_data_etor: {}", eclass);
         Some(InstDataEtorIter::new(eclass))
     }
 

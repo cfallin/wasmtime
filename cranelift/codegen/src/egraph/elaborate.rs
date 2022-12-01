@@ -236,6 +236,8 @@ impl<'a> Elaborator<'a> {
     /// given values corresponding to results of instructions or
     /// blockparams.
     fn elaborate_eclass_use(&mut self, value: Value, before: Inst) -> Value {
+        debug_assert_ne!(value, Value::reserved_value());
+
         // Kick off the process by requesting this result
         // value.
         self.elab_stack
@@ -255,6 +257,7 @@ impl<'a> Elaborator<'a> {
                     // We always replace the Start entry, so pop it now.
                     self.elab_stack.pop();
 
+                    debug_assert_ne!(value, Value::reserved_value());
                     let value = self.func.dfg.resolve_aliases(value);
 
                     self.stats.elaborate_visit_node += 1;
@@ -355,6 +358,7 @@ impl<'a> Elaborator<'a> {
                     // Push args in reverse order so we process the
                     // first arg first.
                     for &arg in args.iter().rev() {
+                        debug_assert_ne!(arg, Value::reserved_value());
                         self.elab_stack
                             .push(ElabStackEntry::Start { value: arg, before });
                     }
@@ -538,6 +542,7 @@ impl<'a> Elaborator<'a> {
     }
 
     fn elaborate_block(&mut self, idom: Option<Block>, block: Block) {
+        trace!("elaborate_block: block {}", block);
         self.start_block(idom, block);
 
         // Iterate over the side-effecting skeleton using the linked
@@ -547,6 +552,7 @@ impl<'a> Elaborator<'a> {
         let mut next_inst = self.func.layout.first_inst(block);
         let mut first_branch = None;
         while let Some(inst) = next_inst {
+            trace!(" -> elaborating inst {}", inst);
             // Record the first branch we see in the block; all
             // elaboration for args of *any* branch must be inserted
             // before the *first* branch, because the branch group
@@ -557,21 +563,25 @@ impl<'a> Elaborator<'a> {
 
             // Determine where elaboration inserts insts.
             let before = first_branch.unwrap_or(inst);
+            trace!(" -> inserting before {}", before);
 
             // For each arg of the inst, elaborate its value.
             for i in 0..self.func.dfg.inst_args(inst).len() {
                 // Don't borrow across the below.
                 let arg = self.func.dfg.inst_args(inst)[i];
+                trace!(" -> arg {}", arg);
                 // Elaborate the arg, placing any newly-inserted insts
                 // before `before`. Get the updated value, which may
                 // be different than the original.
                 let arg = self.elaborate_eclass_use(arg, before);
+                trace!("   -> rewrote arg to {}", arg);
                 self.func.dfg.inst_args_mut(inst)[i] = arg;
             }
 
             // We need to put the results of this instruction in the
             // map now.
             for &result in self.func.dfg.inst_results(inst) {
+                trace!(" -> result {}", result);
                 self.value_to_elaborated_value
                     .insert_if_absent(result, (block, result));
             }
