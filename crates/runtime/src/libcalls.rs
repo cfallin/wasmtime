@@ -487,3 +487,8 @@ unsafe fn out_of_gas(vmctx: *mut VMContext) -> Result<()> {
 unsafe fn new_epoch(vmctx: *mut VMContext) -> Result<u64> {
     (*(*vmctx).instance().store()).new_epoch()
 }
+
+unsafe fn trace_pc(_vmctx: *mut VMContext, pc: u32) -> Result<()> {
+    eprintln!("PC: 0x{:x}", pc);
+    Ok(())
+}

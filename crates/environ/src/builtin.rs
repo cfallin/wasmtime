@@ -51,6 +51,9 @@ macro_rules! foreach_builtin_function {
             out_of_gas(vmctx: vmctx);
             /// Invoked when we reach a new epoch.
             new_epoch(vmctx: vmctx) -> i64;
+
+            /// Invoked when tracing PCs.
+            trace_pc(vmctx: vmctx, pc: i32);
         }
     };
 }

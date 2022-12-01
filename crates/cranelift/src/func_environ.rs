@@ -803,6 +803,19 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         builder.switch_to_block(continuation_block);
         result_param
     }
+
+    fn trace_pc(&mut self, builder: &mut FunctionBuilder) {
+        let trace_pc_sig = self.builtin_function_signatures.trace_pc(builder.func);
+        let (vmctx, trace_pc) = self.translate_load_builtin_function_address(
+            &mut builder.cursor(),
+            BuiltinFunctionIndex::trace_pc(),
+        );
+        let pc = builder.srcloc.bits();
+        let pc = builder.ins().iconst(I32, pc as i64);
+        builder
+            .ins()
+            .call_indirect(trace_pc_sig, trace_pc, &[vmctx, pc]);
+    }
 }
 
 impl<'module_environment> TargetEnvironment for FuncEnvironment<'module_environment> {
@@ -2050,6 +2063,9 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
     ) -> WasmResult<()> {
         if self.tunables.consume_fuel {
             self.fuel_before_op(op, builder, state.reachable());
+        }
+        if state.reachable() {
+            self.trace_pc(builder);
         }
         Ok(())
     }

@@ -35,7 +35,7 @@ pub struct FunctionBuilder<'a> {
     pub func: &'a mut Function,
 
     /// Source location to assign to all new instructions.
-    srcloc: ir::SourceLoc,
+    pub srcloc: ir::SourceLoc,
 
     func_ctx: &'a mut FunctionBuilderContext,
     position: PackedOption<Block>,
