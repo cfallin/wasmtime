@@ -191,6 +191,8 @@ impl Context {
             pass.run();
             log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
+            // TODO: remove this.
+            self.verify(isa).unwrap();
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {
             self.replace_redundant_loads()?;
             self.simple_gvn(isa)?;

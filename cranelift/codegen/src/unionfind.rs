@@ -43,6 +43,7 @@ impl<Idx: EntityRef + Hash + std::fmt::Display + Ord + ReservedValue> UnionFind<
     /// initially. All `Idx`s must be added before being queried or
     /// unioned.
     pub fn add(&mut self, id: Idx) {
+        debug_assert!(id != Idx::reserved_value());
         self.parent[id] = Val(id);
     }
 
@@ -60,13 +61,14 @@ impl<Idx: EntityRef + Hash + std::fmt::Display + Ord + ReservedValue> UnionFind<
     /// class) will be faster.
     pub fn find_and_update(&mut self, mut node: Idx) -> Idx {
         // "Path splitting" mutating find (Tarjan and Van Leeuwen).
-        let orig = node;
+        debug_assert!(node != Idx::reserved_value());
         while node != self.parent[node].0 {
             let next = self.parent[self.parent[node].0].0;
+            debug_assert!(next != Idx::reserved_value());
             self.parent[node] = Val(next);
             node = next;
         }
-        trace!("find_and_update: {} -> {}", orig, node);
+        debug_assert!(node != Idx::reserved_value());
         node
     }
 

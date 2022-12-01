@@ -552,7 +552,11 @@ impl<'a> Elaborator<'a> {
         let mut next_inst = self.func.layout.first_inst(block);
         let mut first_branch = None;
         while let Some(inst) = next_inst {
-            trace!(" -> elaborating inst {}", inst);
+            trace!(
+                "elaborating inst {} with results {:?}",
+                inst,
+                self.func.dfg.inst_results(inst)
+            );
             // Record the first branch we see in the block; all
             // elaboration for args of *any* branch must be inserted
             // before the *first* branch, because the branch group

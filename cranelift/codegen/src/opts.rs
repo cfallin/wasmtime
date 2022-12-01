@@ -154,7 +154,6 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
     type inst_data_etor_iter = InstDataEtorIter<'a, 'b>;
 
     fn inst_data_etor(&mut self, eclass: Value) -> Option<InstDataEtorIter<'a, 'b>> {
-        trace!("inst_data_etor: {}", eclass);
         Some(InstDataEtorIter::new(eclass))
     }
 

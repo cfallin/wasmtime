@@ -70,7 +70,7 @@ pub(crate) struct OptimizeCtx<'a> {
     // Borrowed from EgraphPass:
     pub(crate) func: &'a mut Function,
     pub(crate) value_to_opt_value: &'a mut SecondaryMap<Value, Value>,
-    pub(crate) gvn_map: &'a mut CtxHashMap<InstructionData, Value>,
+    pub(crate) gvn_map: &'a mut CtxHashMap<(Type, InstructionData), Value>,
     pub(crate) eclasses: &'a mut UnionFind<Value>,
     pub(crate) analysis_values: &'a mut SecondaryMap<Value, AnalysisValue>,
     pub(crate) pseudo_loop_levels: &'a PseudoLoopLevels,
@@ -90,10 +90,13 @@ pub(crate) enum NewOrExistingInst {
 }
 
 impl NewOrExistingInst {
-    fn get_inst_data<'a>(&'a self, dfg: &'a DataFlowGraph) -> &'a InstructionData {
+    fn get_inst_key<'a>(&'a self, dfg: &'a DataFlowGraph) -> (Type, InstructionData) {
         match self {
-            NewOrExistingInst::New(data, _) => data,
-            NewOrExistingInst::Existing(inst) => &dfg[*inst],
+            NewOrExistingInst::New(data, ty) => (*ty, data.clone()),
+            NewOrExistingInst::Existing(inst) => {
+                let ty = dfg.ctrl_typevar(*inst);
+                (ty, dfg[*inst].clone())
+            }
         }
     }
 }
@@ -134,7 +137,7 @@ impl<'a> OptimizeCtx<'a> {
         // the new instruction.
         if let Some(&orig_result) = self
             .gvn_map
-            .get(inst.get_inst_data(&self.func.dfg), &gvn_context)
+            .get(&inst.get_inst_key(&self.func.dfg), &gvn_context)
         {
             if let NewOrExistingInst::Existing(inst) = inst {
                 debug_assert_eq!(self.func.dfg.inst_results(inst).len(), 1);
@@ -148,12 +151,14 @@ impl<'a> OptimizeCtx<'a> {
         } else {
             // Now actually insert the InstructionData and attach
             // result value (exactly one).
-            let (inst, result) = match inst {
+            let (inst, result, ty) = match inst {
                 NewOrExistingInst::New(data, typevar) => {
                     let inst = self.func.dfg.make_inst(data);
                     // TODO: reuse return value?
                     self.func.dfg.make_inst_results(inst, typevar);
                     let result = self.func.dfg.inst_results(inst)[0];
+                    // Add to eclass unionfind.
+                    self.eclasses.add(result);
                     // New inst. We need to do the analysis of its result.
                     EgraphPass::compute_analysis_value(
                         self.func,
@@ -161,11 +166,12 @@ impl<'a> OptimizeCtx<'a> {
                         &mut self.analysis_values,
                         result,
                     );
-                    (inst, result)
+                    (inst, result, typevar)
                 }
                 NewOrExistingInst::Existing(inst) => {
                     let result = self.func.dfg.inst_results(inst)[0];
-                    (inst, result)
+                    let ty = self.func.dfg.ctrl_typevar(inst);
+                    (inst, result, ty)
                 }
             };
 
@@ -175,7 +181,7 @@ impl<'a> OptimizeCtx<'a> {
                 value_lists: &self.func.dfg.value_lists,
             };
             self.gvn_map
-                .insert(self.func.dfg[inst].clone(), opt_value, &gvn_context);
+                .insert((ty, self.func.dfg[inst].clone()), opt_value, &gvn_context);
             self.value_to_opt_value[result] = opt_value;
             opt_value
         }
@@ -315,7 +321,7 @@ impl<'a> EgraphPass<'a> {
         let mut cursor = FuncCursor::new(self.func);
         let mut value_to_opt_value: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
-        let mut gvn_map: CtxHashMap<InstructionData, Value> =
+        let mut gvn_map: CtxHashMap<(Type, InstructionData), Value> =
             CtxHashMap::with_capacity(cursor.func.dfg.num_values());
 
         // In domtree preorder, visit blocks. (TODO: factor out an
@@ -402,6 +408,7 @@ impl<'a> EgraphPass<'a> {
                     // in the value-to-opt-value map.
                     for &result in cursor.func.dfg.inst_results(inst) {
                         value_to_opt_value[result] = result;
+                        self.eclasses.add(result);
                     }
                 }
             }
@@ -452,6 +459,7 @@ impl<'a> EgraphPass<'a> {
         analysis_values: &mut SecondaryMap<Value, AnalysisValue>,
         value: Value,
     ) {
+        debug_assert_ne!(value, Value::reserved_value());
         let aval = match func.dfg.value_def(value) {
             ValueDef::Result(inst, _result_idx) => {
                 let args = func.dfg.inst_args(inst);
@@ -485,15 +493,23 @@ struct GVNContext<'a> {
     union_find: &'a UnionFind<Value>,
 }
 
-impl<'a> CtxEq<InstructionData, InstructionData> for GVNContext<'a> {
-    fn ctx_eq(&self, a: &InstructionData, b: &InstructionData) -> bool {
-        a.eq(b, self.value_lists, |value| self.union_find.find(value))
+impl<'a> CtxEq<(Type, InstructionData), (Type, InstructionData)> for GVNContext<'a> {
+    fn ctx_eq(
+        &self,
+        (a_ty, a_inst): &(Type, InstructionData),
+        (b_ty, b_inst): &(Type, InstructionData),
+    ) -> bool {
+        a_ty == b_ty
+            && a_inst.eq(b_inst, self.value_lists, |value| {
+                self.union_find.find(value)
+            })
     }
 }
 
-impl<'a> CtxHash<InstructionData> for GVNContext<'a> {
-    fn ctx_hash(&self, inst: &InstructionData) -> u64 {
+impl<'a> CtxHash<(Type, InstructionData)> for GVNContext<'a> {
+    fn ctx_hash(&self, (ty, inst): &(Type, InstructionData)) -> u64 {
         let mut state = crate::fx::FxHasher::default();
+        std::hash::Hash::hash(&ty, &mut state);
         inst.hash(&mut state, self.value_lists, |value| {
             self.union_find.find(value)
         });
