@@ -6,13 +6,10 @@ use crate::dominator_tree::DominatorTree;
 use crate::egraph::domtree::DomTreeWithChildren;
 use crate::egraph::elaborate::Elaborator;
 use crate::egraph::Stats;
-use crate::flowgraph::ControlFlowGraph;
 use crate::fx::FxHashSet;
 use crate::inst_predicates::is_pure_for_egraph;
-use crate::ir::{
-    Block, DataFlowGraph, Function, Inst, InstructionData, Layout, Type, Value, ValueDef,
-    ValueListPool,
-};
+use crate::ir::{DataFlowGraph, Function, Inst, InstructionData, Type, Value, ValueListPool};
+use crate::loop_analysis::LoopAnalysis;
 use crate::opts::generated_code::ContextIter;
 use crate::opts::IsleContext;
 use crate::trace;
@@ -48,8 +45,8 @@ pub struct EgraphPass<'a> {
     /// list of children, rather than just parent pointers.
     domtree_children: DomTreeWithChildren,
     /// Loop analysis results, used for built-in LICM during
-    /// elaboration. See below about "pseudo-loop-levels".
-    pseudo_loop_levels: PseudoLoopLevels,
+    /// elaboration.
+    loop_analysis: &'a LoopAnalysis,
     /// Which canonical Values do we want to rematerialize in each
     /// block where they're used?
     ///
@@ -61,8 +58,6 @@ pub struct EgraphPass<'a> {
     /// Union-find that maps all members of a Union tree (eclass) back
     /// to the *oldest* (lowest-numbered) `Value`.
     eclasses: UnionFind<Value>,
-    /// Analysis values per `Value`.
-    analysis_values: SecondaryMap<Value, AnalysisValue>,
 }
 
 /// Context passed through node insertion and optimization.
@@ -72,8 +67,6 @@ pub(crate) struct OptimizeCtx<'a> {
     pub(crate) value_to_opt_value: &'a mut SecondaryMap<Value, Value>,
     pub(crate) gvn_map: &'a mut CtxHashMap<(Type, InstructionData), Value>,
     pub(crate) eclasses: &'a mut UnionFind<Value>,
-    pub(crate) analysis_values: &'a mut SecondaryMap<Value, AnalysisValue>,
-    pub(crate) pseudo_loop_levels: &'a PseudoLoopLevels,
     pub(crate) remat_values: &'a mut FxHashSet<Value>,
     // Held locally during optimization of one node (recursively):
     pub(crate) rewrite_depth: usize,
@@ -160,12 +153,6 @@ impl<'a> OptimizeCtx<'a> {
                     // Add to eclass unionfind.
                     self.eclasses.add(result);
                     // New inst. We need to do the analysis of its result.
-                    EgraphPass::compute_analysis_value(
-                        self.func,
-                        &self.pseudo_loop_levels,
-                        &mut self.analysis_values,
-                        result,
-                    );
                     (inst, result, typevar)
                 }
                 NewOrExistingInst::Existing(inst) => {
@@ -253,13 +240,6 @@ impl<'a> OptimizeCtx<'a> {
                     .eclasses
                     .union(old_union_value, optimized_value);
                 isle_ctx.ctx.eclasses.union(old_union_value, union_value);
-
-                EgraphPass::compute_analysis_value(
-                    isle_ctx.ctx.func,
-                    isle_ctx.ctx.pseudo_loop_levels,
-                    isle_ctx.ctx.analysis_values,
-                    union_value,
-                );
             }
         }
 
@@ -271,24 +251,21 @@ impl<'a> OptimizeCtx<'a> {
 
 impl<'a> EgraphPass<'a> {
     /// Create a new EgraphPass.
-    pub fn new(func: &'a mut Function, domtree: &'a DominatorTree, cfg: &ControlFlowGraph) -> Self {
+    pub fn new(
+        func: &'a mut Function,
+        domtree: &'a DominatorTree,
+        loop_analysis: &'a LoopAnalysis,
+    ) -> Self {
         let num_values = func.dfg.num_values();
         let domtree_children = DomTreeWithChildren::new(func, domtree);
-        let entry = func
-            .layout
-            .entry_block()
-            .expect("Function must have an entry block");
-        let pseudo_loop_levels =
-            PseudoLoopLevels::compute(domtree, &func.layout, &domtree_children, cfg, entry);
         Self {
             func,
             domtree,
             domtree_children,
-            pseudo_loop_levels,
+            loop_analysis,
             stats: Stats::default(),
             eclasses: UnionFind::with_capacity(num_values),
             remat_values: FxHashSet::default(),
-            analysis_values: SecondaryMap::with_capacity(num_values),
         }
     }
 
@@ -341,12 +318,6 @@ impl<'a> EgraphPass<'a> {
             for &param in cursor.func.dfg.block_params(block) {
                 trace!("creating initial singleton eclass for blockparam {}", param);
                 self.eclasses.add(param);
-                Self::compute_analysis_value(
-                    cursor.func,
-                    &self.pseudo_loop_levels,
-                    &mut self.analysis_values,
-                    param,
-                );
                 value_to_opt_value[param] = param;
             }
             while let Some(inst) = cursor.next_inst() {
@@ -359,12 +330,6 @@ impl<'a> EgraphPass<'a> {
                 for &result in cursor.func.dfg.inst_results(inst) {
                     trace!("creating initial singleton eclass for {}", result);
                     self.eclasses.add(result);
-                    Self::compute_analysis_value(
-                        cursor.func,
-                        &self.pseudo_loop_levels,
-                        &mut self.analysis_values,
-                        result,
-                    );
                 }
 
                 // Rewrite args of *all* instructions using the
@@ -389,8 +354,6 @@ impl<'a> EgraphPass<'a> {
                         rewrite_depth: 0,
                         subsume_values: FxHashSet::default(),
                         remat_values: &mut self.remat_values,
-                        analysis_values: &mut self.analysis_values,
-                        pseudo_loop_levels: &mut self.pseudo_loop_levels,
                     };
                     let inst = NewOrExistingInst::Existing(inst);
                     ctx.insert_pure_enode(inst);
@@ -443,44 +406,12 @@ impl<'a> EgraphPass<'a> {
             self.func,
             self.domtree,
             &self.domtree_children,
-            &self.pseudo_loop_levels,
+            self.loop_analysis,
             &mut self.remat_values,
-            &self.analysis_values,
             &mut self.eclasses,
             &mut self.stats,
         );
         elaborator.elaborate();
-    }
-
-    /// Compute analysis values for a given Value.
-    fn compute_analysis_value(
-        func: &Function,
-        pseudo_loop_levels: &PseudoLoopLevels,
-        analysis_values: &mut SecondaryMap<Value, AnalysisValue>,
-        value: Value,
-    ) {
-        debug_assert_ne!(value, Value::reserved_value());
-        let aval = match func.dfg.value_def(value) {
-            ValueDef::Result(inst, _result_idx) => {
-                let args = func.dfg.inst_args(inst);
-                let max_loop_level_of_args = args
-                    .iter()
-                    .map(|&arg| analysis_values[func.dfg.resolve_aliases(arg)].pseudo_loop_level)
-                    .max()
-                    .unwrap_or_default();
-                AnalysisValue::new(max_loop_level_of_args)
-            }
-            ValueDef::Param(block, _idx) => AnalysisValue::for_block(pseudo_loop_levels, block),
-            ValueDef::Union(x, y) => {
-                // Meet the two analysis values.
-                let x_val = &analysis_values[x];
-                let y_val = &analysis_values[y];
-                AnalysisValue::meet(x_val, y_val)
-            }
-        };
-
-        trace!("Analysis value for {} is {:?}", value, aval);
-        analysis_values[value] = aval;
     }
 }
 
@@ -514,137 +445,5 @@ impl<'a> CtxHash<(Type, InstructionData)> for GVNContext<'a> {
             self.union_find.find(value)
         });
         state.finish()
-    }
-}
-
-/// Pseudo-loop-level is like LoopLevel, but for domtrees.
-///
-/// More specifically: the pseudo-loop-level of a node (block) in the
-/// domtree is the number of loop headers that exist in the path from
-/// the root to that node.
-///
-/// The difference between this and an actual loop-nest-based "loop
-/// level" arises because execution can leave a loop but remain in a
-/// part of the CFG that is dominated by the loop body (if the exit is
-/// at the end of the loop). Then we could use a value defined
-/// *inside* the loop, statically (and computed in the last iteration
-/// of the loop) when we are outside the loop.
-///
-/// In order to make our heads hurt less, we do LICM in terms of
-/// pseudo-loop-level. This allows us to track the loop nest more
-/// naturally alongside the domtree preorder traversal for
-/// elaboration: the loop stack is a sub-stack of the total domtree
-/// path for a given node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub(crate) struct PseudoLoopLevel(u32);
-impl PseudoLoopLevel {
-    pub(crate) fn inc(self) -> Self {
-        Self(
-            self.0
-                .checked_add(1)
-                .expect("Too many loops! (Limit of 2^32.)"),
-        )
-    }
-    pub(crate) fn level(self) -> usize {
-        self.0 as usize
-    }
-}
-
-pub(crate) struct PseudoLoopLevels {
-    pub(crate) levels: SecondaryMap<Block, PseudoLoopLevel>,
-    pub(crate) headers: FxHashSet<Block>,
-}
-impl PseudoLoopLevels {
-    pub(crate) fn compute(
-        domtree: &DominatorTree,
-        layout: &Layout,
-        domtree_children: &DomTreeWithChildren,
-        cfg: &ControlFlowGraph,
-        entry: Block,
-    ) -> Self {
-        let mut stack = vec![];
-        struct StackEntry {
-            block: Block,
-            level: PseudoLoopLevel,
-        }
-        stack.push(StackEntry {
-            block: entry,
-            level: PseudoLoopLevel(0),
-        });
-
-        let mut levels = SecondaryMap::default();
-        let mut headers = FxHashSet::default();
-        while let Some(entry) = stack.pop() {
-            // Determine whether `entry.block` is a loop header: check
-            // all preds to see if any are dominated by `entry.block`.
-            let is_header = cfg
-                .pred_iter(entry.block)
-                .any(|pred| domtree.dominates(entry.block, pred.block, layout));
-            let this_level = if is_header {
-                headers.insert(entry.block);
-                entry.level.inc()
-            } else {
-                entry.level
-            };
-
-            levels[entry.block] = this_level;
-            trace!(
-                "PseudoLoopLevels::compute: block {} level {:?} is_header {}",
-                entry.block,
-                this_level,
-                is_header
-            );
-
-            for child in domtree_children.children(entry.block) {
-                stack.push(StackEntry {
-                    block: child,
-                    level: this_level,
-                });
-            }
-        }
-        Self { levels, headers }
-    }
-
-    pub(crate) fn is_loop_header(&self, block: Block) -> bool {
-        self.headers.contains(&block)
-    }
-    pub(crate) fn pseudo_loop_level(&self, block: Block) -> PseudoLoopLevel {
-        self.levels[block]
-    }
-}
-
-/// Analysis results for each eclass id.
-#[derive(Clone, Debug)]
-pub(crate) struct AnalysisValue {
-    pub(crate) pseudo_loop_level: PseudoLoopLevel,
-}
-
-impl Default for AnalysisValue {
-    fn default() -> Self {
-        Self {
-            pseudo_loop_level: PseudoLoopLevel(0),
-        }
-    }
-}
-
-impl AnalysisValue {
-    fn new(pseudo_loop_level: PseudoLoopLevel) -> Self {
-        Self { pseudo_loop_level }
-    }
-
-    fn meet(x: &AnalysisValue, y: &AnalysisValue) -> AnalysisValue {
-        AnalysisValue {
-            pseudo_loop_level: std::cmp::max(x.pseudo_loop_level, y.pseudo_loop_level),
-        }
-    }
-
-    fn for_block(loop_analysis: &PseudoLoopLevels, block: Block) -> AnalysisValue {
-        let pseudo_loop_level = loop_analysis.pseudo_loop_level(block);
-        trace!(
-            "AnalysisValue::for_block: block {} -> level {:?}",
-            block,
-            pseudo_loop_level
-        );
-        AnalysisValue { pseudo_loop_level }
     }
 }

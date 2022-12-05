@@ -11,10 +11,6 @@
 (decl make_inst (Type InstructionData) Value)
 (extern constructor make_inst make_inst_ctor)
 
-;; Extractor to get the min loop-level of an eclass.
-(decl at_loop_level (u8 Value) Value)
-(extern extractor infallible at_loop_level at_loop_level)
-
 ;; Constructors for value arrays.
 (decl value_array_2_ctor (Value Value) ValueArray2)
 (extern constructor value_array_2_ctor value_array_2_ctor)

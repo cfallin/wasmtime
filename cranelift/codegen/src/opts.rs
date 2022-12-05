@@ -144,13 +144,6 @@ where
 impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
     isle_common_prelude_methods!();
 
-    fn at_loop_level(&mut self, eclass: Value) -> (u8, Value) {
-        (
-            self.ctx.analysis_values[eclass].pseudo_loop_level.level() as u8,
-            eclass,
-        )
-    }
-
     type inst_data_etor_iter = InstDataEtorIter<'a, 'b>;
 
     fn inst_data_etor(&mut self, eclass: Value) -> Option<InstDataEtorIter<'a, 'b>> {

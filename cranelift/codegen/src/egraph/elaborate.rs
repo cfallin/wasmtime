@@ -5,10 +5,10 @@ use super::domtree::DomTreeWithChildren;
 use super::node::{pure_op_cost, Cost};
 use super::Stats;
 use crate::dominator_tree::DominatorTree;
-use crate::egraph_in_dfg::{AnalysisValue, PseudoLoopLevel, PseudoLoopLevels};
 use crate::fx::FxHashSet;
 use crate::ir::ValueDef;
 use crate::ir::{Block, Function, Inst, Value};
+use crate::loop_analysis::{Loop, LoopAnalysis, LoopLevel};
 use crate::scoped_hash_map::ScopedHashMap;
 use crate::trace;
 use crate::unionfind::UnionFind;
@@ -21,10 +21,9 @@ pub(crate) struct Elaborator<'a> {
     func: &'a mut Function,
     domtree: &'a DominatorTree,
     domtree_children: &'a DomTreeWithChildren,
-    pseudo_loop_levels: &'a PseudoLoopLevels,
-    analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
+    loop_analysis: &'a LoopAnalysis,
     eclasses: &'a mut UnionFind<Value>,
-    /// Map from Value that is produced by a pure Inst ( and was thus
+    /// Map from Value that is produced by a pure Inst (and was thus
     /// not in the side-effecting skeleton) to the value produced by
     /// an elaborated inst (placed in the layout) to whose results we
     /// refer in the final code.
@@ -41,13 +40,18 @@ pub(crate) struct Elaborator<'a> {
     /// is already placed in the Layout. If so, we duplicate, and
     /// insert non-identity mappings from the original inst's results
     /// to the cloned inst's results.
-    value_to_elaborated_value: ScopedHashMap<Value, (Block, Value)>,
+    value_to_elaborated_value: ScopedHashMap<Value, ElaboratedValue>,
     /// Map from Value to the best (lowest-cost) Value in its eclass
     /// (tree of union value-nodes).
     value_to_best_value: SecondaryMap<Value, (Cost, Value)>,
     /// Stack of blocks and loops in current elaboration path.
     loop_stack: SmallVec<[LoopStackEntry; 8]>,
+    /// The current block into which we are elaborating.
     cur_block: Block,
+    /// The first branch instruction in a given block. We need to know
+    /// this so that we don't put elaboration of branch args for later
+    /// branches after the first branch; the ending branch-instruction
+    /// group must remain contiguous.
     first_branch: SecondaryMap<Block, PackedOption<Inst>>,
     /// Values that opt rules have indicated should be rematerialized
     /// in every block they are used (e.g., immediates or other
@@ -55,14 +59,25 @@ pub(crate) struct Elaborator<'a> {
     remat_values: &'a FxHashSet<Value>,
     /// Explicitly-unrolled value elaboration stack.
     elab_stack: Vec<ElabStackEntry>,
-    elab_result_stack: Vec<Value>,
+    /// Results from the elab stack.
+    elab_result_stack: Vec<ElaboratedValue>,
     /// Explicitly-unrolled block elaboration stack.
     block_stack: Vec<BlockStackEntry>,
+    /// Stats for various events during egraph processing, to help
+    /// with optimization of this infrastructure.
     stats: &'a mut Stats,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ElaboratedValue {
+    in_block: Block,
+    value: Value,
 }
 
 #[derive(Clone, Debug)]
 struct LoopStackEntry {
+    /// The loop identifier.
+    lp: Loop,
     /// The hoist point: a block that immediately dominates this
     /// loop. May not be an immediate predecessor, but will be a valid
     /// point to place all loop-invariant ops: they must depend only
@@ -103,9 +118,8 @@ impl<'a> Elaborator<'a> {
         func: &'a mut Function,
         domtree: &'a DominatorTree,
         domtree_children: &'a DomTreeWithChildren,
-        pseudo_loop_levels: &'a PseudoLoopLevels,
+        loop_analysis: &'a LoopAnalysis,
         remat_values: &'a FxHashSet<Value>,
-        analysis_values: &'a SecondaryMap<Value, AnalysisValue>,
         eclasses: &'a mut UnionFind<Value>,
         stats: &'a mut Stats,
     ) -> Self {
@@ -118,7 +132,7 @@ impl<'a> Elaborator<'a> {
             func,
             domtree,
             domtree_children,
-            pseudo_loop_levels,
+            loop_analysis,
             eclasses,
             value_to_elaborated_value: ScopedHashMap::with_capacity(num_values),
             value_to_best_value,
@@ -129,13 +143,8 @@ impl<'a> Elaborator<'a> {
             elab_stack: vec![],
             elab_result_stack: vec![],
             block_stack: vec![],
-            analysis_values,
             stats,
         }
-    }
-
-    fn cur_loop_depth(&self) -> PseudoLoopLevel {
-        self.pseudo_loop_levels.pseudo_loop_level(self.cur_block)
     }
 
     fn start_block(&mut self, idom: Option<Block>, block: Block) {
@@ -143,9 +152,17 @@ impl<'a> Elaborator<'a> {
             "start_block: block {:?} with idom {:?} at loop depth {:?} scope depth {}",
             block,
             idom,
-            self.cur_loop_depth(),
+            self.loop_stack.len(),
             self.value_to_elaborated_value.depth()
         );
+
+        // Pop any loop levels we're no longer in.
+        while let Some(inner_loop) = self.loop_stack.last() {
+            if self.loop_analysis.is_in_loop(block, inner_loop.lp) {
+                break;
+            }
+            self.loop_stack.pop();
+        }
 
         // Note that if the *entry* block is a loop header, we will
         // not make note of the loop here because it will not have an
@@ -154,8 +171,9 @@ impl<'a> Elaborator<'a> {
         // `LoopAnalysis` will otherwise still make note of this loop
         // and loop depths will not match.
         if let Some(idom) = idom {
-            if self.pseudo_loop_levels.is_loop_header(block) {
+            if let Some(lp) = self.loop_analysis.is_loop_header(block) {
                 self.loop_stack.push(LoopStackEntry {
+                    lp,
                     // Any code hoisted out of this loop will have code
                     // placed in `idom`, and will have def mappings
                     // inserted in to the scoped hashmap at that block's
@@ -170,7 +188,7 @@ impl<'a> Elaborator<'a> {
             }
         } else {
             debug_assert!(
-                !self.pseudo_loop_levels.is_loop_header(block),
+                self.loop_analysis.is_loop_header(block).is_none(),
                 "Entry block (domtree root) cannot be a loop header!"
             );
         }
@@ -208,11 +226,16 @@ impl<'a> Elaborator<'a> {
                 ValueDef::Result(inst, _) => {
                     trace!(" -> value {}: result, computing cost", value);
                     let inst_data = &self.func.dfg[inst];
-                    let level = self.analysis_values[value].pseudo_loop_level;
+                    let loop_level = self
+                        .func
+                        .layout
+                        .inst_block(inst)
+                        .map(|block| self.loop_analysis.loop_level(block))
+                        .unwrap_or(LoopLevel::root());
                     // N.B.: at this point we know that the opcode is
                     // pure, so `pure_op_cost`'s precondition is
                     // satisfied.
-                    let cost = pure_op_cost(inst_data.opcode()).at_level(level.level())
+                    let cost = pure_op_cost(inst_data.opcode()).at_level(loop_level.level())
                         + self
                             .func
                             .dfg
@@ -235,7 +258,7 @@ impl<'a> Elaborator<'a> {
     /// instructions before the given inst `before`. Should only be
     /// given values corresponding to results of instructions or
     /// blockparams.
-    fn elaborate_eclass_use(&mut self, value: Value, before: Inst) -> Value {
+    fn elaborate_eclass_use(&mut self, value: Value, before: Inst) -> ElaboratedValue {
         debug_assert_ne!(value, Value::reserved_value());
 
         // Kick off the process by requesting this result
@@ -270,7 +293,7 @@ impl<'a> Elaborator<'a> {
                         before
                     );
 
-                    let remat = if let Some((elab_block, elab_val)) =
+                    let remat = if let Some(elab_val) =
                         self.value_to_elaborated_value.get(&canonical_value)
                     {
                         // Value is available. Look at the defined
@@ -278,7 +301,7 @@ impl<'a> Elaborator<'a> {
                         // allows rematerialization if the value comes
                         // from another block. If so, ignore the hit
                         // and recompute below.
-                        let remat = *elab_block != self.cur_block
+                        let remat = elab_val.in_block != self.cur_block
                             && self.remat_values.contains(&canonical_value);
                         if !remat {
                             trace!("elaborate: value {} -> {:?}", value, elab_val);
@@ -328,7 +351,10 @@ impl<'a> Elaborator<'a> {
                             // result stack (blockparams are already
                             // available).
                             trace!(" -> value {} is a blockparam", best_value);
-                            self.elab_result_stack.push(best_value);
+                            self.elab_result_stack.push(ElaboratedValue {
+                                in_block: self.cur_block,
+                                value: best_value,
+                            });
                             continue;
                         }
                         ValueDef::Union(_, _) => {
@@ -390,21 +416,34 @@ impl<'a> Elaborator<'a> {
                     let arg_values = &self.elab_result_stack[arg_idx..];
 
                     // Compute max loop depth.
-                    let max_loop_depth = arg_values
+                    let loop_hoist_level = arg_values
                         .iter()
                         .map(|&value| {
-                            let value = self.func.dfg.resolve_aliases(value);
-                            let canonical = self.eclasses.find(value);
-                            let level = self.analysis_values[canonical].pseudo_loop_level;
-                            trace!(" -> arg {}: loop level {:?}", value, level);
-                            level
+                            // Find the outermost loop level at which
+                            // the value's defining block *is not* a
+                            // member. This is the loop-nest level
+                            // whose hoist-block we hoist to.
+                            let hoist_level = self
+                                .loop_stack
+                                .iter()
+                                .position(|loop_entry| {
+                                    !self.loop_analysis.is_in_loop(value.in_block, loop_entry.lp)
+                                })
+                                .unwrap_or(self.loop_stack.len());
+                            trace!(
+                                " -> arg: elab_value {:?} hoist level {:?}",
+                                value,
+                                hoist_level
+                            );
+                            hoist_level
                         })
                         .max()
-                        .unwrap_or(PseudoLoopLevel::default());
+                        .unwrap_or(self.loop_stack.len());
                     trace!(
-                        " -> max loop depth: {:?}; cur loop depth: {:?}",
-                        max_loop_depth,
-                        self.cur_loop_depth()
+                        " -> loop hoist level: {:?}; cur loop depth: {:?}, loop_stack: {:?}",
+                        loop_hoist_level,
+                        self.loop_stack.len(),
+                        self.loop_stack,
                     );
 
                     // We know that this is a pure inst, because
@@ -417,13 +456,12 @@ impl<'a> Elaborator<'a> {
                     // place the instruction. This is the current
                     // block *unless* we hoist above a loop when all
                     // args are loop-invariant (and this op is pure).
-                    let (loop_depth, scope_depth, before, insert_block) =
-                        if max_loop_depth == self.cur_loop_depth() || remat {
+                    let (scope_depth, before, insert_block) =
+                        if loop_hoist_level == self.loop_stack.len() || remat {
                             // Depends on some value at the current
                             // loop depth, or remat forces it here:
                             // place it at the current location.
                             (
-                                self.cur_loop_depth(),
                                 self.value_to_elaborated_value.depth(),
                                 before,
                                 self.func.layout.inst_block(before).unwrap(),
@@ -432,7 +470,7 @@ impl<'a> Elaborator<'a> {
                             // Does not depend on any args at current
                             // loop depth: hoist out of loop.
                             self.stats.elaborate_licm_hoist += 1;
-                            let data = &self.loop_stack[max_loop_depth.level()];
+                            let data = &self.loop_stack[loop_hoist_level];
                             // `data.hoist_block` should dominate `before`'s block.
                             let before_block = self.func.layout.inst_block(before).unwrap();
                             debug_assert!(self.domtree.dominates(
@@ -447,19 +485,11 @@ impl<'a> Elaborator<'a> {
                                 .layout
                                 .canonical_branch_inst(&self.func.dfg, data.hoist_block)
                                 .unwrap();
-                            (
-                                max_loop_depth,
-                                data.scope_depth as usize,
-                                before,
-                                data.hoist_block,
-                            )
+                            (data.scope_depth as usize, before, data.hoist_block)
                         };
-                    // Loop scopes are a subset of all scopes.
-                    debug_assert!(scope_depth >= loop_depth.level());
 
                     trace!(
-                        " -> decided to place: loop_depth {:?} before {} insert_block {}",
-                        loop_depth,
+                        " -> decided to place: before {} insert_block {}",
                         before,
                         insert_block
                     );
@@ -491,9 +521,13 @@ impl<'a> Elaborator<'a> {
                             .iter()
                             .zip(self.func.dfg.inst_results(new_inst).iter())
                         {
+                            let elab_value = ElaboratedValue {
+                                value: new_result,
+                                in_block: insert_block,
+                            };
                             self.value_to_elaborated_value.insert_if_absent_with_depth(
                                 result,
-                                (insert_block, new_result),
+                                elab_value,
                                 scope_depth,
                             );
 
@@ -514,9 +548,13 @@ impl<'a> Elaborator<'a> {
                         // to themselves in this scope, since we're
                         // using the original inst.
                         for &result in self.func.dfg.inst_results(inst) {
+                            let elab_value = ElaboratedValue {
+                                value: result,
+                                in_block: insert_block,
+                            };
                             self.value_to_elaborated_value.insert_if_absent_with_depth(
                                 result,
-                                (insert_block, result),
+                                elab_value,
                                 scope_depth,
                             );
                             trace!(" -> inserting identity mapping for {}", result);
@@ -528,7 +566,9 @@ impl<'a> Elaborator<'a> {
 
                     // Update the inst's arguments.
                     let args_dest = self.func.dfg.inst_args_mut(inst);
-                    args_dest.copy_from_slice(arg_values);
+                    for (dest, val) in args_dest.iter_mut().zip(arg_values.iter()) {
+                        *dest = val.value;
+                    }
 
                     // Now that we've consumed the arg values, pop
                     // them off the stack.
@@ -536,8 +576,10 @@ impl<'a> Elaborator<'a> {
 
                     // Push the requested result index of the
                     // instruction onto the elab-results stack.
-                    self.elab_result_stack
-                        .push(self.func.dfg.inst_results(inst)[result_idx]);
+                    self.elab_result_stack.push(ElaboratedValue {
+                        in_block: insert_block,
+                        value: self.func.dfg.inst_results(inst)[result_idx],
+                    });
                 }
             }
         }
@@ -580,16 +622,21 @@ impl<'a> Elaborator<'a> {
                 // before `before`. Get the updated value, which may
                 // be different than the original.
                 let arg = self.elaborate_eclass_use(arg, before);
-                trace!("   -> rewrote arg to {}", arg);
-                self.func.dfg.inst_args_mut(inst)[i] = arg;
+                trace!("   -> rewrote arg to {:?}", arg);
+                self.func.dfg.inst_args_mut(inst)[i] = arg.value;
             }
 
             // We need to put the results of this instruction in the
             // map now.
             for &result in self.func.dfg.inst_results(inst) {
                 trace!(" -> result {}", result);
-                self.value_to_elaborated_value
-                    .insert_if_absent(result, (block, result));
+                self.value_to_elaborated_value.insert_if_absent(
+                    result,
+                    ElaboratedValue {
+                        in_block: block,
+                        value: result,
+                    },
+                );
             }
 
             next_inst = self.func.layout.next_inst(inst);
@@ -628,13 +675,6 @@ impl<'a> Elaborator<'a> {
                 }
                 BlockStackEntry::Pop => {
                     self.value_to_elaborated_value.decrement_depth();
-                    if let Some(innermost_loop) = self.loop_stack.last() {
-                        if innermost_loop.scope_depth as usize
-                            == self.value_to_elaborated_value.depth()
-                        {
-                            self.loop_stack.pop();
-                        }
-                    }
                 }
             }
         }

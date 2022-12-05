@@ -187,7 +187,7 @@ impl Context {
                 self.func.display()
             );
             self.compute_loop_analysis();
-            let mut pass = EgraphPass::new(&mut self.func, &self.domtree, &self.cfg);
+            let mut pass = EgraphPass::new(&mut self.func, &self.domtree, &self.loop_analysis);
             pass.run();
             log::info!("egraph stats: {:?}", pass.stats);
             log::debug!("After egraph optimization:\n{}", self.func.display());
