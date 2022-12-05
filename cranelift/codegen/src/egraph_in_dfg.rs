@@ -8,7 +8,9 @@ use crate::egraph::elaborate::Elaborator;
 use crate::egraph::Stats;
 use crate::fx::FxHashSet;
 use crate::inst_predicates::is_pure_for_egraph;
-use crate::ir::{DataFlowGraph, Function, Inst, InstructionData, Type, Value, ValueListPool};
+use crate::ir::{
+    DataFlowGraph, Function, Inst, InstructionData, Type, Value, ValueDef, ValueListPool,
+};
 use crate::loop_analysis::LoopAnalysis;
 use crate::opts::generated_code::ContextIter;
 use crate::opts::IsleContext;
@@ -219,6 +221,10 @@ impl<'a> OptimizeCtx<'a> {
                     orig_value,
                     optimized_value
                 );
+                if optimized_value == orig_value {
+                    trace!(" -> same as orig value; skipping");
+                    continue;
+                }
                 if isle_ctx.ctx.subsume_values.contains(&optimized_value) {
                     // Merge in the unionfind so canonicalization
                     // still works, but take *only* the subsuming
@@ -234,6 +240,7 @@ impl<'a> OptimizeCtx<'a> {
                     .func
                     .dfg
                     .union(old_union_value, optimized_value);
+                trace!(" -> union: now {}", union_value);
                 isle_ctx.ctx.eclasses.add(union_value);
                 isle_ctx
                     .ctx
@@ -272,6 +279,16 @@ impl<'a> EgraphPass<'a> {
     /// Run the process.
     pub fn run(&mut self) {
         self.remove_pure_and_optimize();
+        trace!("egraph built:\n{}\n", self.func.display());
+        for (value, def) in self.func.dfg.values_and_defs() {
+            trace!(" -> {} = {:?}", value, def);
+            match def {
+                ValueDef::Result(i, 0) => {
+                    trace!("  -> {} = {:?}", i, self.func.dfg[i]);
+                }
+                _ => {}
+            }
+        }
         self.elaborate();
     }
 

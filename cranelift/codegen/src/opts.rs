@@ -126,12 +126,14 @@ where
                 ValueDef::Union(x, y) => {
                     debug_assert_ne!(x, Value::reserved_value());
                     debug_assert_ne!(y, Value::reserved_value());
+                    trace!(" -> {}, {}", x, y);
                     self.stack.push(x);
                     self.stack.push(y);
                     continue;
                 }
                 ValueDef::Result(inst, _) if ctx.ctx.func.dfg.inst_results(inst).len() == 1 => {
                     let ty = ctx.ctx.func.dfg.value_type(value);
+                    trace!(" -> value of type {}", ty);
                     return Some((ty, ctx.ctx.func.dfg[inst].clone()));
                 }
                 _ => {}
@@ -151,8 +153,11 @@ impl<'a, 'b> generated_code::Context for IsleContext<'a, 'b> {
     }
 
     fn make_inst_ctor(&mut self, ty: Type, op: &InstructionData) -> Value {
-        self.ctx
-            .insert_pure_enode(NewOrExistingInst::New(op.clone(), ty))
+        let value = self
+            .ctx
+            .insert_pure_enode(NewOrExistingInst::New(op.clone(), ty));
+        trace!("make_inst_ctor: {:?} -> {}", op, value);
+        value
     }
 
     fn value_array_2_ctor(&mut self, arg0: Value, arg1: Value) -> ValueArray2 {
