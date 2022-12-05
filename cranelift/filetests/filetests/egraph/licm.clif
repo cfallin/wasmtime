@@ -34,7 +34,7 @@ block2(v9: i32):
 ; check:      jump block1(v8)
 
 ; check:  block2:
-; check:      v14 = iconst.i32 1
-; check:      v4 = iadd.i32 v1, v14
+; check:      v10 = iconst.i32 1
+; check:      v4 = iadd.i32 v1, v10
 ; check:      return v4
 

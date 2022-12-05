@@ -1,5 +1,6 @@
 //! Support for egraphs represented in the DataFlowGraph.
 
+use crate::alias_analysis::{AliasAnalysis, LastStores};
 use crate::ctxhash::{CtxEq, CtxHash, CtxHashMap};
 use crate::cursor::{Cursor, CursorPosition, FuncCursor};
 use crate::dominator_tree::DominatorTree;
@@ -43,6 +44,8 @@ pub struct EgraphPass<'a> {
     func: &'a mut Function,
     /// Dominator tree, used for elaboration pass.
     domtree: &'a DominatorTree,
+    /// Alias analysis, used during optimization.
+    alias_analysis: &'a mut AliasAnalysis<'a>,
     /// "Domtree with children": like `domtree`, but with an explicit
     /// list of children, rather than just parent pointers.
     domtree_children: DomTreeWithChildren,
@@ -60,6 +63,8 @@ pub struct EgraphPass<'a> {
     /// Union-find that maps all members of a Union tree (eclass) back
     /// to the *oldest* (lowest-numbered) `Value`.
     eclasses: UnionFind<Value>,
+    /// Last-stores state while progressing through a block.
+    last_stores: LastStores,
 }
 
 /// Context passed through node insertion and optimization.
@@ -182,8 +187,6 @@ impl<'a> OptimizeCtx<'a> {
     /// of this expression into an eclass and returning the `Value`
     /// that represents that eclass.
     fn optimize_pure_enode(&mut self, inst: Inst) -> Value {
-        // TODO: integrate store-to-load forwarding.
-
         // A pure node always has exactly one result.
         let orig_value = self.func.dfg.inst_results(inst)[0];
 
@@ -262,6 +265,7 @@ impl<'a> EgraphPass<'a> {
         func: &'a mut Function,
         domtree: &'a DominatorTree,
         loop_analysis: &'a LoopAnalysis,
+        alias_analysis: &'a mut AliasAnalysis<'a>,
     ) -> Self {
         let num_values = func.dfg.num_values();
         let domtree_children = DomTreeWithChildren::new(func, domtree);
@@ -270,9 +274,11 @@ impl<'a> EgraphPass<'a> {
             domtree,
             domtree_children,
             loop_analysis,
+            alias_analysis,
             stats: Stats::default(),
             eclasses: UnionFind::with_capacity(num_values),
             remat_values: FxHashSet::default(),
+            last_stores: LastStores::default(),
         }
     }
 
@@ -332,6 +338,8 @@ impl<'a> EgraphPass<'a> {
             trace!("Processing block {}", block);
             cursor.set_position(CursorPosition::Before(block));
 
+            let mut alias_analysis_state = self.alias_analysis.block_starting_state(block);
+
             for &param in cursor.func.dfg.block_params(block) {
                 trace!("creating initial singleton eclass for blockparam {}", param);
                 self.eclasses.add(param);
@@ -379,16 +387,23 @@ impl<'a> EgraphPass<'a> {
                     // enode in the eclass, so we can remove it.
                     cursor.remove_inst_and_step_back();
                 } else {
-                    // Not pure, but may still be a store: add it to
-                    // the store-map if so so store-to-load forwarding
-                    // can work properly.
-                    //todo!("store-map update");
-
-                    // Set all results to identity-map to themselves
-                    // in the value-to-opt-value map.
-                    for &result in cursor.func.dfg.inst_results(inst) {
-                        value_to_opt_value[result] = result;
-                        self.eclasses.add(result);
+                    // Not pure, but may still be a load or store:
+                    // process it to see if we can optimize it.
+                    if let Some(new_result) = self.alias_analysis.process_inst(
+                        cursor.func,
+                        &mut alias_analysis_state,
+                        inst,
+                    ) {
+                        let result = cursor.func.dfg.inst_results(inst)[0];
+                        value_to_opt_value[result] = new_result;
+                        cursor.remove_inst_and_step_back();
+                    } else {
+                        // Set all results to identity-map to themselves
+                        // in the value-to-opt-value map.
+                        for &result in cursor.func.dfg.inst_results(inst) {
+                            value_to_opt_value[result] = result;
+                            self.eclasses.add(result);
+                        }
                     }
                 }
             }

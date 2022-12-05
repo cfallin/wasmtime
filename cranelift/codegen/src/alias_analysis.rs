@@ -271,7 +271,6 @@ impl<'a> AliasAnalysis<'a> {
         &mut self,
         func: &mut Function,
         state: &mut LastStores,
-        block: Block,
         inst: Inst,
     ) -> Option<Value> {
         trace!(
@@ -388,8 +387,7 @@ impl<'a> AliasAnalysis<'a> {
         while let Some(block) = pos.next_block() {
             let mut state = self.block_starting_state(block);
             while let Some(inst) = pos.next_inst() {
-                if let Some(replaced_result) = self.process_inst(pos.func, &mut state, block, inst)
-                {
+                if let Some(replaced_result) = self.process_inst(pos.func, &mut state, inst) {
                     let result = pos.func.dfg.inst_results(inst)[0];
                     pos.func.dfg.detach_results(inst);
                     pos.func.dfg.change_to_alias(result, replaced_result);
