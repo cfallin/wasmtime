@@ -305,6 +305,7 @@ impl<'a> Elaborator<'a> {
                     // Get the best option; we use `value` (latest
                     // value) here so we have a full view of the
                     // eclass.
+                    trace!("looking up best value for {}", value);
                     let (_, best_value) = self.value_to_best_value[value];
                     debug_assert_ne!(best_value, Value::reserved_value());
                     trace!("elaborate: value {} -> best {}", value, best_value,);
@@ -498,6 +499,7 @@ impl<'a> Elaborator<'a> {
 
                             self.eclasses.add(new_result);
                             self.eclasses.union(result, new_result);
+                            self.value_to_best_value[new_result] = self.value_to_best_value[result];
 
                             trace!(
                                 " -> cloned inst has new result {} for orig {}",
