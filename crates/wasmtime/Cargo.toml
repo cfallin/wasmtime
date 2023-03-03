@@ -121,3 +121,7 @@ component-model = [
   "dep:wasmtime-component-util",
   "dep:encoding_rs",
 ]
+
+# Enables support for VeriWasm static heap-isolation verification of
+# generated code.
+veriwasm = ["wasmtime-cranelift?/veriwasm"]
