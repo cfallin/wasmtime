@@ -24,7 +24,7 @@ target-lexicon = { workspace = true }
 gimli = { workspace = true }
 object = { workspace = true, features = ['write'] }
 thiserror = { workspace = true }
-veriwasm = { version = "0.1.4", optional = true }
+veriwasm = { path = "../../../veriwasm", optional = true }
 
 [features]
 all-arch = ["cranelift-codegen/all-arch"]

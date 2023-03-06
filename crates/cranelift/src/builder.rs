@@ -44,6 +44,15 @@ pub fn builder() -> Box<dyn CompilerBuilder> {
         .set("enable_probestack", "false")
         .expect("should be valid flag");
 
+    // If VeriWasm support is enabled, we need to request some
+    // metadata from Cranelift so that we know basic blocks'
+    // boundaries and the edges between them.
+    if cfg!(feature = "veriwasm") {
+        flags
+            .set("machine_code_cfg_info", "true")
+            .expect("should be valid flag");
+    }
+
     Box::new(Builder {
         flags,
         isa_flags: cranelift_native::builder().expect("host machine is not a supported target"),

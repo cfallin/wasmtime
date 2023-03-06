@@ -3867,8 +3867,6 @@ checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 [[package]]
 name = "veriwasm"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eec3db7d41973c73f9d7ca57ea0858af7038f87f28280cd9507aaadbd917172"
 dependencies = [
  "byteorder",
  "clap 2.34.0",

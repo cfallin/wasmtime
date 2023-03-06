@@ -279,6 +279,19 @@ impl wasmtime_environ::Compiler for Compiler {
         let compiled_code = context.compiled_code().unwrap();
         let alignment = compiled_code.alignment;
 
+        // Perform VeriWasm verification if requested.
+        #[cfg(feature = "veriwasm")]
+        {
+            let (starts, edges) = compiled_code.get_code_bb_layout();
+            veriwasm::validate_heap(
+                &compiled_code.buffer.data(),
+                &starts[..],
+                &edges[..],
+                veriwasm::HeapStrategy::HeapPtrFirstArgWithGuards,
+            )
+            .map_err(|e| CompileError::Codegen(format!("VeriWasm error: {:?}", e)))?;
+        }
+
         let func_relocs = compiled_code
             .buffer
             .relocs()
