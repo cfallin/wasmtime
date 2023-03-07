@@ -5025,8 +5025,6 @@ dependencies = [
 [[package]]
 name = "yaxpeax-core"
 version = "0.0.4-vw-tweaks"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "932d7fc91521fdaae17dd6f33f0de9d39033c453c4f0a84761613ae19dec72fc"
 dependencies = [
  "goblin 0.0.20",
  "nix",

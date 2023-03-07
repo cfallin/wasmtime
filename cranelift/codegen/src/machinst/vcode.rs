@@ -772,7 +772,9 @@ impl<I: VCodeInst> VCode<I> {
 
         let _tt = timing::vcode_emit();
         let mut buffer = MachBuffer::new();
-        let mut bb_starts: Vec<Option<CodeOffset>> = vec![];
+        let mut bb_offsets: Vec<CodeOffset> = vec![];
+        let mut bb_offset_blocks: Vec<BlockIndex> = vec![];
+        let mut bb_offsets_by_block: Vec<Option<CodeOffset>> = vec![None; self.num_blocks()];
 
         // The first M MachLabels are reserved for block indices, the next N MachLabels for
         // constants.
@@ -811,7 +813,6 @@ impl<I: VCodeInst> VCode<I> {
 
         // Emit blocks.
         let mut cur_srcloc = None;
-        let mut last_offset = None;
         let mut inst_offsets = vec![];
         let mut state = I::State::new(&self.abi);
 
@@ -855,8 +856,15 @@ impl<I: VCodeInst> VCode<I> {
                            buffer: &mut MachBuffer<I>,
                            state: &mut I::State| {
                 if want_disasm && !inst.is_args() {
+                    let offset = buffer.cur_offset();
                     let mut s = state.clone();
-                    writeln!(disasm, "  {}", inst.pretty_print_inst(allocs, &mut s)).unwrap();
+                    writeln!(
+                        disasm,
+                        "  0x{:x}:  {}",
+                        offset,
+                        inst.pretty_print_inst(allocs, &mut s)
+                    )
+                    .unwrap();
                 }
                 inst.emit(allocs, buffer, &self.emit_info, state);
             };
@@ -881,19 +889,28 @@ impl<I: VCodeInst> VCode<I> {
             }
 
             if want_metadata {
-                // Track BB starts. If we have backed up due to MachBuffer
-                // branch opts, note that the removed blocks were removed.
                 let cur_offset = buffer.cur_offset();
-                if last_offset.is_some() && cur_offset <= last_offset.unwrap() {
-                    for i in (0..bb_starts.len()).rev() {
-                        if bb_starts[i].is_some() && cur_offset > bb_starts[i].unwrap() {
-                            break;
-                        }
-                        bb_starts[i] = None;
-                    }
+                log::trace!(
+                    "layout metadata: cur offset for block{} is 0x{:x}",
+                    block.index(),
+                    cur_offset
+                );
+
+                // If the MachBuffer has backed up, erase the
+                // last block if needed.
+                while bb_offsets.len() > 0 && cur_offset <= *bb_offsets.last().unwrap() {
+                    bb_offsets.pop();
+                    let last_block = bb_offset_blocks.pop().unwrap();
+                    log::trace!(
+                        " -> MachBuffer backed up; popping last entry for {:?}",
+                        last_block
+                    );
+                    bb_offsets_by_block[last_block.index()] = None;
                 }
-                bb_starts.push(Some(cur_offset));
-                last_offset = Some(cur_offset);
+
+                bb_offsets.push(cur_offset);
+                bb_offset_blocks.push(block);
+                bb_offsets_by_block[block.index()] = Some(cur_offset);
             }
 
             if let Some(block_start) = I::gen_block_start(
@@ -1070,25 +1087,35 @@ impl<I: VCodeInst> VCode<I> {
 
         let func_body_len = buffer.cur_offset();
 
-        // Create `bb_edges` and final (filtered) `bb_starts`.
+        // Create `bb_edges`.
         let mut bb_edges = vec![];
-        let mut bb_offsets = vec![];
         if want_metadata {
-            for block in 0..self.num_blocks() {
-                if bb_starts[block].is_none() {
-                    // Block was deleted by MachBuffer; skip.
-                    continue;
-                }
-                let from = bb_starts[block].unwrap();
+            for &block in &final_order {
+                let from = match bb_offsets_by_block[block.index()] {
+                    Some(from) => from,
+                    None => {
+                        // Block was deleted by MachBuffer; skip.
+                        continue;
+                    }
+                };
 
-                bb_offsets.push(from);
+                log::trace!("MachBuffer: final block offset: 0x{:x}", from);
+
                 // Resolve each `succ` label and add edges.
-                let succs = self.block_succs(BlockIndex::new(block));
+                let succs = self.block_succs(block);
                 for &succ in succs.iter() {
                     let to = buffer.resolve_label_offset(MachLabel::from_block(succ));
+                    log::trace!(
+                        "MachBuffer: edge (block{} -> block{}) to 0x{:x}",
+                        block.index(),
+                        succ.index(),
+                        to
+                    );
                     bb_edges.push((from, to));
                 }
             }
+
+            assert!(bb_offsets.windows(2).all(|w| w[0] < w[1]));
         }
 
         let value_labels_ranges =
