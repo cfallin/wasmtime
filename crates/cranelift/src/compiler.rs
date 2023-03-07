@@ -282,13 +282,13 @@ impl wasmtime_environ::Compiler for Compiler {
         // Perform VeriWasm verification if requested.
         #[cfg(feature = "veriwasm")]
         {
-            let (starts, edges) = compiled_code.get_code_bb_layout();
-            for (i, start) in starts.iter().enumerate() {
-                log::debug!("Block {} starts at 0x{:x}", i, start);
+            let (ranges, edges) = compiled_code.get_code_bb_layout();
+            for (i, range) in ranges.iter().enumerate() {
+                log::debug!("Block {} starts at 0x{:x}", i, range.start);
             }
             veriwasm::validate_heap(
                 &compiled_code.buffer.data(),
-                &starts[..],
+                &ranges[..],
                 &edges[..],
                 veriwasm::HeapStrategy::HeapPtrFirstArgWithGuards,
             )

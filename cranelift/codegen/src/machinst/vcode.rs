@@ -36,6 +36,7 @@ use cranelift_entity::{entity_impl, Keys, PrimaryMap};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Range;
 
 /// Index referring to an instruction in VCode.
 pub type InsnIndex = regalloc2::Inst;
@@ -183,9 +184,9 @@ pub struct EmitResult<I: VCodeInst> {
     /// The MachBuffer containing the machine code.
     pub buffer: MachBuffer<I>,
 
-    /// Offset of each basic block, recorded during emission. Computed
-    /// only if `debug_value_labels` is non-empty.
-    pub bb_offsets: Vec<CodeOffset>,
+    /// Range of offsets of each basic block, recorded during
+    /// emission. Computed only if `debug_value_labels` is non-empty.
+    pub bb_ranges: Vec<Range<CodeOffset>>,
 
     /// Final basic-block edges, in terms of code offsets of
     /// bb-starts. Computed only if `debug_value_labels` is non-empty.
@@ -772,7 +773,7 @@ impl<I: VCodeInst> VCode<I> {
 
         let _tt = timing::vcode_emit();
         let mut buffer = MachBuffer::new();
-        let mut bb_offsets: Vec<CodeOffset> = vec![];
+        let mut bb_ranges: Vec<Range<CodeOffset>> = vec![];
         let mut bb_offset_blocks: Vec<BlockIndex> = vec![];
         let mut bb_offsets_by_block: Vec<Option<CodeOffset>> = vec![None; self.num_blocks()];
 
@@ -898,8 +899,8 @@ impl<I: VCodeInst> VCode<I> {
 
                 // If the MachBuffer has backed up, erase the
                 // last block if needed.
-                while bb_offsets.len() > 0 && cur_offset <= *bb_offsets.last().unwrap() {
-                    bb_offsets.pop();
+                while bb_ranges.len() > 0 && cur_offset <= bb_ranges.last().unwrap().start {
+                    bb_ranges.pop();
                     let last_block = bb_offset_blocks.pop().unwrap();
                     log::trace!(
                         " -> MachBuffer backed up; popping last entry for {:?}",
@@ -908,7 +909,13 @@ impl<I: VCodeInst> VCode<I> {
                     bb_offsets_by_block[last_block.index()] = None;
                 }
 
-                bb_offsets.push(cur_offset);
+                // Trim the end of the last block if needed.
+                if bb_ranges.len() > 0 && cur_offset < bb_ranges.last().unwrap().end {
+                    bb_ranges.last_mut().unwrap().end = cur_offset;
+                }
+
+                // End will be updated below.
+                bb_ranges.push(cur_offset..cur_offset);
                 bb_offset_blocks.push(block);
                 bb_offsets_by_block[block.index()] = Some(cur_offset);
             }
@@ -920,6 +927,7 @@ impl<I: VCodeInst> VCode<I> {
                 do_emit(&block_start, &[], &mut disasm, &mut buffer, &mut state);
             }
 
+            let mut bb_early_end = None;
             for inst_or_edit in regalloc.block_insts_and_edits(&self, block) {
                 match inst_or_edit {
                     InstOrEdit::Inst(iix) => {
@@ -1000,6 +1008,16 @@ impl<I: VCodeInst> VCode<I> {
                         let allocs = regalloc.inst_allocs(iix);
 
                         // If the instruction we are about to emit is
+                        // a branch-table pseudoinst, exclude it from
+                        // the BB range for verification purposes,
+                        // because it has an inline table of constants
+                        // that otherwise gets lifted into nonsense
+                        // instructions.
+                        if self.insts[iix.index()].is_term() == MachTerminator::Indirect {
+                            bb_early_end = Some(buffer.cur_offset());
+                        }
+
+                        // If the instruction we are about to emit is
                         // a return, place an epilogue at this point
                         // (and don't emit the return; the actual
                         // epilogue will contain it).
@@ -1074,6 +1092,10 @@ impl<I: VCodeInst> VCode<I> {
                     buffer.emit_island(worst_case_next_bb);
                 }
             }
+
+            if want_metadata {
+                bb_ranges.last_mut().unwrap().end = bb_early_end.unwrap_or(buffer.cur_offset());
+            }
         }
 
         // Emit the constants used by the function.
@@ -1115,7 +1137,8 @@ impl<I: VCodeInst> VCode<I> {
                 }
             }
 
-            assert!(bb_offsets.windows(2).all(|w| w[0] < w[1]));
+            assert!(bb_ranges.iter().all(|r| r.len() > 0));
+            assert!(bb_ranges.windows(2).all(|w| w[0].end <= w[1].start));
         }
 
         let value_labels_ranges =
@@ -1124,7 +1147,7 @@ impl<I: VCodeInst> VCode<I> {
 
         EmitResult {
             buffer,
-            bb_offsets,
+            bb_ranges,
             bb_edges,
             inst_offsets,
             func_body_len,

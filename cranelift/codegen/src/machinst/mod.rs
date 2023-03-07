@@ -294,11 +294,11 @@ pub struct CompiledCodeBase<T: CompilePhase> {
     pub sized_stackslot_offsets: PrimaryMap<StackSlot, u32>,
     /// Debug info: stackslots to stack pointer offsets.
     pub dynamic_stackslot_offsets: PrimaryMap<DynamicStackSlot, u32>,
-    /// Basic-block layout info: block start offsets.
+    /// Basic-block layout info: block start and end offsets.
     ///
     /// This info is generated only if the `machine_code_cfg_info`
     /// flag is set.
-    pub bb_starts: Vec<CodeOffset>,
+    pub bb_ranges: Vec<std::ops::Range<CodeOffset>>,
     /// Basic-block layout info: block edges. Each edge is `(from,
     /// to)`, where `from` and `to` are basic-block start offsets of
     /// the respective blocks.
@@ -321,7 +321,7 @@ impl CompiledCodeStencil {
             value_labels_ranges: self.value_labels_ranges,
             sized_stackslot_offsets: self.sized_stackslot_offsets,
             dynamic_stackslot_offsets: self.dynamic_stackslot_offsets,
-            bb_starts: self.bb_starts,
+            bb_ranges: self.bb_ranges,
             bb_edges: self.bb_edges,
             alignment: self.alignment,
         }
@@ -357,10 +357,10 @@ impl<T: CompilePhase> CompiledCodeBase<T> {
 
         // Normalize the block starts to include an initial block of offset 0.
         let mut block_starts = Vec::new();
-        if self.bb_starts.first().copied() != Some(0) {
+        if self.bb_ranges.first().unwrap().start != 0 {
             block_starts.push(0);
         }
-        block_starts.extend_from_slice(&self.bb_starts);
+        block_starts.extend_from_slice(&self.bb_ranges.iter().map(|r| r.start));
         block_starts.push(self.buffer.data().len() as u32);
 
         // Iterate over block regions, to ensure that we always produce block labels
@@ -428,9 +428,12 @@ impl CompiledCode {
     /// If available, return information about the code layout in the
     /// final machine code: the offsets (in bytes) of each basic-block
     /// start, and all basic-block edges.
-    pub fn get_code_bb_layout(&self) -> (Vec<usize>, Vec<(usize, usize)>) {
+    pub fn get_code_bb_layout(&self) -> (Vec<std::ops::Range<usize>>, Vec<(usize, usize)>) {
         (
-            self.bb_starts.iter().map(|&off| off as usize).collect(),
+            self.bb_ranges
+                .iter()
+                .map(|range| (range.start as usize)..(range.end as usize))
+                .collect(),
             self.bb_edges
                 .iter()
                 .map(|&(from, to)| (from as usize, to as usize))

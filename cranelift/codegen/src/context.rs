@@ -227,7 +227,7 @@ impl Context {
     /// final machine code: the offsets (in bytes) of each basic-block
     /// start, and all basic-block edges.
     #[deprecated = "use CompiledCode::get_code_bb_layout"]
-    pub fn get_code_bb_layout(&self) -> Option<(Vec<usize>, Vec<(usize, usize)>)> {
+    pub fn get_code_bb_layout(&self) -> Option<(Vec<std::ops::Range<usize>>, Vec<(usize, usize)>)> {
         self.compiled_code().map(CompiledCode::get_code_bb_layout)
     }
 
