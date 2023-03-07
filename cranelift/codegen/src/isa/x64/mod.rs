@@ -71,7 +71,7 @@ impl TargetIsa for X64Backend {
 
         let emit_result = vcode.emit(
             &regalloc_result,
-            want_disasm,
+            want_disasm || true,
             self.flags.machine_code_cfg_info(),
         );
         let frame_size = emit_result.frame_size;
@@ -81,7 +81,7 @@ impl TargetIsa for X64Backend {
         let dynamic_stackslot_offsets = emit_result.dynamic_stackslot_offsets;
 
         if let Some(disasm) = emit_result.disasm.as_ref() {
-            log::trace!("disassembly:\n{}", disasm);
+            eprintln!("disassembly:\n{}", disasm);
         }
 
         Ok(CompiledCodeStencil {
