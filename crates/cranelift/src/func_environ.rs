@@ -150,6 +150,11 @@ pub struct FuncEnvironment<'module_environment> {
     epoch_ptr_var: cranelift_frontend::Variable,
 
     fuel_consumed: i64,
+
+    /// Descriptors of accessible memory regions for VeriWasm, if
+    /// enabled.
+    #[cfg(feature = "veriwasm")]
+    pub(crate) veriwasm_vmctx_fields: Vec<veriwasm::VMCtxField>,
 }
 
 impl<'module_environment> FuncEnvironment<'module_environment> {
@@ -186,6 +191,9 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             // Start with at least one fuel being consumed because even empty
             // functions should consume at least some fuel.
             fuel_consumed: 1,
+
+            #[cfg(feature = "veriwasm")]
+            veriwasm_vmctx_fields: vec![],
         }
     }
 
@@ -329,9 +337,30 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         let vmctx = self.vmctx(func);
         if let Some(def_index) = self.module.defined_global_index(index) {
             let offset = i32::try_from(self.offsets.vmctx_vmglobal_definition(def_index)).unwrap();
+            #[cfg(feature = "veriwasm")]
+            {
+                let len = super::value_type(self.isa, self.module.globals[index].wasm_ty).bytes();
+                self.veriwasm_vmctx_fields
+                    .push(veriwasm::VMCtxField::Field {
+                        offset: offset as usize,
+                        len: len as usize,
+                    });
+            }
             (vmctx, offset)
         } else {
             let from_offset = self.offsets.vmctx_vmglobal_import_from(index);
+            #[cfg(feature = "veriwasm")]
+            {
+                let len = super::value_type(self.isa, self.module.globals[index].wasm_ty).bytes();
+                self.veriwasm_vmctx_fields
+                    .push(veriwasm::VMCtxField::Import {
+                        ptr_vmctx_offset: from_offset as usize,
+                        kind: Box::new(veriwasm::VMCtxField::Field {
+                            offset: 0,
+                            len: len as usize,
+                        }),
+                    });
+            }
             let global = func.create_global_value(ir::GlobalValueData::Load {
                 base: vmctx,
                 offset: Offset32::new(i32::try_from(from_offset).unwrap()),
@@ -356,6 +385,19 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             .ins()
             .load(pointer_type, ir::MemFlags::trusted(), base, offset);
         builder.def_var(self.vmruntime_limits_ptr, interrupt_ptr);
+
+        #[cfg(feature = "veriwasm")]
+        {
+            let vmruntime_limits_size = self.offsets.ptr.size_of_vmruntime_limits() as usize;
+            self.veriwasm_vmctx_fields
+                .push(veriwasm::VMCtxField::Import {
+                    ptr_vmctx_offset: offset as usize,
+                    kind: Box::new(veriwasm::VMCtxField::Field {
+                        offset: 0,
+                        len: vmruntime_limits_size,
+                    }),
+                });
+        }
     }
 
     fn fuel_function_entry(&mut self, builder: &mut FunctionBuilder<'_>) {
@@ -849,6 +891,10 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
 
     fn make_table(&mut self, func: &mut ir::Function, index: TableIndex) -> WasmResult<ir::Table> {
         let pointer_type = self.pointer_type();
+        let element_size = u64::from(
+            self.reference_type(self.module.table_plans[index].table.wasm_ty)
+                .bytes(),
+        );
 
         let (ptr, base_offset, current_elements_offset) = {
             let vmctx = self.vmctx(func);
@@ -860,6 +906,17 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                         .vmctx_vmtable_definition_current_elements(def_index),
                 )
                 .unwrap();
+
+                #[cfg(feature = "veriwasm")]
+                {
+                    self.veriwasm_vmctx_fields
+                        .push(veriwasm::VMCtxField::DynamicRegion {
+                            base_ptr_vmctx_offset: usize::try_from(base_offset).unwrap(),
+                            len_vmctx_offset: usize::try_from(current_elements_offset).unwrap(),
+                            element_size: usize::try_from(element_size).unwrap(),
+                        });
+                }
+
                 (vmctx, base_offset, current_elements_offset)
             } else {
                 let from_offset = self.offsets.vmctx_vmtable_import_from(index);
@@ -872,6 +929,20 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                 let base_offset = i32::from(self.offsets.vmtable_definition_base());
                 let current_elements_offset =
                     i32::from(self.offsets.vmtable_definition_current_elements());
+
+                #[cfg(feature = "veriwasm")]
+                {
+                    self.veriwasm_vmctx_fields
+                        .push(veriwasm::VMCtxField::Import {
+                            ptr_vmctx_offset: usize::try_from(from_offset).unwrap(),
+                            kind: Box::new(veriwasm::VMCtxField::DynamicRegion {
+                                base_ptr_vmctx_offset: usize::try_from(base_offset).unwrap(),
+                                len_vmctx_offset: usize::try_from(current_elements_offset).unwrap(),
+                                element_size: usize::try_from(element_size).unwrap(),
+                            }),
+                        });
+                }
+
                 (table, base_offset, current_elements_offset)
             }
         };
@@ -891,11 +962,6 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
             .unwrap(),
             readonly: false,
         });
-
-        let element_size = u64::from(
-            self.reference_type(self.module.table_plans[index].table.wasm_ty)
-                .bytes(),
-        );
 
         Ok(func.create_table(ir::TableData {
             base_gv,
@@ -1498,6 +1564,47 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
             global_type: pointer_type,
             readonly: readonly_base,
         });
+
+        #[cfg(feature = "veriwasm")]
+        {
+            let region = match self.module.memory_plans[index] {
+                MemoryPlan {
+                    style: MemoryStyle::Dynamic { .. },
+                    offset_guard_size: _,
+                    pre_guard_size: _,
+                    memory: _,
+                } => veriwasm::VMCtxField::DynamicRegion {
+                    base_ptr_vmctx_offset: base_offset as usize,
+                    len_vmctx_offset: current_length_offset as usize,
+                    element_size: 1,
+                },
+                MemoryPlan {
+                    style: MemoryStyle::Static { bound },
+                    offset_guard_size,
+                    pre_guard_size: _,
+                    memory: _,
+                } => {
+                    let bound =
+                        (offset_guard_size as usize) + (bound as usize) * (WASM_PAGE_SIZE as usize);
+                    veriwasm::VMCtxField::StaticRegion {
+                        base_ptr_vmctx_offset: base_offset as usize,
+                        heap_and_guard_size: bound,
+                    }
+                }
+            };
+            let indirected = if self.module.defined_memory_index(index).is_some() && !is_shared {
+                let def_index = self.module.defined_memory_index(index).unwrap();
+                let from_offset = self.offsets.vmctx_vmmemory_pointer(def_index);
+                veriwasm::VMCtxField::Import {
+                    ptr_vmctx_offset: from_offset as usize,
+                    kind: Box::new(region),
+                }
+            } else {
+                region
+            };
+            self.veriwasm_vmctx_fields.push(indirected);
+        }
+
         Ok(self.heaps.push(HeapData {
             base: heap_base,
             min_size,

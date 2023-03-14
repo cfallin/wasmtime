@@ -286,11 +286,15 @@ impl wasmtime_environ::Compiler for Compiler {
             for (i, range) in ranges.iter().enumerate() {
                 log::debug!("Block {} starts at 0x{:x}", i, range.start);
             }
+            let vmctx_size = func_env.offsets.size_of_vmctx() as usize;
             veriwasm::validate_heap(
                 &compiled_code.buffer.data(),
                 &ranges[..],
                 &edges[..],
-                veriwasm::HeapStrategy::HeapPtrFirstArgWithGuards,
+                veriwasm::HeapStrategy::VMCtx(
+                    vmctx_size,
+                    std::mem::take(&mut func_env.veriwasm_vmctx_fields),
+                ),
             )
             .map_err(|e| CompileError::Codegen(format!("VeriWasm error: {:?}", e)))?;
         }

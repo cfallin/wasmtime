@@ -166,6 +166,11 @@ pub trait PtrSize {
         self.vmruntime_limits_last_wasm_exit_pc() + self.size()
     }
 
+    /// Return the size of `VMRuntimeLimits`.
+    fn size_of_vmruntime_limits(&self) -> u8 {
+        self.vmruntime_limits_last_wasm_entry_sp() + self.size()
+    }
+
     // Offsets within `VMMemoryDefinition`
 
     /// The offset of the `base` field.
