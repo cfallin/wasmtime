@@ -291,7 +291,7 @@ impl wasmtime_environ::Compiler for Compiler {
                 &compiled_code.buffer.data(),
                 &ranges[..],
                 &edges[..],
-                veriwasm::HeapStrategy::VMCtx(
+                &veriwasm::HeapStrategy::VMCtx(
                     vmctx_size,
                     std::mem::take(&mut func_env.veriwasm_vmctx_fields),
                 ),
