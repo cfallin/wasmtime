@@ -61,7 +61,7 @@ pub(crate) fn define() -> SettingGroup {
             representation, performs various rewrites, and then converts it back. This can result in
             better optimization, but is currently considered experimental.
         "#,
-        false,
+        true,
     );
 
     settings.add_bool(
