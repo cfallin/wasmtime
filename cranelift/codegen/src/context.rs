@@ -175,12 +175,12 @@ impl Context {
 
         self.legalize(isa)?;
 
-        if !isa.flags().use_egraphs() && opt_level != OptLevel::None {
+        //if !isa.flags().use_egraphs() && opt_level != OptLevel::None {
             self.compute_domtree();
             self.compute_loop_analysis();
             self.licm(isa)?;
             self.simple_gvn(isa)?;
-        }
+        //}
 
         self.compute_domtree();
         self.eliminate_unreachable_code(isa)?;
@@ -192,7 +192,6 @@ impl Context {
         self.remove_constant_phis(isa)?;
 
         if isa.flags().use_egraphs() {
-            self.egraph_pass()?;
             self.egraph_pass()?;
         } else if opt_level != OptLevel::None && isa.flags().enable_alias_analysis() {
             self.replace_redundant_loads()?;
