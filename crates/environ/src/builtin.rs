@@ -51,6 +51,8 @@ macro_rules! foreach_builtin_function {
             out_of_gas(vmctx: vmctx);
             /// Invoked when we reach a new epoch.
             new_epoch(vmctx: vmctx) -> i64;
+            /// Invoked at the top of every function.
+            start_of_func(vmctx: vmctx);
         }
     };
 }

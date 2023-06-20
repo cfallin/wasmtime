@@ -487,6 +487,12 @@ unsafe fn new_epoch(instance: &mut Instance) -> Result<u64> {
     (*instance.store()).new_epoch()
 }
 
+// Hook called at start of every function.
+unsafe fn start_of_func(_instance: &mut Instance) -> Result<()> {
+    println!("We started a function!");
+    Ok(())
+}
+
 /// This module contains functions which are used for resolving relocations at
 /// runtime if necessary.
 ///

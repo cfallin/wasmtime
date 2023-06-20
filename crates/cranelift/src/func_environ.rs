@@ -650,6 +650,17 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         self.epoch_check(builder);
     }
 
+    fn start_of_func_entry(&mut self, builder: &mut FunctionBuilder) {
+        let start_of_func_sig = self.builtin_function_signatures.start_of_func(builder.func);
+        let (vmctx, start_of_func) = self.translate_load_builtin_function_address(
+            &mut builder.cursor(),
+            BuiltinFunctionIndex::start_of_func(),
+        );
+        builder
+            .ins()
+            .call_indirect(start_of_func_sig, start_of_func, &[vmctx]);
+    }
+
     fn epoch_ptr(&mut self, builder: &mut FunctionBuilder<'_>) -> ir::Value {
         let vmctx = self.vmctx(builder.func);
         let pointer_type = self.pointer_type();
@@ -2174,6 +2185,8 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
         if self.tunables.epoch_interruption {
             self.epoch_function_entry(builder);
         }
+        // Call the "start of function" hook.
+        self.start_of_func_entry(builder);
         Ok(())
     }
 
