@@ -12,7 +12,7 @@ use cranelift_codegen::entity::{EntityRef, PrimaryMap};
 use cranelift_codegen::ir::entities::{AnyEntity, DynamicType, MemoryType};
 use cranelift_codegen::ir::immediates::{Ieee32, Ieee64, Imm64, Offset32, Uimm32, Uimm64};
 use cranelift_codegen::ir::instructions::{InstructionData, InstructionFormat, VariableArgs};
-use cranelift_codegen::ir::pcc::{Fact, MemoryRegion};
+use cranelift_codegen::ir::pcc::Fact;
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::types::INVALID;
 use cranelift_codegen::ir::types::*;
@@ -2148,7 +2148,6 @@ impl<'a> Parser<'a> {
     // Parse a "fact" for proof-carrying code, attached to a value.
     //
     // fact ::= "max" "(" bit-width "," max-value ")"
-    //        | "points_to" "(" valid-range ")"
     //        | "mem" "(" memory-type "," mt-offset ")"
     // bit-width ::= uimm64
     // max-value ::= uimm64
@@ -2184,15 +2183,6 @@ impl<'a> Parser<'a> {
                     max: max.into(),
                 })
             }
-            Some(Token::Identifier("points_to")) => {
-                self.consume();
-                self.match_token(Token::LPar, "expected a `(`")?;
-                let max = self.match_uimm64("expected a max offset for `points_to` fact")?;
-                self.match_token(Token::RPar, "expected a `)`")?;
-                Ok(Fact::PointsTo {
-                    region: MemoryRegion { max: max.into() },
-                })
-            }
             Some(Token::Identifier("mem")) => {
                 self.consume();
                 self.match_token(Token::LPar, "expected a `(`")?;
@@ -2207,7 +2197,7 @@ impl<'a> Parser<'a> {
                 self.match_token(Token::RPar, "expected a `)`")?;
                 Ok(Fact::Mem { ty, offset })
             }
-            _ => Err(self.error("expected a `max` or `points_to` fact")),
+            _ => Err(self.error("expected a `max` or `mem` fact")),
         }
     }
 
