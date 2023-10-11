@@ -19,6 +19,7 @@ use crate::ir::entities::MemoryType;
 use crate::ir::pcc::Fact;
 use crate::ir::Type;
 use alloc::vec::Vec;
+use cranelift_entity::PrimaryMap;
 
 #[cfg(feature = "enable-serde")]
 use serde_derive::{Deserialize, Serialize};
@@ -125,4 +126,32 @@ pub struct MemoryTypeField {
     /// Whether this field is read-only, i.e., stores should be
     /// disallowed.
     pub readonly: bool,
+}
+
+impl MemoryTypeData {
+    /// Provide the static size of this type, if known.
+    pub fn static_size(&self, tys: &PrimaryMap<MemoryType, MemoryTypeData>) -> Option<u64> {
+        match self {
+            Self::Struct { size, .. } => Some(*size),
+            // Note that we disallow cyclic memtype references, so this must terminate.
+            Self::StaticArray { element, length } => tys[*element]
+                .static_size(tys)
+                .and_then(|elt_size| elt_size.checked_mul(*length)),
+            Self::Primitive { ty } => Some(ty.bytes() as u64),
+            Self::Empty => Some(0),
+        }
+    }
+
+    /// Visit all referenced memtypes in this memtype.
+    pub fn visit_memtypes<F: FnMut(MemoryType)>(&self, mut f: F) {
+        match self {
+            Self::Struct { fields, .. } => {
+                for field in fields {
+                    f(field.ty);
+                }
+            }
+            Self::StaticArray { element, .. } => f(*element),
+            Self::Primitive { .. } | Self::Empty => {}
+        }
+    }
 }

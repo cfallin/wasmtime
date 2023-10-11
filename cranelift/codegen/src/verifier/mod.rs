@@ -50,6 +50,10 @@
 //! Memory types
 //!
 //! - Ensure that struct fields are in offset order.
+//! - Ensure that struct fields have statically-known sizes.
+//! - Ensure that struct fields are completely within the overall
+//!   struct size.
+//! - Detect cycles in memory types.
 //!
 //! TODO:
 //! Ad hoc checking
@@ -408,17 +412,48 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
+    fn check_memory_type_cycles(&self, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
+        let mut found_cycle = false;
+        let mut seen = SparseSet::new();
+        let mut queue = vec![];
+        for mt in self.func.memory_types.keys() {
+            // Compute reachable closure from this memtype.
+            seen.clear();
+            queue.push(mt);
+            while let Some(mt) = queue.pop() {
+                self.func.memory_types[mt].visit_memtypes(|sub_mt| {
+                    if seen.insert(sub_mt).is_none() {
+                        queue.push(sub_mt);
+                    }
+                });
+            }
+            // If `mt` itself is reachable, we have a cycle.
+            if seen.contains_key(mt) {
+                errors.report((mt, format!("memory type {} participates in a cycle", mt)));
+                found_cycle = true;
+            }
+        }
+        if found_cycle {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
     fn verify_memory_types(&self, errors: &mut VerifierErrors) -> VerifierStepResult<()> {
+        self.check_memory_type_cycles(errors)?;
+
+        // Verify that all fields are statically-sized and lie within
+        // the struct, and are in offset order. Note that we do not
+        // verify fields for non-overlap, because we want to support
+        // discriminated unions / enums eventually.
+        //
+        // We do this check after the cyclic-type check, returning
+        // early if that check fails, so we can reliably compute
+        // statically-known sizes here.
         for (mt, mt_data) in &self.func.memory_types {
             match mt_data {
-                MemoryTypeData::Struct { size: _, fields } => {
-                    // Note that we do not verify field offsets for
-                    // non-overlap or for being within the struct
-                    // size, because other types (arrays, in
-                    // particular) may be dynamically sized; so we
-                    // cannot always know how large a field is; and
-                    // also because fields may eventually overlap when
-                    // we support discriminated unions.
+                MemoryTypeData::Struct { size, fields } => {
                     let mut last_offset = 0;
                     for field in fields {
                         if field.offset < last_offset {
@@ -431,6 +466,38 @@ impl<'a> Verifier<'a> {
                             ));
                         }
                         last_offset = field.offset;
+
+                        if let Some(field_size) =
+                            self.func.memory_types[field.ty].static_size(&self.func.memory_types)
+                        {
+                            match field.offset.checked_add(field_size) {
+                                Some(end_offset) if end_offset > *size => {
+                                    errors.report((
+                                        mt,
+                                        format!(
+                                            "memory type {} has a field at offset {} of size {} that overflows the struct size {}",
+                                            mt, field.offset, field_size, *size),
+                                    ));
+                                }
+                                None => {
+                                    errors.report((
+                                        mt,
+                                        format!(
+                                            "memory type {} has a field at offset {} of size {}; offset plus size overflows a u64",
+                                            mt, field.offset, field_size),
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            errors.report((
+                                mt,
+                                format!(
+                                    "memory type {} has a field at offset {} with a dynamic size",
+                                    mt, field.offset
+                                ),
+                            ));
+                        }
                     }
                 }
                 _ => {}
