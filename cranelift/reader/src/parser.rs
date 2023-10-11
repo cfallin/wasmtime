@@ -1725,10 +1725,6 @@ impl<'a> Parser<'a> {
                     Token::RBrace,
                     "expected closing brace after struct fields in struct memory-type declaration",
                 )?;
-                // Ensure fields are sorted ascending by offset.
-                // TODO: check for field overlap and sorted field
-                // order in the CLIF validator.
-                fields.sort_by_key(|f| f.offset);
                 MemoryTypeData::Struct { size, fields }
             }
             Some(Token::Identifier("static_array")) => {

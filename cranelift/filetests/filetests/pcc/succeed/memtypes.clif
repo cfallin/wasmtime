@@ -14,9 +14,6 @@ block0(v0 ! mem(mt0, 0): i64):  ;; v0 points to an instance of mt0, at offset 0
 }
 
 function %f1(i64) -> i32 {
-    ;; TODO: validate that fields don't overlap, and are within the
-    ;; overall size. Make note of future thoughts for enums, tag
-    ;; discriminants, etc.
     mt0 = struct 8 { 0: mt3 readonly ! mem(mt1, 0) }
     ;; `u8` here could be a CLIF type or a memtype
     mt1 = static_array mt2 * 0x1_0000_0000

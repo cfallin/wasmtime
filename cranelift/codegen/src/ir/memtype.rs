@@ -4,6 +4,16 @@
 //! each field having a type and possibly an attached fact -- that we
 //! can use in proof-carrying code to validate accesses to structs and
 //! propagate facts onto the loaded values as well.
+//!
+//! Memory types are meant to be rich enough to describe the *layout*
+//! of values in memory, but do not necessarily need to embody
+//! higher-level features such as subtyping directly. Rather, they
+//! should encode an implementation of a type or object system.
+//!
+//! TODO:
+//! - A memory type for discriminated unions (enums) to allow verified
+//!   downcasting based on tags.
+//! - A memory type for dynamic-length arrays.
 
 use crate::ir::entities::MemoryType;
 use crate::ir::pcc::Fact;
@@ -14,10 +24,18 @@ use alloc::vec::Vec;
 use serde_derive::{Deserialize, Serialize};
 
 /// Data defining a memory type.
+///
+/// A memory type corresponds to a layout of data in memory. It may
+/// have a statically-known or dynamically-known size.
 #[derive(Clone, PartialEq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum MemoryTypeData {
     /// An aggregate consisting of certain fields at certain offsets.
+    ///
+    /// Fields must be sorted by offset, and this is checked by the
+    /// CLIF verifier. However, fields *may* overlap: this is to allow
+    /// for enums, and to allow for the fact that individual fields
+    /// may be dynamically sized.
     Struct {
         /// Size of this type.
         size: u64,
