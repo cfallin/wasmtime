@@ -127,7 +127,8 @@ pub enum PccError {
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum Fact {
     /// A bitslice of a value (up to a bitwidth) is within the given
-    /// integer range.
+    /// integer range, either statically specified by constants or
+    /// symbolically by `Expr`s on both sides.
     ///
     /// The slicing behavior is needed because this fact can describe
     /// both an SSA `Value`, whose entire value is well-defined, and a
@@ -140,25 +141,18 @@ pub enum Fact {
         /// (inclusive). The range is unsigned: the specified bits of
         /// the actual value will be greater than or equal to this
         /// value, as evaluated by an unsigned integer comparison.
-        min: u64,
+        ///
+        /// TODO update comments
+        min_static: u64,
         /// The maximum value that the bitslice can take
         /// (inclusive). The range is unsigned: the specified bits of
         /// the actual value will be less than or equal to this value,
         /// as evaluated by an unsigned integer comparison.
-        max: u64,
-    },
-
-    /// A value bounded by a global value.
-    ///
-    /// The range is in `(min_GV + min_offset)..(max_GV +
-    /// max_offset)`, inclusive on the lower and upper bound.
-    DynamicRange {
-        /// The bitwidth of bits we care about, from the LSB upward.
-        bit_width: u16,
+        max_static: u64,
         /// The lower bound, inclusive.
-        min: Expr,
+        min_expr: Expr,
         /// The upper bound, inclusive.
-        max: Expr,
+        max_expr: Expr,
     },
 
     /// A pointer to a memory type.
@@ -166,23 +160,13 @@ pub enum Fact {
         /// The memory type.
         ty: ir::MemoryType,
         /// The minimum offset into the memory type, inclusive.
-        min_offset: u64,
+        min_static: u64,
         /// The maximum offset into the memory type, inclusive.
-        max_offset: u64,
-        /// This pointer can also be null.
-        nullable: bool,
-    },
-
-    /// A pointer to a memory type, dynamically bounded. The pointer
-    /// is within `(GV_min+offset_min)..(GV_max+offset_max)`
-    /// (inclusive on both ends) in the memory type.
-    DynamicMem {
-        /// The memory type.
-        ty: ir::MemoryType,
+        max_static: u64,
         /// The lower bound, inclusive.
-        min: Expr,
+        min_expr: Expr,
         /// The upper bound, inclusive.
-        max: Expr,
+        max_expr: Expr,
         /// This pointer can also be null.
         nullable: bool,
     },
@@ -293,6 +277,14 @@ impl Expr {
         Expr {
             base: BaseExpr::None,
             offset,
+        }
+    }
+
+    /// Maximum (saturated) value.
+    pub fn max_value() -> Self {
+        Expr {
+            base: BaseExpr::Max,
+            offset: 0,
         }
     }
 
@@ -439,36 +431,27 @@ impl fmt::Display for Fact {
         match self {
             Fact::Range {
                 bit_width,
-                min,
-                max,
-            } => write!(f, "range({bit_width}, {min:#x}, {max:#x})"),
-            Fact::DynamicRange {
-                bit_width,
-                min,
-                max,
-            } => {
-                write!(f, "dynamic_range({bit_width}, {min}, {max})")
-            }
+                min_static,
+                max_static,
+                min_expr,
+                max_expr,
+            } => write!(
+                f,
+                "range({bit_width}, {min:#x}, {max:#x}, {min_expr}, {max_expr})"
+            ),
             Fact::Mem {
                 ty,
-                min_offset,
-                max_offset,
+                min_static,
+                max_static,
+                min_expr,
+                max_expr,
                 nullable,
             } => {
                 let nullable_flag = if *nullable { ", nullable" } else { "" };
                 write!(
                     f,
-                    "mem({ty}, {min_offset:#x}, {max_offset:#x}{nullable_flag})"
+                    "mem({ty}, {min_static:#x}, {max_static:#x}, {min_expr}, {max_expr}{nullable_flag})"
                 )
-            }
-            Fact::DynamicMem {
-                ty,
-                min,
-                max,
-                nullable,
-            } => {
-                let nullable_flag = if *nullable { ", nullable" } else { "" };
-                write!(f, "dynamic_mem({ty}, {min}, {max}{nullable_flag})")
             }
             Fact::Def { value } => write!(f, "def({value})"),
             Fact::Compare { kind, lhs, rhs } => {
@@ -487,17 +470,21 @@ impl Fact {
         // exactly one value.
         Fact::Range {
             bit_width,
-            min: value,
-            max: value,
+            min_static: value,
+            max_static: value,
+            min_expr: Expr::constant(0),
+            max_expr: Expr::max_value(),
         }
     }
 
-    /// Create a dynamic range fact that points to the base of a dynamic memory.
+    /// Create a range fact that points to the base of a memory type.
     pub fn dynamic_base_ptr(ty: ir::MemoryType) -> Self {
-        Fact::DynamicMem {
+        Fact::Mem {
             ty,
-            min: Expr::constant(0),
-            max: Expr::constant(0),
+            min_static: 0,
+            max_static: 0,
+            min_expr: Expr::constant(0),
+            max_expr: Expr::constant(0),
             nullable: false,
         }
     }
