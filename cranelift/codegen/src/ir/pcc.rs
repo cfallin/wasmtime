@@ -500,8 +500,8 @@ impl Fact {
             bit_width,
             min_static: value,
             max_static: value,
-            min_expr: Expr::constant(0),
-            max_expr: Expr::max_value(),
+            min_expr: Expr::constant(value as i64),
+            max_expr: Expr::constant(value as i64),
         }
     }
 
@@ -1240,10 +1240,12 @@ impl<'a> FactContext<'a> {
                                 let mem_static_size = i64::try_from(*mem_static_size)
                                     .map_err(|_| PccError::Overflow)?;
                                 ensure!(end_offset <= mem_static_size, OutOfBounds);
+                            } else {
+                                bail!(OutOfBounds)
                             }
+                        } else {
                             bail!(OutOfBounds)
                         }
-                        bail!(OutOfBounds)
                     }
                     ir::MemoryTypeData::Empty => bail!(OutOfBounds),
                 }
