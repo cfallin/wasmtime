@@ -226,7 +226,7 @@ pub struct Expr {
     /// The dynamic (base) part.
     pub base: BaseExpr,
     /// The static (offset) part.
-    pub offset: i64,
+    pub offset: i128,
 }
 
 /// The base part of a bound expression.
@@ -285,10 +285,11 @@ impl BaseExpr {
 
 impl Expr {
     /// Constant value.
-    pub const fn constant(offset: i64) -> Self {
+    pub const fn constant(value: u64) -> Self {
         Expr {
             base: BaseExpr::None,
-            offset,
+            // Safety: `i128::from(u64)` is not const, but this will never overflow.
+            offset: value as i128,
         }
     }
 
@@ -383,7 +384,7 @@ impl Expr {
 
     /// Add a static offset to an expression.
     pub fn offset(lhs: &Expr, rhs: i64) -> Option<Expr> {
-        let offset = lhs.offset.checked_add(rhs)?;
+        let offset = lhs.offset.checked_add(rhs.into())?;
         Some(Expr {
             base: lhs.base.clone(),
             offset,
@@ -401,7 +402,7 @@ impl Expr {
 
     /// Multiply an expression by a constant, if possible.
     fn scale(&self, factor: u32) -> Option<Expr> {
-        let offset = self.offset.checked_mul(i64::from(factor))?;
+        let offset = self.offset.checked_mul(i128::from(factor))?;
         match self.base {
             BaseExpr::None => Some(Expr {
                 base: BaseExpr::None,
@@ -500,8 +501,8 @@ impl Fact {
             bit_width,
             min_static: value,
             max_static: value,
-            min_expr: Expr::constant(value as i64),
-            max_expr: Expr::constant(value as i64),
+            min_expr: Expr::constant(value),
+            max_expr: Expr::constant(value),
         }
     }
 
@@ -672,7 +673,7 @@ impl Fact {
                 max_static,
                 max_expr,
                 ..
-            } => *max_static <= max && Expr::le(max_expr, &Expr::constant(max as i64)),
+            } => *max_static <= max && Expr::le(max_expr, &Expr::constant(max)),
             _ => false,
         }
     }
@@ -823,11 +824,28 @@ impl<'a> FactContext<'a> {
                 //
                 // In other words, we can always expand the claimed
                 // possible value range.
+                //
+                // Note that to know if one range contains the other,
+                // because ranges are *intersections* of the static
+                // range and symbolic range, it is enough to show that
+                // *either* of the subsumer's (LHS's) ranges is within both of
+                // the subsumee's (RHS's) ranges.
+                let static_rhs_is_max_range =
+                    *min_static_rhs == 0 && *max_static_rhs == max_value_for_width(*bw_rhs);
+                let static_lhs_in_static_rhs = static_rhs_is_max_range
+                    || max_static_lhs <= max_static_rhs && min_static_lhs >= min_static_rhs;
+                let static_lhs_in_expr_rhs =
+                    Expr::le(&Expr::constant(*max_static_lhs), max_expr_rhs)
+                        && Expr::le(min_expr_rhs, &Expr::constant(*min_static_lhs));
+                let expr_lhs_in_expr_rhs =
+                    Expr::le(max_expr_lhs, max_expr_rhs) && Expr::le(min_expr_rhs, min_expr_lhs);
+                let expr_lhs_in_static_rhs = static_rhs_is_max_range
+                    || Expr::le(max_expr_lhs, &Expr::constant(*max_static_rhs))
+                        && Expr::le(&Expr::constant(*min_static_rhs), min_expr_lhs);
+
                 bw_lhs >= bw_rhs
-                    && max_static_lhs <= max_static_rhs
-                    && min_static_lhs >= min_static_rhs
-                    && Expr::le(max_expr_lhs, max_expr_rhs)
-                    && Expr::le(min_expr_rhs, min_expr_lhs)
+                    && (static_lhs_in_static_rhs && static_lhs_in_expr_rhs
+                        || expr_lhs_in_expr_rhs && expr_lhs_in_static_rhs)
             }
 
             (
@@ -849,10 +867,22 @@ impl<'a> FactContext<'a> {
                 },
             ) => {
                 ty_lhs == ty_rhs
-                    && max_static_lhs <= max_static_rhs
-                    && min_static_lhs >= min_static_rhs
-                    && Expr::le(max_expr_lhs, max_expr_rhs)
-                    && Expr::le(min_expr_rhs, min_expr_lhs)
+                    && self.subsumes(
+                        &Fact::Range {
+                            bit_width: self.pointer_width,
+                            min_static: *min_static_lhs,
+                            max_static: *max_static_lhs,
+                            min_expr: *min_expr_lhs,
+                            max_expr: *max_expr_lhs,
+                        },
+                        &Fact::Range {
+                            bit_width: self.pointer_width,
+                            min_static: *min_static_rhs,
+                            max_static: *max_static_rhs,
+                            min_expr: *min_expr_rhs,
+                            max_expr: *max_expr_rhs,
+                        },
+                    )
                     && (*nullable_lhs || !*nullable_rhs)
             }
 
@@ -1234,11 +1264,10 @@ impl<'a> FactContext<'a> {
                         } = max_expr
                         {
                             let end_offset = max_offset
-                                .checked_add(i64::from(access_size))
+                                .checked_add(i128::from(access_size))
                                 .ok_or(PccError::Overflow)?;
                             if *gv == max_gv {
-                                let mem_static_size = i64::try_from(*mem_static_size)
-                                    .map_err(|_| PccError::Overflow)?;
+                                let mem_static_size = i128::from(*mem_static_size);
                                 ensure!(end_offset <= mem_static_size, OutOfBounds);
                             } else {
                                 bail!(OutOfBounds)
@@ -1332,8 +1361,7 @@ impl<'a> FactContext<'a> {
     ) -> Fact {
         let result = match (
             lhs.as_symbol(),
-            lhs.as_const(self.pointer_width)
-                .and_then(|k| i64::try_from(k).ok()),
+            lhs.as_const(self.pointer_width),
             rhs.as_symbol(),
             fact,
         ) {
@@ -1386,7 +1414,7 @@ impl<'a> FactContext<'a> {
             // expression, rewrite the max expression to use `K`, also
             // adjusting offsets as necessary.
             (
-                None,
+                _,
                 Some(lhs_const),
                 Some(rhs),
                 Fact::Mem {
@@ -1404,7 +1432,7 @@ impl<'a> FactContext<'a> {
                 };
                 if let Some(offset) = max_expr
                     .offset
-                    .checked_add(lhs_const)
+                    .checked_add(i128::from(lhs_const))
                     .and_then(|x| x.checked_sub(rhs.offset))
                     .and_then(|x| x.checked_sub(strict_offset))
                 {

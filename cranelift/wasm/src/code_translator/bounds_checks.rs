@@ -107,7 +107,7 @@ where
                 builder.func.dfg.facts[result] = Some(Fact::Compare {
                     kind: compare_kind,
                     lhs: Expr::offset(&Expr::value(orig_index), lhs_off.unwrap()).unwrap(),
-                    rhs: Expr::constant((k as i64).checked_add(rhs_off.unwrap()).unwrap()),
+                    rhs: Expr::offset(&Expr::constant(k), rhs_off.unwrap()).unwrap(),
                 });
             }
         }
@@ -570,7 +570,7 @@ fn explicit_check_oob_condition_and_compute_addr(
                     min_static: 0,
                     max_static,
                     min_expr: Expr::constant(0),
-                    max_expr: Expr::constant(max_static as i64),
+                    max_expr: Expr::constant(max_static),
                     nullable: true,
                 });
             }
@@ -658,7 +658,7 @@ fn compute_addr(
                     min_static: 0,
                     max_static: u64::from(u32::MAX),
                     min_expr: Expr::constant(0),
-                    max_expr: Expr::constant(u32::MAX as i64),
+                    max_expr: Expr::constant(u64::from(u32::MAX)),
                     nullable: false,
                 });
             }
@@ -712,7 +712,7 @@ fn compute_addr(
                         // handle overflow here.
                         max_static,
                         min_expr: Expr::constant(0),
-                        max_expr: Expr::constant(max_static as i64),
+                        max_expr: Expr::constant(max_static),
                         nullable: false,
                     });
                 }

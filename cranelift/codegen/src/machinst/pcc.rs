@@ -49,7 +49,7 @@ pub(crate) fn clamp_range(
                 min_static: 0,
                 max_static: max,
                 min_expr: Expr::constant(0),
-                max_expr: Expr::constant(max as i64),
+                max_expr: Expr::constant(max),
             };
             trace!(" -> clamping to {:?}", result);
             result

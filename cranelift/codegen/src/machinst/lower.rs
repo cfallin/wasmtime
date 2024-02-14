@@ -1436,8 +1436,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     bit_width,
                     min_static: min,
                     max_static: max,
-                    min_expr: Expr::constant(min as i64),
-                    max_expr: Expr::constant(max as i64),
+                    min_expr: Expr::constant(min),
+                    max_expr: Expr::constant(max),
                 },
             );
         }
