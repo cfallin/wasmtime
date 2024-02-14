@@ -1246,6 +1246,8 @@ impl<'a> FactContext<'a> {
             }
         };
 
+        let max_value = max_value_for_width(width);
+
         let result = match fact {
             Fact::Range {
                 bit_width,
@@ -1254,8 +1256,8 @@ impl<'a> FactContext<'a> {
                 min_expr,
                 max_expr,
             } if *bit_width == width => {
-                let min_static = compute_offset(*min_static)?;
-                let max_static = compute_offset(*max_static)?;
+                let min_static = compute_offset(*min_static).unwrap_or(0);
+                let max_static = compute_offset(*max_static).unwrap_or(max_value);
                 let min_expr = Expr::offset(min_expr, offset)?;
                 let max_expr = Expr::offset(max_expr, offset)?;
                 Some(Fact::Range {
@@ -1274,8 +1276,8 @@ impl<'a> FactContext<'a> {
                 max_expr,
                 nullable: false,
             } => {
-                let min_static = compute_offset(*min_static)?;
-                let max_static = compute_offset(*max_static)?;
+                let min_static = compute_offset(*min_static).unwrap_or(0);
+                let max_static = compute_offset(*max_static).unwrap_or(max_value);
                 let min_expr = Expr::offset(min_expr, offset)?;
                 let max_expr = Expr::offset(max_expr, offset)?;
                 Some(Fact::Mem {
