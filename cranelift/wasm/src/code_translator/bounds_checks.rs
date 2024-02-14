@@ -50,6 +50,7 @@ where
     Env: FuncEnvironment + ?Sized,
 {
     let pointer_bit_width = u16::try_from(env.pointer_type().bits()).unwrap();
+    let index_bit_width = u16::try_from(heap.index_type.bits()).unwrap();
     let orig_index = index;
     let index = cast_index_to_pointer_ty(
         index,
@@ -76,12 +77,14 @@ where
             // fact that we previously put on the uextend.
             builder.func.dfg.facts[orig_index] = Some(Fact::Def { value: orig_index });
             if index != orig_index {
-                builder.func.dfg.facts[index] = Some(Fact::value(pointer_bit_width, orig_index));
+                builder.func.dfg.facts[index] =
+                    Some(Fact::value(index_bit_width, pointer_bit_width, orig_index));
             }
 
             // Create a fact on the LHS that is a "trivial symbolic
             // fact": v1 has range v1+LHS_off..=v1+LHS_off
             builder.func.dfg.facts[lhs] = Some(Fact::value_offset(
+                index_bit_width,
                 pointer_bit_width,
                 orig_index,
                 lhs_off.unwrap(),
@@ -229,6 +232,7 @@ where
             let adjusted_bound = builder.ins().isub(bound, adjustment_value);
             if pcc {
                 builder.func.dfg.facts[adjusted_bound] = Some(Fact::global_value_offset(
+                    index_bit_width,
                     pointer_bit_width,
                     bound_gv,
                     -adjustment,
@@ -277,6 +281,7 @@ where
             );
             if pcc {
                 builder.func.dfg.facts[adjusted_index] = Some(Fact::value_offset(
+                    index_bit_width,
                     pointer_bit_width,
                     index,
                     i64::try_from(offset_and_size).unwrap(),
@@ -461,6 +466,7 @@ where
     // tie it to the GV.
     if enable_pcc {
         builder.func.dfg.facts[value] = Some(Fact::global_value(
+            u16::try_from(env.pointer_type().bits()).unwrap(),
             u16::try_from(env.pointer_type().bits()).unwrap(),
             gv,
         ));

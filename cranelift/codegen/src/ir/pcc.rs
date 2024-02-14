@@ -525,44 +525,66 @@ impl Fact {
     /// rather it is claiming that this value is the same as whatever
     /// that symbol is. (In other words, the def should be elsewhere,
     /// and we are tying ourselves to it.)
-    pub const fn value(bit_width: u16, value: ir::Value) -> Self {
+    pub const fn value(orig_bit_width: u16, bit_width: u16, value: ir::Value) -> Self {
         Fact::Range {
             bit_width,
             min_static: 0,
-            max_static: u64::MAX,
+            max_static: max_value_for_width(orig_bit_width),
             min_expr: Expr::value(value),
             max_expr: Expr::value(value),
         }
     }
 
     /// Create a fact that specifies the value is exactly an SSA value plus some offset.
-    pub fn value_offset(bit_width: u16, value: ir::Value, offset: i64) -> Self {
+    pub fn value_offset(
+        orig_bit_width: u16,
+        bit_width: u16,
+        value: ir::Value,
+        offset: i64,
+    ) -> Self {
+        let max_static = max_value_for_width(orig_bit_width);
+        let max_static_and_offset = if offset > 0 {
+            max_static.saturating_add(u64::try_from(offset).unwrap())
+        } else {
+            max_static
+        };
         Fact::Range {
             bit_width,
             min_static: 0,
-            max_static: u64::MAX,
+            max_static: max_static_and_offset,
             min_expr: Expr::offset(&Expr::value(value), offset).unwrap(),
             max_expr: Expr::offset(&Expr::value(value), offset).unwrap(),
         }
     }
 
     /// Create a fact that specifies the value is exactly the value of a GV.
-    pub const fn global_value(bit_width: u16, gv: ir::GlobalValue) -> Self {
+    pub const fn global_value(orig_bit_width: u16, bit_width: u16, gv: ir::GlobalValue) -> Self {
         Fact::Range {
             bit_width,
             min_static: 0,
-            max_static: u64::MAX,
+            max_static: max_value_for_width(orig_bit_width),
             min_expr: Expr::global_value(gv),
             max_expr: Expr::global_value(gv),
         }
     }
 
     /// Create a fact that specifies the value is exactly the value of a GV plus some offset.
-    pub fn global_value_offset(bit_width: u16, gv: ir::GlobalValue, offset: i64) -> Self {
+    pub fn global_value_offset(
+        orig_bit_width: u16,
+        bit_width: u16,
+        gv: ir::GlobalValue,
+        offset: i64,
+    ) -> Self {
+        let max_static = max_value_for_width(orig_bit_width);
+        let max_static_and_offset = if offset > 0 {
+            max_static.saturating_add(u64::try_from(offset).unwrap())
+        } else {
+            max_static
+        };
         Fact::Range {
             bit_width,
             min_static: 0,
-            max_static: u64::MAX,
+            max_static: max_static_and_offset,
             min_expr: Expr::offset(&Expr::global_value(gv), offset).unwrap(),
             max_expr: Expr::offset(&Expr::global_value(gv), offset).unwrap(),
         }
@@ -799,6 +821,53 @@ impl<'a> FactContext<'a> {
         match (lhs, rhs) {
             // Reflexivity.
             (l, r) if l == r => true,
+
+            // Single-value range: actual equality.
+            (
+                Fact::Range {
+                    bit_width: bw_lhs,
+                    min_static: _,
+                    max_static: _,
+                    min_expr: min_expr_lhs,
+                    max_expr: max_expr_lhs,
+                },
+                Fact::Range {
+                    bit_width: bw_rhs,
+                    min_static: _,
+                    max_static: _,
+                    min_expr: min_expr_rhs,
+                    max_expr: max_expr_rhs,
+                },
+            ) if bw_lhs == bw_rhs
+                && min_expr_lhs == max_expr_lhs
+                && min_expr_rhs == max_expr_rhs
+                && min_expr_lhs == min_expr_rhs =>
+            {
+                true
+            }
+
+            (
+                Fact::Range {
+                    bit_width: bw_lhs,
+                    min_static: min_static_lhs,
+                    max_static: max_static_lhs,
+                    min_expr: _,
+                    max_expr: _,
+                },
+                Fact::Range {
+                    bit_width: bw_rhs,
+                    min_static: min_static_rhs,
+                    max_static: max_static_rhs,
+                    min_expr: _,
+                    max_expr: _,
+                },
+            ) if bw_lhs == bw_rhs
+                && min_static_lhs == max_static_lhs
+                && min_static_rhs == max_static_rhs
+                && min_static_lhs == min_static_rhs =>
+            {
+                true
+            }
 
             (
                 Fact::Range {
@@ -1056,7 +1125,7 @@ impl<'a> FactContext<'a> {
 
             // If the claim is a definition of a value, we can say
             // that the output has a range of exactly that value.
-            Fact::Def { value } => Some(Fact::value(to_width, *value)),
+            Fact::Def { value } => Some(Fact::value(from_width, to_width, *value)),
 
             // Otherwise, we can at least claim that the value is
             // within the range of `from_width`.

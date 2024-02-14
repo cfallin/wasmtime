@@ -1874,6 +1874,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                         // This fact applies to the length.
                         let length_fact = ir::Fact::global_value(
                             u16::try_from(self.isa.pointer_type().bits()).unwrap(),
+                            u16::try_from(self.isa.pointer_type().bits()).unwrap(),
                             heap_bound,
                         );
                         // Create a field in the vmctx for the base pointer.
