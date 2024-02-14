@@ -2179,16 +2179,14 @@ impl<'a> Parser<'a> {
 
     // Parse a "fact" for proof-carrying code, attached to a value.
     //
-    // fact ::= "range" "(" bit-width "," min-value "," max-value ")"
-    //        | "dynamic_range" "(" bit-width "," expr "," expr ")"
-    //        | "mem" "(" memory-type "," mt-offset "," mt-offset [ "," "nullable" ] ")"
-    //        | "dynamic_mem" "(" memory-type "," expr "," expr [ "," "nullable" ] ")"
+    // fact ::= "range" "(" bit-width "," min-static "," max-static "," min-expr "," max-expr )"
+    //        | "mem" "(" memory-type "," min-static "," max-static "," min-expr "," max-expr [ "," "nullable" ] ")"
     //        | "conflict"
     // bit-width ::= uimm64
-    // min-value ::= uimm64
-    // max-value ::= uimm64
-    // valid-range ::= uimm64
-    // mt-offset ::= uimm64
+    // min-static ::= uimm64
+    // max-static ::= uimm64
+    // min-expr ::= expr
+    // max-expr ::= expr
     fn parse_fact(&mut self) -> ParseResult<Fact> {
         match self.token() {
             Some(Token::Identifier("range")) => {
@@ -2198,13 +2196,17 @@ impl<'a> Parser<'a> {
                     .match_uimm64("expected a bit-width value for `range` fact")?
                     .into();
                 self.match_token(Token::Comma, "expected a comma")?;
-                let min: u64 = self
+                let min_static: u64 = self
                     .match_uimm64("expected a min value for `range` fact")?
                     .into();
                 self.match_token(Token::Comma, "expected a comma")?;
-                let max: u64 = self
+                let max_static: u64 = self
                     .match_uimm64("expected a max value for `range` fact")?
                     .into();
+                self.match_token(Token::Comma, "expected a comma")?;
+                let min_expr = self.parse_expr()?;
+                self.match_token(Token::Comma, "expected a comma")?;
+                let max_expr = self.parse_expr()?;
                 self.match_token(Token::RPar, "`range` fact needs a closing `)`")?;
                 let bit_width_max = match bit_width {
                     x if x > 64 => {
@@ -2213,37 +2215,22 @@ impl<'a> Parser<'a> {
                     64 => u64::MAX,
                     x => (1u64 << x) - 1,
                 };
-                if min > max {
+                if min_static > max_static {
                     return Err(self.error(
                         "min value must be less than or equal to max value on a `range` fact",
                     ));
                 }
-                if max > bit_width_max {
+                if max_static > bit_width_max {
                     return Err(
                         self.error("max value is out of range for bitwidth on a `range` fact")
                     );
                 }
                 Ok(Fact::Range {
                     bit_width: u16::try_from(bit_width).unwrap(),
-                    min: min.into(),
-                    max: max.into(),
-                })
-            }
-            Some(Token::Identifier("dynamic_range")) => {
-                self.consume();
-                self.match_token(Token::LPar, "`dynamic_range` fact needs an opening `(`")?;
-                let bit_width: u64 = self
-                    .match_uimm64("expected a bit-width value for `dynamic_range` fact")?
-                    .into();
-                self.match_token(Token::Comma, "expected a comma")?;
-                let min = self.parse_expr()?;
-                self.match_token(Token::Comma, "expected a comma")?;
-                let max = self.parse_expr()?;
-                self.match_token(Token::RPar, "`dynamic_range` fact needs a closing `)`")?;
-                Ok(Fact::DynamicRange {
-                    bit_width: u16::try_from(bit_width).unwrap(),
-                    min,
-                    max,
+                    min_static,
+                    max_static,
+                    min_expr,
+                    max_expr,
                 })
             }
             Some(Token::Identifier("mem")) => {
@@ -2254,13 +2241,17 @@ impl<'a> Parser<'a> {
                     Token::Comma,
                     "expected a comma after memory type in `mem` fact",
                 )?;
-                let min_offset: u64 = self
+                let min_static: u64 = self
                     .match_uimm64("expected a uimm64 minimum pointer offset for `mem` fact")?
                     .into();
                 self.match_token(Token::Comma, "expected a comma after offset in `mem` fact")?;
-                let max_offset: u64 = self
+                let max_static: u64 = self
                     .match_uimm64("expected a uimm64 maximum pointer offset for `mem` fact")?
                     .into();
+                self.match_token(Token::Comma, "expected a comma")?;
+                let min_expr = self.parse_expr()?;
+                self.match_token(Token::Comma, "expected a comma")?;
+                let max_expr = self.parse_expr()?;
                 let nullable = if self.token() == Some(Token::Comma) {
                     self.consume();
                     self.match_token(
@@ -2274,40 +2265,10 @@ impl<'a> Parser<'a> {
                 self.match_token(Token::RPar, "expected a `)`")?;
                 Ok(Fact::Mem {
                     ty,
-                    min_offset,
-                    max_offset,
-                    nullable,
-                })
-            }
-            Some(Token::Identifier("dynamic_mem")) => {
-                self.consume();
-                self.match_token(Token::LPar, "expected a `(`")?;
-                let ty = self.match_mt("expected a memory type for `dynamic_mem` fact")?;
-                self.match_token(
-                    Token::Comma,
-                    "expected a comma after memory type in `dynamic_mem` fact",
-                )?;
-                let min = self.parse_expr()?;
-                self.match_token(
-                    Token::Comma,
-                    "expected a comma after offset in `dynamic_mem` fact",
-                )?;
-                let max = self.parse_expr()?;
-                let nullable = if self.token() == Some(Token::Comma) {
-                    self.consume();
-                    self.match_token(
-                        Token::Identifier("nullable"),
-                        "expected `nullable` in last optional field of `dynamic_mem`",
-                    )?;
-                    true
-                } else {
-                    false
-                };
-                self.match_token(Token::RPar, "expected a `)`")?;
-                Ok(Fact::DynamicMem {
-                    ty,
-                    min,
-                    max,
+                    min_static,
+                    max_static,
+                    min_expr,
+                    max_expr,
                     nullable,
                 })
             }
