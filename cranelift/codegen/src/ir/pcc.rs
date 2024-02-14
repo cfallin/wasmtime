@@ -1317,12 +1317,14 @@ impl<'a> FactContext<'a> {
                 max_expr,
                 nullable: _,
             } => {
+                trace!(" -> memory type: {}", self.function.memory_types[*ty]);
                 match &self.function.memory_types[*ty] {
                     ir::MemoryTypeData::Struct { size, .. }
                     | ir::MemoryTypeData::Memory { size } => {
                         let end_offset: u64 = max_static
                             .checked_add(u64::from(access_size))
                             .ok_or(PccError::Overflow)?;
+                        trace!(" -> end_offset {end_offset}");
                         ensure!(end_offset <= *size, OutOfBounds)
                     }
                     ir::MemoryTypeData::DynamicMemory {
@@ -1337,6 +1339,7 @@ impl<'a> FactContext<'a> {
                             let end_offset = max_offset
                                 .checked_add(i128::from(access_size))
                                 .ok_or(PccError::Overflow)?;
+                            trace!(" -> end_offset {end_offset}");
                             if *gv == max_gv {
                                 let mem_static_size = i128::from(*mem_static_size);
                                 ensure!(end_offset <= mem_static_size, OutOfBounds);
@@ -1354,6 +1357,7 @@ impl<'a> FactContext<'a> {
                 } else {
                     None
                 };
+                trace!(" -> specific type and offset: {specific_ty_and_offset:?}");
                 Ok(specific_ty_and_offset)
             }
 
