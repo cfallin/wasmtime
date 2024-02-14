@@ -2256,7 +2256,7 @@ impl<'a> Parser<'a> {
                     self.consume();
                     self.match_token(
                         Token::Identifier("nullable"),
-                        "expected `nullable` in last optional field of `dynamic_mem`",
+                        "expected `nullable` in last optional field of `mem`",
                     )?;
                     true
                 } else {
@@ -2298,7 +2298,7 @@ impl<'a> Parser<'a> {
                 Ok(Fact::Conflict)
             }
             _ => Err(self.error(
-                "expected a `range`, 'dynamic_range', `mem`, `dynamic_mem`, `def`, `compare` or `conflict` fact",
+                "expected a `range`, `mem`, `def`, `compare` or `conflict` fact",
             )),
         }
     }
