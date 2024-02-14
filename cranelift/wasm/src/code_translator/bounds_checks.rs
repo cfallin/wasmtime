@@ -564,20 +564,25 @@ fn explicit_check_oob_condition_and_compute_addr(
             Some(AddrPcc::Static32(ty, size)) => {
                 pos.func.dfg.facts[null] =
                     Some(Fact::constant(u16::try_from(addr_ty.bits()).unwrap(), 0));
+                let max_static = size.checked_sub(u64::from(access_size)).unwrap();
                 pos.func.dfg.facts[addr] = Some(Fact::Mem {
                     ty,
-                    min_offset: 0,
-                    max_offset: size.checked_sub(u64::from(access_size)).unwrap(),
+                    min_static: 0,
+                    max_static,
+                    min_expr: Expr::constant(0),
+                    max_expr: Expr::constant(max_static as i64),
                     nullable: true,
                 });
             }
             Some(AddrPcc::Dynamic(ty, gv)) => {
                 pos.func.dfg.facts[null] =
                     Some(Fact::constant(u16::try_from(addr_ty.bits()).unwrap(), 0));
-                pos.func.dfg.facts[addr] = Some(Fact::DynamicMem {
+                pos.func.dfg.facts[addr] = Some(Fact::Mem {
                     ty,
-                    min: Expr::constant(0),
-                    max: Expr::offset(
+                    min_static: 0,
+                    max_static: u64::MAX,
+                    min_expr: Expr::constant(0),
+                    max_expr: Expr::offset(
                         &Expr::global_value(gv),
                         i64::try_from(heap.offset_guard_size)
                             .unwrap()
@@ -617,8 +622,10 @@ fn compute_addr(
         Some(AddrPcc::Static32(ty, _size)) => {
             pos.func.dfg.facts[heap_base] = Some(Fact::Mem {
                 ty,
-                min_offset: 0,
-                max_offset: 0,
+                min_static: 0,
+                max_static: 0,
+                min_expr: Expr::constant(0),
+                max_expr: Expr::constant(0),
                 nullable: false,
             });
         }
@@ -637,17 +644,21 @@ fn compute_addr(
                 .and_then(|f| f.as_symbol())
                 .cloned()
             {
-                pos.func.dfg.facts[base_and_index] = Some(Fact::DynamicMem {
+                pos.func.dfg.facts[base_and_index] = Some(Fact::Mem {
                     ty,
-                    min: idx.clone(),
-                    max: idx,
+                    min_static: 0,
+                    max_static: u64::MAX,
+                    min_expr: idx.clone(),
+                    max_expr: idx,
                     nullable: false,
                 });
             } else {
                 pos.func.dfg.facts[base_and_index] = Some(Fact::Mem {
                     ty,
-                    min_offset: 0,
-                    max_offset: u64::from(u32::MAX),
+                    min_static: 0,
+                    max_static: u64::from(u32::MAX),
+                    min_expr: Expr::constant(0),
+                    max_expr: Expr::constant(u32::MAX as i64),
                     nullable: false,
                 });
             }
@@ -679,24 +690,29 @@ fn compute_addr(
                     .as_ref()
                     .and_then(|f| f.as_symbol())
                 {
-                    pos.func.dfg.facts[result] = Some(Fact::DynamicMem {
+                    pos.func.dfg.facts[result] = Some(Fact::Mem {
                         ty,
-                        min: idx.clone(),
+                        min_static: 0,
+                        max_static: u64::MAX,
+                        min_expr: idx.clone(),
                         // Safety: adding an offset to an expression with
                         // zero offset -- add cannot wrap, so `unwrap()`
                         // cannot fail.
-                        max: Expr::offset(idx, i64::from(offset)).unwrap(),
+                        max_expr: Expr::offset(idx, i64::from(offset)).unwrap(),
                         nullable: false,
                     });
                 } else {
+                    let max_static = u64::from(u32::MAX) + u64::from(offset);
                     pos.func.dfg.facts[result] = Some(Fact::Mem {
                         ty,
-                        min_offset: u64::from(offset),
+                        min_static: u64::from(offset),
                         // Safety: can't overflow -- two u32s summed in a
                         // 64-bit add. TODO: when memory64 is supported here,
                         // `u32::MAX` is no longer true, and we'll need to
                         // handle overflow here.
-                        max_offset: u64::from(u32::MAX) + u64::from(offset),
+                        max_static,
+                        min_expr: Expr::constant(0),
+                        max_expr: Expr::constant(max_static as i64),
                         nullable: false,
                     });
                 }

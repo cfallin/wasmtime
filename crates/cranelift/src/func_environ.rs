@@ -3,7 +3,7 @@ use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::condcodes::*;
 use cranelift_codegen::ir::immediates::{Imm64, Offset32, Uimm64};
-use cranelift_codegen::ir::pcc::Fact;
+use cranelift_codegen::ir::pcc::{Expr, Fact};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{
     AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlags, Signature, UserFuncName, Value,
@@ -230,8 +230,10 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
                 self.pcc_vmctx_memtype = Some(vmctx_memtype);
                 func.global_value_facts[vmctx] = Some(Fact::Mem {
                     ty: vmctx_memtype,
-                    min_offset: 0,
-                    max_offset: 0,
+                    min_static: 0,
+                    max_static: 0,
+                    min_expr: Expr::constant(0),
+                    max_expr: Expr::constant(0),
                     nullable: false,
                 });
             }
@@ -1941,8 +1943,10 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                         // This fact applies to any pointer to the start of the memory.
                         let base_fact = Fact::Mem {
                             ty: data_mt,
-                            min_offset: 0,
-                            max_offset: 0,
+                            min_static: 0,
+                            max_static: 0,
+                            min_expr: Expr::constant(0),
+                            max_expr: Expr::constant(0),
                             nullable: false,
                         };
                         // Create a field in the vmctx for the base pointer.
