@@ -407,6 +407,10 @@ impl Expr {
                 base: BaseExpr::None,
                 offset,
             }),
+            BaseExpr::Max => Some(Expr {
+                base: BaseExpr::Max,
+                offset: 0,
+            }),
             _ => None,
         }
     }
