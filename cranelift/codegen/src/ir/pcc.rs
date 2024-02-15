@@ -230,7 +230,7 @@ pub struct Expr {
 }
 
 /// The base part of a bound expression.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum BaseExpr {
     /// No dynamic part (i.e., zero).
@@ -722,20 +722,13 @@ impl Fact {
                     min_expr: min_expr_rhs,
                     max_expr: max_expr_rhs,
                 },
-            ) if bw_lhs == bw_rhs
-                && max_static_lhs >= min_static_rhs
-                && max_static_rhs >= min_static_lhs
-                && Expr::le(min_expr_rhs, max_expr_lhs)
-                && Expr::le(min_expr_lhs, max_expr_rhs) =>
-            {
-                Fact::Range {
-                    bit_width: *bw_lhs,
-                    min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
-                    max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
-                    min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
-                    max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
-                }
-            }
+            ) if bw_lhs == bw_rhs => Fact::Range {
+                bit_width: *bw_lhs,
+                min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
+                max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
+                min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
+                max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
+            },
 
             (
                 Fact::Mem {
@@ -754,21 +747,14 @@ impl Fact {
                     max_expr: max_expr_rhs,
                     nullable: nullable_rhs,
                 },
-            ) if ty_lhs == ty_rhs
-                && max_static_lhs >= min_static_rhs
-                && max_static_rhs >= min_static_lhs
-                && Expr::le(min_expr_rhs, max_expr_lhs)
-                && Expr::le(min_expr_lhs, max_expr_rhs) =>
-            {
-                Fact::Mem {
-                    ty: *ty_lhs,
-                    min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
-                    max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
-                    min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
-                    max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
-                    nullable: *nullable_lhs && *nullable_rhs,
-                }
-            }
+            ) if ty_lhs == ty_rhs => Fact::Mem {
+                ty: *ty_lhs,
+                min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
+                max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
+                min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
+                max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
+                nullable: *nullable_lhs && *nullable_rhs,
+            },
 
             _ => Fact::Conflict,
         }
