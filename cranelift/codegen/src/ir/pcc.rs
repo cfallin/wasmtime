@@ -695,7 +695,7 @@ impl Fact {
                 max_static,
                 max_expr,
                 ..
-            } => *max_static <= max && Expr::le(max_expr, &Expr::constant(max)),
+            } => *max_static <= max || Expr::le(max_expr, &Expr::constant(max)),
             _ => false,
         }
     }
