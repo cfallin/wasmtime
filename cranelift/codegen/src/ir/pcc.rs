@@ -77,7 +77,9 @@ use crate::ir::types::*;
 use crate::isa::TargetIsa;
 use crate::machinst::{BlockIndex, LowerBackend, VCode};
 use crate::trace;
+use alloc::vec::Vec;
 use regalloc2::Function as _;
+use smallvec::{smallvec, SmallVec};
 use std::fmt;
 
 #[cfg(feature = "enable-serde")]
@@ -122,18 +124,35 @@ pub enum PccError {
     InvalidStoredFact,
 }
 
+/// A range in an integer space. This can be used to describe a value
+/// or an offset into a memtype.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub enum ValueRange {
+    /// Exactly the value(s) given.
+    Exact(SmallVec<[Expr; 1]>),
+    /// A value that lies within all specified lower and upper bounds
+    /// (inclusive).
+    Inclusive {
+        /// Lower bounds (inclusive). The list specifies a set of
+        /// bounds; the concrete value is greater than or equal to
+        /// *all* of these bounds. If the list is empty, then there is
+        /// no lower bound.
+        min: SmallVec<[Expr; 1]>,
+        /// Upper bounds (inclusive). The list specifies a set of
+        /// bounds; the concrete value is less than or equal to *all*
+        /// of these bounds. If the list is empty, then there is no
+        /// upper bound.
+        max: SmallVec<[Expr; 1]>,
+    },
+}
+
 /// A fact on a value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub enum Fact {
     /// A bitslice of a value (up to a bitwidth) is within the given
-    /// integer range, either statically specified by constants or
-    /// symbolically by `Expr`s on both sides.
-    ///
-    /// The range is the *intersection* of the statically-specified
-    /// and dynamically-specified ranges: that is, the tightest
-    /// minimum bound is `max(min_static, min_expr)`, and the tightest
-    /// maximum bound is `min(max_static, max_expr)`.
+    /// integer range.
     ///
     /// The slicing behavior is needed because this fact can describe
     /// both an SSA `Value`, whose entire value is well-defined, and a
@@ -142,43 +161,18 @@ pub enum Fact {
     Range {
         /// The bitwidth of bits we care about, from the LSB upward.
         bit_width: u16,
-        /// A static minimum value that the bitslice can take
-        /// (inclusive). The range is unsigned: the specified bits of
-        /// the actual value will be greater than or equal to this
-        /// value, as evaluated by an unsigned integer comparison.
-        min_static: u64,
-        /// A static maximum value that the bitslice can take
-        /// (inclusive). The range is unsigned: the specified bits of
-        /// the actual value will be less than or equal to this value,
-        /// as evaluated by an unsigned integer comparison.
-        max_static: u64,
-        /// A dynamic minimum value that the bitslice can take
-        /// (inclusive).
-        min_expr: Expr,
-        /// A dynamic maximum value that the bitslice can take
-        /// (inclusive).
-        max_expr: Expr,
+        /// The actual range.
+        range: ValueRange,
     },
 
-    /// A pointer to a memory type.
-    ///
-    /// As with the `Range` variant above, the allowable offset range
-    /// is specified both statically and dynamically, and the true
-    /// (tightest) range specification is the intersection of these
-    /// two.
+    /// A pointer to a memory type, with an offset inside the memory
+    /// type specified as a range, and optionally nullable (can take
+    /// on a zero/NULL pointer value) as well.
     Mem {
         /// The memory type.
         ty: ir::MemoryType,
-        /// The static minimum offset into the memory type, inclusive.
-        min_static: u64,
-        /// The static maximum offset into the memory type, inclusive.
-        max_static: u64,
-        /// The dynamic minimum offset into the memory type,
-        /// inclusive.
-        min_expr: Expr,
-        /// The dynamic maximum offset into the memory type,
-        /// inclusive.
-        max_expr: Expr,
+        /// The range of offsets into this type.
+        range: ValueRange,
         /// This pointer can also be null.
         nullable: bool,
     },
@@ -309,11 +303,27 @@ impl Expr {
         }
     }
 
+    /// The value of an SSA value plus some offset.
+    pub const fn value_offset(value: ir::Value, offset: i128) -> Self {
+        Expr {
+            base: BaseExpr::Value(value),
+            offset,
+        }
+    }
+
     /// The value of a global value.
     pub const fn global_value(gv: ir::GlobalValue) -> Self {
         Expr {
             base: BaseExpr::GlobalValue(gv),
             offset: 0,
+        }
+    }
+
+    /// The value of a global value plus some offset.
+    pub const fn global_value(gv: ir::GlobalValue, offset: i128) -> Self {
+        Expr {
+            base: BaseExpr::GlobalValue(gv),
+            offset,
         }
     }
 
@@ -358,27 +368,30 @@ impl Expr {
     }
 
     /// Add one expression to another.
-    fn add(lhs: &Expr, rhs: &Expr) -> Option<Expr> {
+    fn add(lhs: &Expr, rhs: &Expr) -> Expr {
+        let Some(offset) = lhs.offset.checked_add(rhs.offset) else {
+            return Expr::max_value();
+        };
         if lhs.base == rhs.base {
-            Some(Expr {
+            Expr {
                 base: lhs.base.clone(),
-                offset: lhs.offset.checked_add(rhs.offset)?,
-            })
+                offset,
+            }
         } else if lhs.base == BaseExpr::None {
-            Some(Expr {
+            Expr {
                 base: rhs.base.clone(),
-                offset: lhs.offset.checked_add(rhs.offset)?,
-            })
+                offset,
+            }
         } else if rhs.base == BaseExpr::None {
-            Some(Expr {
+            Expr {
                 base: lhs.base.clone(),
-                offset: lhs.offset.checked_add(rhs.offset)?,
-            })
+                offset,
+            }
         } else {
-            Some(Expr {
+            Expr {
                 base: BaseExpr::Max,
                 offset: 0,
-            })
+            }
         }
     }
 
@@ -455,38 +468,206 @@ impl fmt::Display for Expr {
     }
 }
 
+struct DisplayExprs<'a>(&'a [Expr]);
+
+impl<'a> fmt::Display for DisplayExprs<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{{")?;
+
+        let mut first = true;
+        for expr in exprs {
+            if first {
+                write!(f, " {expr}")?;
+                first = false;
+            } else {
+                write!(f, ", {expr}")?;
+            }
+        }
+
+        write!(f, "}}")?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for ValueRange {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ValueRange::Exact(exprs) => write!(f, "{}", DisplayExprs(exprs)),
+            ValueRange::Inclusive { min, max } => {
+                write!(f, "{}, {}", DisplayExprs(&min[..]), DisplayExprs(&max[..]))
+            }
+        }
+    }
+}
+
 impl fmt::Display for Fact {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Fact::Range {
-                bit_width,
-                min_static,
-                max_static,
-                min_expr,
-                max_expr,
-            } => write!(
-                f,
-                "range({bit_width}, {min_static:#x}, {max_static:#x}, {min_expr}, {max_expr})"
-            ),
+            Fact::Range { bit_width, range } => {
+                write!(f, "range({bit_width}, {range})")
+            }
             Fact::Mem {
                 ty,
-                min_static,
-                max_static,
-                min_expr,
-                max_expr,
+                range,
                 nullable,
             } => {
                 let nullable_flag = if *nullable { ", nullable" } else { "" };
-                write!(
-                    f,
-                    "mem({ty}, {min_static:#x}, {max_static:#x}, {min_expr}, {max_expr}{nullable_flag})"
-                )
+                write!(f, "mem({ty}, {range}{nullable_flag})")
             }
             Fact::Def { value } => write!(f, "def({value})"),
             Fact::Compare { kind, lhs, rhs } => {
                 write!(f, "compare({kind}, {lhs}, {rhs})")
             }
             Fact::Conflict => write!(f, "conflict"),
+        }
+    }
+}
+
+impl ValueRange {
+    /// Is this ValueRange definitely less than or equal to the given expression?
+    pub fn le_expr(&self, expr: &Expr) -> bool {
+        match self {
+            ValueRange::Exact(exact) => exact.iter().any(|equiv| Expr::le(equiv, expr)),
+            // The range is <= the expr if *any* of its upper bounds
+            // are <= the expr, because each upper bound constrains
+            // the whole range (i.e., the range is the intersection of
+            // all combinations of bounds).
+            ValueRange::Inclusive { max, .. } => {
+                max.iter().any(|upper_bound| Expr::le(upper_bound, expr))
+            }
+        }
+    }
+
+    /// Is the expression definitely within the ValueRange?
+    pub fn contains_expr(&self, expr: &Expr) -> bool {
+        match self {
+            ValueRange::Exact(exact) => exact.iter().any(|equiv| equiv == expr),
+            ValueRange::Inclusive { min, max } => {
+                min.iter().all(|lower_bound| Expr::le(lower_bound, expr))
+                    && max.iter().all(|upper_bound| Expr::le(expr, upper_bound))
+            }
+        }
+    }
+
+    /// Simplify a ValueRange by removing redundant bounds. Any lower
+    /// bound greater than another lower bound, or any upper bound
+    /// less than another upper bound, can be removed.
+    pub fn simplify(&mut self) {
+        match self {
+            ValueRange::Exact(equivs) => {
+                equivs.sort();
+                equivs.dedup();
+            }
+            ValueRange::Inclusive { min, max } => {
+                let mut out_min = 0;
+                for i in 0..min.len() {
+                    let redundant = min[0..out_min]
+                        .iter()
+                        .any(|other_bound| Expr::le(other_bound, &min[i]));
+                    if !redundant {
+                        if i > out_min {
+                            min.swap(out_min, i);
+                        }
+                        out_min += 1;
+                    }
+                }
+                min.truncate(out_min);
+                // Canonicalize to allow fast-path equality checks to more likely succeed.
+                min.sort();
+
+                let mut out_max = 0;
+                for i in 0..max.len() {
+                    let redundant = max[0..out_max]
+                        .iter()
+                        .any(|other_bound| Expr::le(&max[i], other_bound));
+                    if !redundant {
+                        if i > out_max {
+                            max.swap(out_max, i);
+                        }
+                        out_max += 1;
+                    }
+                }
+                max.truncate(out_max);
+                // Canonicalize to allow fast-path equality checks to more likely succeed.
+                max.sort();
+
+                // If there is some element in common in `min` and `max`, then we can narrow to `Exact`.
+                if let Some(exact) = min.iter().find(|&e| max.contains(e)) {
+                    *self = ValueRange::Exact(smallvec![exact.clone()]);
+                }
+            }
+        }
+    }
+
+    /// Does one ValueRange contain another? Assumes both sides are already simplified.
+    pub fn contains(&self, other: &ValueRange) -> bool {
+        match (self, other) {
+            (ValueRange::Exact(expr1), ValueRange::Exact(expr2)) => {
+                expr1.iter().any(|e| expr2.contains(e))
+            }
+            (range @ ValueRange::Inclusive { .. }, ValueRange::Exact(expr)) => {
+                expr.iter().any(|e| range.contains_expr(e))
+            }
+            (ValueRange::Exact(..), ValueRange::Inclusive { .. }) => false,
+            (
+                range1 @ ValueRange::Inclusive { .. },
+                ValueRange::Inclusive {
+                    min: min2,
+                    max: max2,
+                },
+            ) => {
+                // *Some* lower bound and *some* upper bound of the
+                // RHS must be contained in the LHS. Either those
+                // lower and upper bounds are tight, in which case all
+                // values between them are then contained in the LHS;
+                // or they are loose, and the true range is contained
+                // within them, which in turn is contained in the LHS.
+                min2.iter()
+                    .any(|lower_bound2| range1.contains_expr(lower_bound2))
+                    && max2
+                        .iter()
+                        .any(|upper_bound2| range1.contains_expr(upper_bound2))
+            }
+        }
+    }
+
+    /// Intersect two ValueRanges.
+    pub fn intersect(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
+        match (lhs, rhs) {
+            (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
+                let mut result =
+                    ValueRange::Exact(e1.iter().cloned().chain(e2.iter().cloned()).collect());
+                result.simplify();
+                result
+            }
+            (ValueRange::Exact(equiv), ValueRange::Range { min, max })
+            | (ValueRange::Range { min, max }, ValueRange::Exact(equiv)) => {
+                let mut min = min.clone();
+                let mut max = max.clone();
+                min.extend(equiv.iter().cloned());
+                max.extend(equiv.iter().cloned());
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
+            (
+                ValueRange::Range {
+                    min: min1,
+                    max: max1,
+                },
+                ValueRange::Range {
+                    min: min2,
+                    max: max2,
+                },
+            ) => {
+                let mut min = min1.clone();
+                let mut max = max1.clone();
+                min.extend(min2.iter().cloned());
+                max.extend(max2.iter().cloned());
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
         }
     }
 }
@@ -499,10 +680,7 @@ impl Fact {
         // exactly one value.
         Fact::Range {
             bit_width,
-            min_static: value,
-            max_static: value,
-            min_expr: Expr::constant(value),
-            max_expr: Expr::constant(value),
+            range: ValueRange::Exact(Expr::constant(value)),
         }
     }
 
@@ -510,10 +688,7 @@ impl Fact {
     pub const fn dynamic_base_ptr(ty: ir::MemoryType) -> Self {
         Fact::Mem {
             ty,
-            min_static: 0,
-            max_static: 0,
-            min_expr: Expr::constant(0),
-            max_expr: Expr::constant(0),
+            range: ValueRange::Exact(Expr::constant(0)),
             nullable: false,
         }
     }
@@ -525,130 +700,66 @@ impl Fact {
     /// rather it is claiming that this value is the same as whatever
     /// that symbol is. (In other words, the def should be elsewhere,
     /// and we are tying ourselves to it.)
-    pub const fn value(orig_bit_width: u16, bit_width: u16, value: ir::Value) -> Self {
+    pub const fn value(bit_width: u16, value: ir::Value) -> Self {
         Fact::Range {
             bit_width,
-            min_static: 0,
-            max_static: max_value_for_width(orig_bit_width),
-            min_expr: Expr::value(value),
-            max_expr: Expr::value(value),
+            range: ValueRange::Exact(Expr::value(value)),
         }
     }
 
     /// Create a fact that specifies the value is exactly an SSA value plus some offset.
-    pub fn value_offset(
-        orig_bit_width: u16,
-        bit_width: u16,
-        value: ir::Value,
-        offset: i64,
-    ) -> Self {
-        let max_static = max_value_for_width(orig_bit_width);
-        let max_static_and_offset = if offset > 0 {
-            max_static.saturating_add(u64::try_from(offset).unwrap())
-        } else {
-            max_static
-        };
+    pub fn value_offset(bit_width: u16, value: ir::Value, offset: i64) -> Self {
         Fact::Range {
             bit_width,
-            min_static: 0,
-            max_static: max_static_and_offset,
-            min_expr: Expr::offset(&Expr::value(value), offset).unwrap(),
-            max_expr: Expr::offset(&Expr::value(value), offset).unwrap(),
+            range: ValueRange::Exact(Expr::value_offset(value, offset.into())),
         }
     }
 
     /// Create a fact that specifies the value is exactly the value of a GV.
-    pub const fn global_value(orig_bit_width: u16, bit_width: u16, gv: ir::GlobalValue) -> Self {
+    pub const fn global_value(bit_width: u16, gv: ir::GlobalValue) -> Self {
         Fact::Range {
             bit_width,
-            min_static: 0,
-            max_static: max_value_for_width(orig_bit_width),
-            min_expr: Expr::global_value(gv),
-            max_expr: Expr::global_value(gv),
+            range: ValueRange::Exact(Expr::global_value(gv)),
         }
     }
 
     /// Create a fact that specifies the value is exactly the value of a GV plus some offset.
-    pub fn global_value_offset(
-        orig_bit_width: u16,
-        bit_width: u16,
-        gv: ir::GlobalValue,
-        offset: i64,
-    ) -> Self {
-        let max_static = max_value_for_width(orig_bit_width);
-        let max_static_and_offset = if offset > 0 {
-            max_static.saturating_add(u64::try_from(offset).unwrap())
-        } else {
-            max_static
-        };
+    pub fn global_value_offset(bit_width: u16, gv: ir::GlobalValue, offset: i64) -> Self {
         Fact::Range {
             bit_width,
-            min_static: 0,
-            max_static: max_static_and_offset,
-            min_expr: Expr::offset(&Expr::global_value(gv), offset).unwrap(),
-            max_expr: Expr::offset(&Expr::global_value(gv), offset).unwrap(),
+            range: ValueRange::Exact(Expr::global_value_offset(gv, offset.into())),
         }
     }
 
     /// Create a range fact that specifies the maximum range for a
     /// value of the given bit-width.
-    pub const fn max_range_for_width(bit_width: u16) -> Self {
-        match bit_width {
-            bit_width if bit_width < 64 => Fact::Range {
-                bit_width,
-                min_static: 0,
-                max_static: (1u64 << bit_width) - 1,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::max_value(),
-            },
-            64 => Fact::Range {
-                bit_width: 64,
-                min_static: 0,
-                max_static: u64::MAX,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::max_value(),
-            },
-            _ => panic!("bit width too large!"),
-        }
+    pub fn max_range_for_width(bit_width: u16) -> Self {
+        let min = vec![];
+        let max = vec![Expr::constant(max_value_for_width(bit_width))];
+        let range = ValueRange::Inclusive { min, max };
+        Fact::Range { bit_width, range }
     }
 
     /// Create a range fact that specifies the maximum range for a
     /// value of the given bit-width, zero-extended into a wider
     /// width.
-    pub const fn max_range_for_width_extended(from_width: u16, to_width: u16) -> Self {
+    pub fn max_range_for_width_extended(from_width: u16, to_width: u16) -> Self {
         debug_assert!(from_width <= to_width);
-        match from_width {
-            from_width if from_width < 64 => Fact::Range {
-                bit_width: to_width,
-                min_static: 0,
-                max_static: (1u64 << from_width) - 1,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::max_value(),
-            },
-            64 => Fact::Range {
-                bit_width: to_width,
-                min_static: 0,
-                max_static: u64::MAX,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::max_value(),
-            },
-            _ => panic!("bit width too large!"),
+        let min = vec![];
+        let max = vec![Expr::constant(max_value_for_width(from_width))];
+        let range = ValueRange::Inclusive { min, max };
+        Fact::Range {
+            bit_width: to_width,
+            range,
         }
     }
 
     /// Try to infer a minimal fact for a value of the given IR type.
-    pub fn infer_from_type(ty: ir::Type) -> Option<&'static Self> {
-        static FACTS: [Fact; 4] = [
-            Fact::max_range_for_width(8),
-            Fact::max_range_for_width(16),
-            Fact::max_range_for_width(32),
-            Fact::max_range_for_width(64),
-        ];
+    pub fn infer_from_type(ty: ir::Type) -> Option<Self> {
         match ty {
-            I8 => Some(&FACTS[0]),
-            I16 => Some(&FACTS[1]),
-            I32 => Some(&FACTS[2]),
-            I64 => Some(&FACTS[3]),
+            I8 | I16 | I32 | I64 => {
+                Some(Self::max_range_for_width(u16::try_from(ty.bits()).unwrap()))
+            }
             _ => None,
         }
     }
@@ -664,42 +775,6 @@ impl Fact {
         }
     }
 
-    /// Is this a constant value of the given bitwidth? Return it as a
-    /// `Some(value)` if so.
-    pub fn as_const(&self, bits: u16) -> Option<u64> {
-        match self {
-            Fact::Range {
-                bit_width,
-                min_static,
-                max_static,
-                ..
-            } if *bit_width == bits && min_static == max_static => Some(*min_static),
-            _ => None,
-        }
-    }
-
-    /// Is this fact a single-value range with a symbolic Expr?
-    pub fn as_symbol(&self) -> Option<&Expr> {
-        match self {
-            Fact::Range {
-                min_expr, max_expr, ..
-            } if min_expr == max_expr => Some(min_expr),
-            _ => None,
-        }
-    }
-
-    /// Does this fact describe a value that must be within the given range?
-    pub fn is_in_static_range(&self, max: u64) -> bool {
-        match self {
-            Fact::Range {
-                max_static,
-                max_expr,
-                ..
-            } => *max_static <= max || Expr::le(max_expr, &Expr::constant(max)),
-            _ => false,
-        }
-    }
-
     /// Merge two facts. We take the *intersection*: that is, we know
     /// both facts to be true, so we can intersect ranges. (This
     /// differs from the usual static analysis approach, where we are
@@ -710,49 +785,31 @@ impl Fact {
             (
                 Fact::Range {
                     bit_width: bw_lhs,
-                    min_static: min_static_lhs,
-                    max_static: max_static_lhs,
-                    min_expr: min_expr_lhs,
-                    max_expr: max_expr_lhs,
+                    range: range1,
                 },
                 Fact::Range {
                     bit_width: bw_rhs,
-                    min_static: min_static_rhs,
-                    max_static: max_static_rhs,
-                    min_expr: min_expr_rhs,
-                    max_expr: max_expr_rhs,
+                    range: range2,
                 },
             ) if bw_lhs == bw_rhs => Fact::Range {
                 bit_width: *bw_lhs,
-                min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
-                max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
-                min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
-                max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
+                range: ValueRange::intersect(range1, range2),
             },
 
             (
                 Fact::Mem {
                     ty: ty_lhs,
-                    min_static: min_static_lhs,
-                    max_static: max_static_lhs,
-                    min_expr: min_expr_lhs,
-                    max_expr: max_expr_lhs,
+                    range: range1,
                     nullable: nullable_lhs,
                 },
                 Fact::Mem {
                     ty: ty_rhs,
-                    min_static: min_static_rhs,
-                    max_static: max_static_rhs,
-                    min_expr: min_expr_rhs,
-                    max_expr: max_expr_rhs,
+                    range: range2,
                     nullable: nullable_rhs,
                 },
             ) if ty_lhs == ty_rhs => Fact::Mem {
                 ty: *ty_lhs,
-                min_static: std::cmp::max(*min_static_lhs, *min_static_rhs),
-                max_static: std::cmp::min(*max_static_lhs, *max_static_rhs),
-                min_expr: Expr::max(min_expr_lhs, min_expr_rhs),
-                max_expr: Expr::min(max_expr_lhs, max_expr_rhs),
+                range: ValueRange::intersect(range1, range2),
                 nullable: *nullable_lhs && *nullable_rhs,
             },
 
@@ -1515,106 +1572,6 @@ impl<'a> FactContext<'a> {
             _ => fact.clone(),
         };
         trace!("apply_inequality({fact:?}, {lhs:?}, {rhs:?}, {kind:?} -> {result:?}");
-        result
-    }
-
-    /// Compute the union of two facts, if possible.
-    pub fn union(&self, lhs: &Fact, rhs: &Fact) -> Option<Fact> {
-        let result = match (lhs, rhs) {
-            (lhs, rhs) if lhs == rhs => Some(lhs.clone()),
-
-            (
-                Fact::Range {
-                    bit_width: bw_lhs,
-                    min_static: min_static_lhs,
-                    max_static: max_static_lhs,
-                    min_expr: min_expr_lhs,
-                    max_expr: max_expr_lhs,
-                },
-                Fact::Range {
-                    bit_width: bw_rhs,
-                    min_static: min_static_rhs,
-                    max_static: max_static_rhs,
-                    min_expr: min_expr_rhs,
-                    max_expr: max_expr_rhs,
-                },
-            ) if bw_lhs == bw_rhs => Some(Fact::Range {
-                bit_width: *bw_lhs,
-                min_static: std::cmp::min(*min_static_lhs, *min_static_rhs),
-                max_static: std::cmp::max(*max_static_lhs, *max_static_rhs),
-                min_expr: Expr::min(min_expr_lhs, min_expr_rhs),
-                max_expr: Expr::max(max_expr_lhs, max_expr_rhs),
-            }),
-
-            (
-                Fact::Mem {
-                    ty: ty_lhs,
-                    min_static: min_static_lhs,
-                    max_static: max_static_lhs,
-                    min_expr: min_expr_lhs,
-                    max_expr: max_expr_lhs,
-                    nullable: nullable_lhs,
-                },
-                Fact::Mem {
-                    ty: ty_rhs,
-                    min_static: min_static_rhs,
-                    max_static: max_static_rhs,
-                    min_expr: min_expr_rhs,
-                    max_expr: max_expr_rhs,
-                    nullable: nullable_rhs,
-                },
-            ) if ty_lhs == ty_rhs => Some(Fact::Mem {
-                ty: *ty_lhs,
-                min_static: std::cmp::min(*min_static_lhs, *min_static_rhs),
-                max_static: std::cmp::max(*max_static_lhs, *max_static_rhs),
-                min_expr: Expr::min(min_expr_lhs, min_expr_rhs),
-                max_expr: Expr::max(max_expr_lhs, max_expr_rhs),
-                nullable: *nullable_lhs || *nullable_rhs,
-            }),
-
-            (
-                Fact::Range {
-                    bit_width: bw_const,
-                    min_static: 0,
-                    max_static: 0,
-                    ..
-                },
-                Fact::Mem {
-                    ty,
-                    min_static,
-                    max_static,
-                    min_expr,
-                    max_expr,
-                    nullable: _,
-                },
-            )
-            | (
-                Fact::Mem {
-                    ty,
-                    min_static,
-                    max_static,
-                    min_expr,
-                    max_expr,
-                    nullable: _,
-                },
-                Fact::Range {
-                    bit_width: bw_const,
-                    min_static: 0,
-                    max_static: 0,
-                    ..
-                },
-            ) if *bw_const == self.pointer_width => Some(Fact::Mem {
-                ty: *ty,
-                min_static: *min_static,
-                max_static: *max_static,
-                min_expr: *min_expr,
-                max_expr: *max_expr,
-                nullable: true,
-            }),
-
-            _ => None,
-        };
-        trace!("union({lhs:?}, {rhs:?}) -> {result:?}");
         result
     }
 }
