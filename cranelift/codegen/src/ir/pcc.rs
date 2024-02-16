@@ -702,7 +702,10 @@ impl ValueRange {
     pub fn scale(&self, factor: u32) -> ValueRange {
         match self {
             ValueRange::Exact(equivs) => {
-                let equivs = equivs.iter().filter_map(|e| e.scale(factor)).collect();
+                let equivs = equivs
+                    .iter()
+                    .filter_map(|e| e.scale(factor))
+                    .collect::<SmallVec<[Expr; 1]>>();
                 if equivs.is_empty() {
                     let mut result = ValueRange::Inclusive {
                         min: smallvec![],
@@ -711,12 +714,83 @@ impl ValueRange {
                     result.simplify();
                     result
                 } else {
-                    Valuerange::Exact(equivs)
+                    ValueRange::Exact(equivs)
                 }
             }
             ValueRange::Inclusive { min, max } => {
                 let min = min.iter().map(|e| e.scale_downward(factor)).collect();
                 let max = max.iter().map(|e| e.scale_upward(factor)).collect();
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
+        }
+    }
+
+    pub fn offset(&self, offset: i64) -> ValueRange {
+        match self {
+            ValueRange::Exact(equivs) => {
+                let equivs = equivs
+                    .iter()
+                    .flat_map(|e| Expr::offset(e, offset))
+                    .collect();
+                let mut result = ValueRange::Exact(equivs);
+                result.simplify();
+                result
+            }
+            ValueRange::Inclusive { min, max } => {
+                let min = min.iter().flat_map(|e| Expr::offset(e, offset)).collect();
+                let max = max.iter().flat_map(|e| Expr::offset(e, offset)).collect();
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
+        }
+    }
+
+    pub fn add(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
+        match (lhs, rhs) {
+            (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
+                let equivs = e1
+                    .iter()
+                    .flat_map(|e1| e2.iter().map(|e2| Expr::add(e1, e2)))
+                    .collect();
+                let mut result = ValueRange::Exact(equivs);
+                result.simplify();
+                result
+            }
+            (ValueRange::Exact(exact), ValueRange::Inclusive { min, max })
+            | (ValueRange::Inclusive { min, max }, ValueRange::Exact(exact)) => {
+                let min = min
+                    .iter()
+                    .flat_map(|m| exact.iter().map(|e| Expr::add(m, e)))
+                    .collect();
+                let max = max
+                    .iter()
+                    .flat_map(|m| exact.iter().map(|e| Expr::add(m, e)))
+                    .collect();
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
+            (
+                ValueRange::Inclusive {
+                    min: min1,
+                    max: max1,
+                },
+                ValueRange::Inclusive {
+                    min: min2,
+                    max: max2,
+                },
+            ) => {
+                let min = min1
+                    .iter()
+                    .flat_map(|m1| min2.iter().map(|m2| Expr::add(m1, m2)))
+                    .collect();
+                let max = max1
+                    .iter()
+                    .flat_map(|m1| max2.iter().map(|m2| Expr::add(m1, m2)))
+                    .collect();
                 let mut result = ValueRange::Inclusive { min, max };
                 result.simplify();
                 result
@@ -784,6 +858,41 @@ impl Fact {
         }
     }
 
+    /// Create a fact that expresses a given static range, from zero
+    /// up to `max` (inclusive).
+    pub fn static_value_range(bit_width: u16, max: u64) -> Self {
+        Fact::Range {
+            bit_width,
+            range: ValueRange::Inclusive {
+                min: smallvec![],
+                max: smallvec![Expr::constant(max)],
+            },
+        }
+    }
+
+    /// Create a fact that expresses a given static range, from `min`
+    /// (inclusive) up to `max` (inclusive).
+    pub fn static_value_two_ended_range(bit_width: u16, min: u64, max: u64) -> Self {
+        Fact::Range {
+            bit_width,
+            range: ValueRange::Inclusive {
+                min: smallvec![Expr::constant(min)],
+                max: smallvec![Expr::constant(max)],
+            },
+        }
+    }
+
+    /// Create a fact that expresses a given dynamic range, from zero up to `expr`.
+    pub fn dynamic_value_range(bit_width: u16, max: Expr) -> Self {
+        Fact::Range {
+            bit_width,
+            range: ValueRange::Inclusive {
+                min: smallvec![],
+                max: smallvec![max],
+            },
+        }
+    }
+
     /// Create a range fact that specifies the maximum range for a
     /// value of the given bit-width.
     pub fn max_range_for_width(bit_width: u16) -> Self {
@@ -791,6 +900,33 @@ impl Fact {
         let max = smallvec![Expr::constant(max_value_for_width(bit_width))];
         let range = ValueRange::Inclusive { min, max };
         Fact::Range { bit_width, range }
+    }
+
+    pub fn memory_base(ty: ir::MemoryType) -> Self {
+        Fact::Mem {
+            ty,
+            range: ValueRange::Exact(smallvec![Expr::constant(0)]),
+            nullable: false,
+        }
+    }
+
+    pub fn memory_with_range(
+        ty: ir::MemoryType,
+        offset_fact: Fact,
+        nullable: bool,
+    ) -> Option<Self> {
+        let Fact::Range {
+            bit_width: _,
+            range,
+        } = offset_fact
+        else {
+            return None;
+        };
+        Some(Fact::Mem {
+            ty,
+            range,
+            nullable,
+        })
     }
 
     /// Create a range fact that specifies the maximum range for a

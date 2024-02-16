@@ -44,13 +44,7 @@ pub(crate) fn clamp_range(
     Ok(fact
         .and_then(|f| ctx.uextend(&f, from_bits, to_bits))
         .unwrap_or_else(|| {
-            let result = Fact::Range {
-                bit_width: to_bits,
-                min_static: 0,
-                max_static: max,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::constant(max),
-            };
+            let result = Fact::max_range_for_width(to_bits);
             trace!(" -> clamping to {:?}", result);
             result
         }))

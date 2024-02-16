@@ -228,14 +228,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
                 });
 
                 self.pcc_vmctx_memtype = Some(vmctx_memtype);
-                func.global_value_facts[vmctx] = Some(Fact::Mem {
-                    ty: vmctx_memtype,
-                    min_static: 0,
-                    max_static: 0,
-                    min_expr: Expr::constant(0),
-                    max_expr: Expr::constant(0),
-                    nullable: false,
-                });
+                func.global_value_facts[vmctx] = Some(Fact::memory_base(vmctx_memtype));
             }
 
             self.vmctx = Some(vmctx);
@@ -1874,7 +1867,6 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                         // This fact applies to the length.
                         let length_fact = ir::Fact::global_value(
                             u16::try_from(self.isa.pointer_type().bits()).unwrap(),
-                            u16::try_from(self.isa.pointer_type().bits()).unwrap(),
                             heap_bound,
                         );
                         // Create a field in the vmctx for the base pointer.
@@ -1942,14 +1934,7 @@ impl<'module_environment> cranelift_wasm::FuncEnvironment for FuncEnvironment<'m
                                 .expect("Memory plan has overflowing size plus guard"),
                         });
                         // This fact applies to any pointer to the start of the memory.
-                        let base_fact = Fact::Mem {
-                            ty: data_mt,
-                            min_static: 0,
-                            max_static: 0,
-                            min_expr: Expr::constant(0),
-                            max_expr: Expr::constant(0),
-                            nullable: false,
-                        };
+                        let base_fact = Fact::memory_base(data_mt);
                         // Create a field in the vmctx for the base pointer.
                         match &mut func.memory_types[ptr_memtype] {
                             ir::MemoryTypeData::Struct { size, fields } => {

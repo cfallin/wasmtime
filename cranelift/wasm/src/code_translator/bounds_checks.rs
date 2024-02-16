@@ -556,6 +556,7 @@ fn explicit_check_oob_condition_and_compute_addr(
     }
 
     let mut addr = compute_addr(pos, heap, addr_ty, index, offset, pcc);
+    let addr_bits = u16::try_from(addr_ty.bits()).unwrap();
 
     if spectre_mitigations_enabled {
         let null = pos.ins().iconst(addr_ty, 0);
@@ -567,33 +568,24 @@ fn explicit_check_oob_condition_and_compute_addr(
                 pos.func.dfg.facts[null] =
                     Some(Fact::constant(u16::try_from(addr_ty.bits()).unwrap(), 0));
                 let max_static = size.checked_sub(u64::from(access_size)).unwrap();
-                pos.func.dfg.facts[addr] = Some(Fact::Mem {
+                pos.func.dfg.facts[addr] = Some(Fact::memory_with_range(
                     ty,
-                    min_static: 0,
-                    max_static,
-                    min_expr: Expr::constant(0),
-                    max_expr: Expr::constant(max_static),
-                    nullable: true,
-                });
+                    Fact::static_value_range(addr_bits, max_static),
+                    true,
+                ));
             }
             Some(AddrPcc::Dynamic(ty, gv)) => {
                 pos.func.dfg.facts[null] =
                     Some(Fact::constant(u16::try_from(addr_ty.bits()).unwrap(), 0));
-                pos.func.dfg.facts[addr] = Some(Fact::Mem {
+                let bound = Expr::global_value_offset(
+                    gv,
+                    i128::from(heap.offset_guard_size) - i128::from(access_size),
+                );
+                pos.func.dfg.facts[addr] = Some(Fact::memory_with_range(
                     ty,
-                    min_static: 0,
-                    max_static: u64::MAX,
-                    min_expr: Expr::constant(0),
-                    max_expr: Expr::offset(
-                        &Expr::global_value(gv),
-                        i64::try_from(heap.offset_guard_size)
-                            .unwrap()
-                            .checked_sub(i64::from(access_size))
-                            .unwrap(),
-                    )
-                    .unwrap(),
-                    nullable: true,
-                });
+                    Fact::dynamic_value_range(addr_bits, bound),
+                    true,
+                ));
             }
         }
     }
@@ -617,19 +609,13 @@ fn compute_addr(
 ) -> ir::Value {
     debug_assert_eq!(pos.func.dfg.value_type(index), addr_ty);
 
+    let addr_bits = u16::try_from(addr_ty.bits()).unwrap();
     let heap_base = pos.ins().global_value(addr_ty, heap.base);
 
     match pcc {
         None => {}
         Some(AddrPcc::Static32(ty, _size)) => {
-            pos.func.dfg.facts[heap_base] = Some(Fact::Mem {
-                ty,
-                min_static: 0,
-                max_static: 0,
-                min_expr: Expr::constant(0),
-                max_expr: Expr::constant(0),
-                nullable: false,
-            });
+            pos.func.dfg.facts[heap_base] = Some(Fact::memory_base(ty));
         }
         Some(AddrPcc::Dynamic(ty, _limit)) => {
             pos.func.dfg.facts[heap_base] = Some(Fact::dynamic_base_ptr(ty));
@@ -646,23 +632,21 @@ fn compute_addr(
                 .and_then(|f| f.as_symbol())
                 .cloned()
             {
-                pos.func.dfg.facts[base_and_index] = Some(Fact::Mem {
-                    ty,
-                    min_static: 0,
-                    max_static: u64::MAX,
-                    min_expr: idx.clone(),
-                    max_expr: idx,
-                    nullable: false,
-                });
+                pos.func.dfg.facts[base_and_index] = Some(
+                    Fact::memory_with_range(
+                        ty,
+                        Fact::dynamic_value_range(addr_bits, Expr::value(idx)),
+                    )
+                    .unwrap(),
+                );
             } else {
-                pos.func.dfg.facts[base_and_index] = Some(Fact::Mem {
-                    ty,
-                    min_static: 0,
-                    max_static: u64::from(u32::MAX),
-                    min_expr: Expr::constant(0),
-                    max_expr: Expr::constant(u64::from(u32::MAX)),
-                    nullable: false,
-                });
+                pos.func.dfg.facts[base_and_index] = Some(
+                    Fact::memory_with_range(
+                        ty,
+                        Fact::static_value_range(addr_bits, u64::from(u32::MAX)),
+                    )
+                    .unwrap(),
+                );
             }
         }
     }
@@ -692,31 +676,25 @@ fn compute_addr(
                     .as_ref()
                     .and_then(|f| f.as_symbol())
                 {
-                    pos.func.dfg.facts[result] = Some(Fact::Mem {
+                    pos.func.dfg.facts[result] = Some(Fact::memory_with_range(
                         ty,
-                        min_static: 0,
-                        max_static: u64::MAX,
-                        min_expr: idx.clone(),
-                        // Safety: adding an offset to an expression with
-                        // zero offset -- add cannot wrap, so `unwrap()`
-                        // cannot fail.
-                        max_expr: Expr::offset(idx, i64::from(offset)).unwrap(),
-                        nullable: false,
-                    });
+                        Fact::dynamic_value_range(
+                            addr_bits,
+                            Expr::offset(idx, i64::from(offset)).unwrap(),
+                        )
+                        .unwrap(),
+                        false,
+                    ));
                 } else {
                     let max_static = u64::from(u32::MAX) + u64::from(offset);
-                    pos.func.dfg.facts[result] = Some(Fact::Mem {
-                        ty,
-                        min_static: u64::from(offset),
-                        // Safety: can't overflow -- two u32s summed in a
-                        // 64-bit add. TODO: when memory64 is supported here,
-                        // `u32::MAX` is no longer true, and we'll need to
-                        // handle overflow here.
-                        max_static,
-                        min_expr: Expr::constant(0),
-                        max_expr: Expr::constant(max_static),
-                        nullable: false,
-                    });
+                    pos.func.dfg.facts[result] = Some(
+                        Fact::memory_with_range(
+                            ty,
+                            Fact::static_value_range(addr_bits, max_static),
+                            false,
+                        )
+                        .unwrap(),
+                    );
                 }
             }
         }
