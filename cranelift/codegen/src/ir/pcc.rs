@@ -301,6 +301,7 @@ impl Expr {
     /// Is one expression definitely less than or equal to another?
     /// (We can't always know; in such cases, returns `false`.)
     fn le(lhs: &Expr, rhs: &Expr) -> bool {
+        trace!("Expr::le: {lhs:?} {rhs:?}");
         if rhs.base == BaseExpr::Max {
             true
         } else {
@@ -442,20 +443,26 @@ struct DisplayExprs<'a>(&'a [Expr]);
 
 impl<'a> fmt::Display for DisplayExprs<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{{")?;
+        match self.0.len() {
+            0 => write!(f, "{{}}"),
+            1 => write!(f, "{}", self.0[0]),
+            _ => {
+                write!(f, "{{")?;
 
-        let mut first = true;
-        for expr in self.0 {
-            if first {
-                write!(f, " {expr}")?;
-                first = false;
-            } else {
-                write!(f, ", {expr}")?;
+                let mut first = true;
+                for expr in self.0 {
+                    if first {
+                        write!(f, " {expr}")?;
+                        first = false;
+                    } else {
+                        write!(f, ", {expr}")?;
+                    }
+                }
+
+                write!(f, " }}")?;
+                Ok(())
             }
         }
-
-        write!(f, "}}")?;
-        Ok(())
     }
 }
 
@@ -504,6 +511,7 @@ impl ValueRange {
 
     /// Is this ValueRange definitely less than or equal to the given expression?
     pub fn le_expr(&self, expr: &Expr) -> bool {
+        trace!("ValueRange::le_expr: {self:?} {expr:}");
         match self {
             ValueRange::Exact(exact) => exact.iter().any(|equiv| Expr::le(equiv, expr)),
             // The range is <= the expr if *any* of its upper bounds
@@ -518,6 +526,7 @@ impl ValueRange {
 
     /// Is the expression definitely within the ValueRange?
     pub fn contains_expr(&self, expr: &Expr) -> bool {
+        trace!("ValueRange::contains_expr: {self:?} {expr:?}");
         match self {
             ValueRange::Exact(exact) => exact.iter().any(|equiv| equiv == expr),
             ValueRange::Inclusive { min, max } => {
@@ -531,6 +540,7 @@ impl ValueRange {
     /// bound greater than another lower bound, or any upper bound
     /// less than another upper bound, can be removed.
     pub fn simplify(&mut self) {
+        trace!("simplify: {self:?}");
         match self {
             ValueRange::Exact(equivs) => {
                 equivs.sort();
@@ -575,11 +585,15 @@ impl ValueRange {
                 }
             }
         }
+        trace!("simplify: produced {self:?}");
     }
 
     /// Does one ValueRange contain another? Assumes both sides are already simplified.
     pub fn contains(&self, other: &ValueRange) -> bool {
+        trace!("ValueRange::contains: {self:?} {other:?}");
+
         match (self, other) {
+            (a, b) if a == b => true,
             (ValueRange::Exact(expr1), ValueRange::Exact(expr2)) => {
                 expr1.iter().any(|e| expr2.contains(e))
             }
@@ -1185,7 +1199,21 @@ impl<'a> FactContext<'a> {
                     bit_width: bw_rhs,
                     range: range_rhs,
                 },
-            ) if bw_lhs == bw_rhs => range_lhs.contains(range_rhs),
+            ) if bw_lhs == bw_rhs => range_rhs.contains(range_lhs),
+
+            (
+                Fact::Range {
+                    bit_width: bw_lhs,
+                    range: range_lhs,
+                },
+                Fact::Range {
+                    bit_width: bw_rhs,
+                    range: range_rhs,
+                },
+            ) if bw_lhs > bw_rhs => {
+                range_rhs.le_expr(&Expr::constant(max_value_for_width(*bw_lhs)))
+                    && range_rhs.contains(range_lhs)
+            }
 
             (
                 Fact::Mem {
@@ -1200,7 +1228,7 @@ impl<'a> FactContext<'a> {
                 },
             ) => {
                 ty_lhs == ty_rhs
-                    && range_lhs.contains(range_rhs)
+                    && range_rhs.contains(range_lhs)
                     && (*nullable_lhs || !*nullable_rhs)
             }
 
