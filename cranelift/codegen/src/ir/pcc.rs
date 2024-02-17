@@ -587,9 +587,13 @@ impl ValueRange {
                 // Canonicalize to allow fast-path equality checks to more likely succeed.
                 max.sort();
 
-                // If there is some element in common in `min` and `max`, then we can narrow to `Exact`.
-                if let Some(exact) = min.iter().find(|&e| max.contains(e)) {
-                    *self = ValueRange::Exact(smallvec![exact.clone()]);
+                // If `min` and `max` are exactly one element each,
+                // and the same element, then we can narrow. Note that
+                // we don't sipmlify e.g. `range(32, {v1}, {v1, v2})`
+                // to `range(32, v1)` because this loses information
+                // (namely, the upper bound `v2`).
+                if min.len() == 1 && max.len() == 1 && min[0] == max[0] {
+                    *self = ValueRange::Exact(smallvec![min[0].clone()]);
                 }
             }
         }
@@ -1169,6 +1173,31 @@ impl Fact {
         trace!("offset: {self:?} + {offset} in width {width} -> {result:?}");
         result
     }
+
+    /// Get the range of a fact: either the actual value range, or the
+    /// range of offsets into a memory type.
+    pub fn range(&self) -> Option<&ValueRange> {
+        match self {
+            Fact::Range { range, .. } | Fact::Mem { range, .. } => Some(range),
+            _ => None,
+        }
+    }
+
+    /// Update the range in either a Range or Mem fact.
+    pub fn with_range(&self, range: ValueRange) -> Fact {
+        match self {
+            Fact::Range { bit_width, .. } => Fact::Range {
+                bit_width: *bit_width,
+                range,
+            },
+            Fact::Mem { ty, nullable, .. } => Fact::Mem {
+                ty: *ty,
+                nullable: *nullable,
+                range,
+            },
+            f => f.clone(),
+        }
+    }
 }
 
 macro_rules! ensure {
@@ -1577,37 +1606,76 @@ impl<'a> FactContext<'a> {
         rhs: &Fact,
         kind: InequalityKind,
     ) -> Fact {
+        trace!("apply_inequality: fact {fact:?} lhs {lhs:?} rhs {rhs:?} kind {kind:?}");
         // If `rhs` is an exact value, and we have an expression for
         // it, and if `fact` is a range, look for that expression in
         // the upper bounds of `fact`; if present (or offset), add the
         // lower and upper bounds of `lhs` (properly offset if needed)
         // to `fact`'s upper bounds.
-        let result = match (fact, rhs) {
+        let result = match (fact.range(), lhs, rhs) {
             (
+                Some(range),
                 Fact::Range {
-                    bit_width: bw_fact,
-                    range: ValueRange::Inclusive { min, max },
+                    range: ValueRange::Exact(equiv_lhs),
+                    ..
                 },
                 Fact::Range {
-                    bit_width: bw_rhs,
-                    range: ValueRange::Exact(equiv),
+                    range: ValueRange::Exact(equiv_rhs),
+                    ..
                 },
-            ) if bw_fact == bw_rhs => {
-                let offset = max
-                    .iter()
-                    .flat_map(|m| equiv.iter().flat_map(|e| Expr::difference(m, e)))
-                    .max();
-                if let Some(offset) = offset {
-                    let new_upper_bounds = equiv.iter().flat_map(|e| Expr::offset(e, offset));
-                    let max = max.iter().cloned().chain(new_upper_bounds).collect();
-                    let min = min.clone();
-                    Fact::Range {
-                        bit_width: *bw_fact,
-                        range: ValueRange::Inclusive { min, max },
+            ) => {
+                trace!(" -> range {range:?} LHS equiv {equiv_lhs:?} RHS equiv {equiv_rhs:?}");
+                let new_range = match range {
+                    ValueRange::Inclusive { min, max } => {
+                        let offset = max
+                            .iter()
+                            .flat_map(|m| equiv_rhs.iter().flat_map(|e| Expr::difference(m, e)))
+                            .max();
+                        trace!(" -> offset {offset:?}");
+                        if let Some(offset) = offset {
+                            let offset = match kind {
+                                InequalityKind::Loose => offset,
+                                InequalityKind::Strict => offset - 1,
+                            };
+                            let new_upper_bounds =
+                                equiv_lhs.iter().flat_map(|e| Expr::offset(e, offset));
+                            let max = max.iter().cloned().chain(new_upper_bounds).collect();
+                            let min = min.clone();
+                            ValueRange::Inclusive { min, max }
+                        } else {
+                            range.clone()
+                        }
                     }
-                } else {
-                    fact.clone()
-                }
+                    ValueRange::Exact(equivs) => {
+                        let offset = equivs
+                            .iter()
+                            .flat_map(|m| equiv_rhs.iter().flat_map(|e| Expr::difference(m, e)))
+                            .max();
+                        trace!(" -> offset {offset:?}");
+                        if let Some(offset) = offset {
+                            let offset = match kind {
+                                InequalityKind::Loose => offset,
+                                InequalityKind::Strict => offset - 1,
+                            };
+                            let new_upper_bounds = equiv_lhs
+                                .iter()
+                                .flat_map(|e| Expr::offset(e, offset))
+                                .chain(equivs.iter().cloned())
+                                .collect();
+                            trace!(" -> new_upper_bounds {new_upper_bounds:?}");
+                            ValueRange::Inclusive {
+                                min: equivs.clone(),
+                                max: new_upper_bounds,
+                            }
+                        } else {
+                            ValueRange::Inclusive {
+                                min: smallvec![],
+                                max: smallvec![],
+                            }
+                        }
+                    }
+                };
+                fact.with_range(new_range)
             }
             _ => fact.clone(),
         };
