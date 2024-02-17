@@ -47,6 +47,10 @@
 //!
 //! TODO:
 //!
+//! Correctness:
+//! - Underflow/overflow: clear min and max respectively on all adds
+//!   and subs
+//!
 //! Deployment:
 //! - Add to fuzzing
 //! - Turn on during wasm spec-tests
@@ -309,12 +313,15 @@ impl Expr {
     /// Is one expression definitely less than or equal to another?
     /// (We can't always know; in such cases, returns `false`.)
     fn le(lhs: &Expr, rhs: &Expr) -> bool {
-        trace!("Expr::le: {lhs:?} {rhs:?}");
-        if rhs.base == BaseExpr::Max {
+        let result = if rhs.base == BaseExpr::Max {
+            true
+        } else if lhs == &Expr::constant(0) {
             true
         } else {
             BaseExpr::le(&lhs.base, &rhs.base) && lhs.offset <= rhs.offset
-        }
+        };
+        trace!("Expr::le: {lhs:?} {rhs:?} -> {result}");
+        result
     }
 
     /// Add one expression to another.
@@ -519,8 +526,7 @@ impl ValueRange {
 
     /// Is this ValueRange definitely less than or equal to the given expression?
     pub fn le_expr(&self, expr: &Expr) -> bool {
-        trace!("ValueRange::le_expr: {self:?} {expr:}");
-        match self {
+        let result = match self {
             ValueRange::Exact(exact) => exact.iter().any(|equiv| Expr::le(equiv, expr)),
             // The range is <= the expr if *any* of its upper bounds
             // are <= the expr, because each upper bound constrains
@@ -529,19 +535,22 @@ impl ValueRange {
             ValueRange::Inclusive { max, .. } => {
                 max.iter().any(|upper_bound| Expr::le(upper_bound, expr))
             }
-        }
+        };
+        trace!("ValueRange::le_expr: {self:?} {expr:?} -> {result}");
+        result
     }
 
     /// Is the expression definitely within the ValueRange?
     pub fn contains_expr(&self, expr: &Expr) -> bool {
-        trace!("ValueRange::contains_expr: {self:?} {expr:?}");
-        match self {
+        let result = match self {
             ValueRange::Exact(exact) => exact.iter().any(|equiv| equiv == expr),
             ValueRange::Inclusive { min, max } => {
                 min.iter().all(|lower_bound| Expr::le(lower_bound, expr))
                     && max.iter().all(|upper_bound| Expr::le(expr, upper_bound))
             }
-        }
+        };
+        trace!("ValueRange::contains_expr: {self:?} {expr:?} -> {result}");
+        result
     }
 
     /// Simplify a ValueRange by removing redundant bounds. Any lower
@@ -602,9 +611,7 @@ impl ValueRange {
 
     /// Does one ValueRange contain another? Assumes both sides are already simplified.
     pub fn contains(&self, other: &ValueRange) -> bool {
-        trace!("ValueRange::contains: {self:?} {other:?}");
-
-        match (self, other) {
+        let result = match (self, other) {
             (a, b) if a == b => true,
             (ValueRange::Exact(expr1), ValueRange::Exact(expr2)) => {
                 expr1.iter().any(|e| expr2.contains(e))
@@ -635,7 +642,9 @@ impl ValueRange {
                         .any(|upper_bound2| range1.contains_expr(upper_bound2))
                         || range1.contains_expr(&Expr::max_value()))
             }
-        }
+        };
+        trace!("ValueRange::contains: {self:?} {other:?} -> {result}");
+        result
     }
 
     /// Intersect two ValueRanges.
