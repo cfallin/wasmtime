@@ -77,7 +77,6 @@ use crate::ir::types::*;
 use crate::isa::TargetIsa;
 use crate::machinst::{BlockIndex, LowerBackend, VCode};
 use crate::trace;
-use alloc::vec::Vec;
 use regalloc2::Function as _;
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
@@ -1140,6 +1139,14 @@ impl Fact {
                 range: ValueRange::Exact(equiv),
                 ..
             } => equiv.first(),
+            _ => None,
+        }
+    }
+
+    /// Does this fact describe a constant?
+    pub fn as_const(&self) -> Option<i128> {
+        match self {
+            Fact::Range { range, .. } => range.as_const(),
             _ => None,
         }
     }
