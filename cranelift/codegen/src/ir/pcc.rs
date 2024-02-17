@@ -258,6 +258,14 @@ impl Expr {
         }
     }
 
+    /// Constant value, full 128-bit width.
+    pub const fn constant128(value: i128) -> Self {
+        Expr {
+            base: BaseExpr::None,
+            offset: value,
+        }
+    }
+
     /// Maximum (saturated) value.
     pub const fn max_value() -> Self {
         Expr {
@@ -847,6 +855,23 @@ impl ValueRange {
             }
         }
     }
+
+    /// Clamp a ValueRange given a bit-width for the result.
+    fn clamp(self, width: u16) -> ValueRange {
+        if self.contains_expr(&Expr::constant128(-1))
+            || self.contains_expr(&Expr::constant128(
+                i128::from(max_value_for_width(width)) + 1,
+            ))
+        {
+            // Underflow or overflow is possible!
+            ValueRange::Inclusive {
+                min: smallvec![],
+                max: smallvec![Expr::constant(max_value_for_width(width))],
+            }
+        } else {
+            self
+        }
+    }
 }
 
 impl Fact {
@@ -1128,7 +1153,7 @@ impl Fact {
         let result = match self {
             Fact::Range { bit_width, range } if *bit_width == width => Some(Fact::Range {
                 bit_width: *bit_width,
-                range: range.offset(offset.into()),
+                range: range.offset(offset.into()).clamp(width),
             }),
             Fact::Mem {
                 ty,
@@ -1136,7 +1161,7 @@ impl Fact {
                 nullable: false,
             } => Some(Fact::Mem {
                 ty: *ty,
-                range: range.offset(offset.into()),
+                range: range.offset(offset.into()).clamp(width),
                 nullable: false,
             }),
             _ => None,
@@ -1294,7 +1319,7 @@ impl<'a> FactContext<'a> {
                 },
             ) if bw_lhs == bw_rhs && add_width >= *bw_lhs => Some(Fact::Range {
                 bit_width: *bw_lhs,
-                range: ValueRange::add(range_lhs, range_rhs),
+                range: ValueRange::add(range_lhs, range_rhs).clamp(add_width),
             }),
 
             (
@@ -1326,7 +1351,7 @@ impl<'a> FactContext<'a> {
             {
                 Some(Fact::Mem {
                     ty: *ty,
-                    range: ValueRange::add(range_lhs, range_rhs),
+                    range: ValueRange::add(range_lhs, range_rhs).clamp(add_width),
                     nullable: *nullable,
                 })
             }
@@ -1415,7 +1440,7 @@ impl<'a> FactContext<'a> {
             x if factor == 1 => Some(x.clone()),
             Fact::Range { bit_width, range } if *bit_width == width => Some(Fact::Range {
                 bit_width: *bit_width,
-                range: range.scale(factor),
+                range: range.scale(factor).clamp(width),
             }),
             _ => None,
         };
