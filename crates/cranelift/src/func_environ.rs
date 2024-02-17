@@ -3,7 +3,7 @@ use cranelift_codegen::cursor::FuncCursor;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::condcodes::*;
 use cranelift_codegen::ir::immediates::{Imm64, Offset32, Uimm64};
-use cranelift_codegen::ir::pcc::{Expr, Fact};
+use cranelift_codegen::ir::pcc::Fact;
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{
     AbiParam, ArgumentPurpose, Function, InstBuilder, MemFlags, Signature, UserFuncName, Value,

@@ -30,11 +30,6 @@ pub(crate) fn clamp_range(
     from_bits: u16,
     fact: Option<Fact>,
 ) -> PccResult<Fact> {
-    let max = if from_bits == 64 {
-        u64::MAX
-    } else {
-        (1u64 << from_bits) - 1
-    };
     trace!(
         "clamp_range: fact {:?} from {} to {}",
         fact,

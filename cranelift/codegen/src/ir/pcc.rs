@@ -699,6 +699,87 @@ impl ValueRange {
         }
     }
 
+    /// Take the union of two ranges.
+    pub fn union(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
+        match (lhs, rhs) {
+            (ValueRange::Exact(e1), ValueRange::Exact(e2)) if lhs.contains(rhs) => {
+                let combined = e1.iter().cloned().chain(e2.iter().cloned()).collect();
+                let mut result = ValueRange::Exact(combined);
+                result.simplify();
+                result
+            }
+            (ValueRange::Exact(_), ValueRange::Exact(_)) => {
+                // TODO: we could check whether one Exact is less than
+                // the other, and if so, create a range from one to
+                // the other. For now, let's just return a range that
+                // covers everything.
+                ValueRange::Inclusive {
+                    min: smallvec![],
+                    max: smallvec![],
+                }
+            }
+            (e @ ValueRange::Exact(equiv), r @ ValueRange::Inclusive { min, max })
+            | (r @ ValueRange::Inclusive { min, max }, e @ ValueRange::Exact(equiv)) => {
+                if r.contains(e) {
+                    r.clone()
+                } else {
+                    let min = min
+                        .iter()
+                        .filter(|&e| equiv.iter().any(|eq| Expr::le(e, eq)))
+                        .cloned()
+                        .collect();
+                    let max = max
+                        .iter()
+                        .filter(|&e| equiv.iter().any(|eq| Expr::le(eq, e)))
+                        .cloned()
+                        .collect();
+                    // No need to simplify -- we are only removing
+                    // constraints, so no bounds will be newly
+                    // subsumed.
+                    ValueRange::Inclusive { min, max }
+                }
+            }
+            (
+                ValueRange::Inclusive {
+                    min: min1,
+                    max: max1,
+                },
+                ValueRange::Inclusive {
+                    min: min2,
+                    max: max2,
+                },
+            ) => {
+                // Take lower bounds from LHS that are less than all
+                // lower bounds on the RHS; and likewise the other
+                // way; and likewise for upper bounds.
+                let min = min1
+                    .iter()
+                    .filter(|&e| min2.iter().all(|e2| Expr::le(e, e2)))
+                    .cloned()
+                    .chain(
+                        min2.iter()
+                            .filter(|e| min1.iter().all(|e2| Expr::le(e, e2)))
+                            .cloned(),
+                    )
+                    .collect();
+                let max = max1
+                    .iter()
+                    .filter(|&e| max2.iter().all(|e2| Expr::le(e2, e)))
+                    .cloned()
+                    .chain(
+                        max2.iter()
+                            .filter(|e| max1.iter().all(|e2| Expr::le(e2, e)))
+                            .cloned(),
+                    )
+                    .collect();
+                let mut result = ValueRange::Inclusive { min, max };
+                result.simplify();
+                result
+            }
+        }
+    }
+
+    /// Scale a range by a factor.
     pub fn scale(&self, factor: u32) -> ValueRange {
         match self {
             ValueRange::Exact(equivs) => {
@@ -727,6 +808,7 @@ impl ValueRange {
         }
     }
 
+    /// Add an offset to the lower and upper bounds of a range.
     pub fn offset(&self, offset: i64) -> ValueRange {
         match self {
             ValueRange::Exact(equivs) => {
@@ -748,6 +830,7 @@ impl ValueRange {
         }
     }
 
+    /// Find the range of the sum of two values described by ranges.
     pub fn add(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
         match (lhs, rhs) {
             (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
@@ -801,7 +884,7 @@ impl ValueRange {
 
 impl Fact {
     /// Create a range fact that specifies a single known constant value.
-    pub const fn constant(bit_width: u16, value: u64) -> Self {
+    pub fn constant(bit_width: u16, value: u64) -> Self {
         debug_assert!(value <= max_value_for_width(bit_width));
         // `min` and `max` are inclusive, so this specifies a range of
         // exactly one value.
@@ -812,7 +895,7 @@ impl Fact {
     }
 
     /// Create a range fact that points to the base of a memory type.
-    pub const fn dynamic_base_ptr(ty: ir::MemoryType) -> Self {
+    pub fn dynamic_base_ptr(ty: ir::MemoryType) -> Self {
         Fact::Mem {
             ty,
             range: ValueRange::Exact(smallvec![Expr::constant(0)]),
@@ -827,7 +910,7 @@ impl Fact {
     /// rather it is claiming that this value is the same as whatever
     /// that symbol is. (In other words, the def should be elsewhere,
     /// and we are tying ourselves to it.)
-    pub const fn value(bit_width: u16, value: ir::Value) -> Self {
+    pub fn value(bit_width: u16, value: ir::Value) -> Self {
         Fact::Range {
             bit_width,
             range: ValueRange::Exact(smallvec![Expr::value(value)]),
@@ -843,7 +926,7 @@ impl Fact {
     }
 
     /// Create a fact that specifies the value is exactly the value of a GV.
-    pub const fn global_value(bit_width: u16, gv: ir::GlobalValue) -> Self {
+    pub fn global_value(bit_width: u16, gv: ir::GlobalValue) -> Self {
         Fact::Range {
             bit_width,
             range: ValueRange::Exact(smallvec![Expr::global_value(gv)]),
@@ -902,6 +985,8 @@ impl Fact {
         Fact::Range { bit_width, range }
     }
 
+    /// Create a fact that describes the base pointer for a memory
+    /// type.
     pub fn memory_base(ty: ir::MemoryType) -> Self {
         Fact::Mem {
             ty,
@@ -910,6 +995,8 @@ impl Fact {
         }
     }
 
+    /// Create a fact that describes a pointer to the given memory
+    /// type with an offset described by the given fact.
     pub fn memory_with_range(
         ty: ir::MemoryType,
         offset_fact: Fact,
@@ -1004,6 +1091,83 @@ impl Fact {
 
             _ => Fact::Conflict,
         }
+    }
+
+    /// Take the union of two facts: produce a fact that applies to a
+    /// value that has either one fact or another (e.g., at a
+    /// control-flow merge point or a conditional-select operator).
+    pub fn union(a: &Fact, b: &Fact) -> Fact {
+        match (a, b) {
+            (
+                Fact::Range {
+                    bit_width: bw_lhs,
+                    range: range1,
+                },
+                Fact::Range {
+                    bit_width: bw_rhs,
+                    range: range2,
+                },
+            ) if bw_lhs == bw_rhs => Fact::Range {
+                bit_width: *bw_lhs,
+                range: ValueRange::union(range1, range2),
+            },
+
+            (
+                Fact::Mem {
+                    ty: ty_lhs,
+                    range: range1,
+                    nullable: nullable_lhs,
+                },
+                Fact::Mem {
+                    ty: ty_rhs,
+                    range: range2,
+                    nullable: nullable_rhs,
+                },
+            ) if ty_lhs == ty_rhs => Fact::Mem {
+                ty: *ty_lhs,
+                range: ValueRange::union(range1, range2),
+                nullable: *nullable_lhs || *nullable_rhs,
+            },
+
+            _ => Fact::Conflict,
+        }
+    }
+
+    /// Does this fact describe an exact expression?
+    pub fn as_expr(&self) -> Option<&Expr> {
+        match self {
+            Fact::Range {
+                range: ValueRange::Exact(equiv),
+                ..
+            } => equiv.first(),
+            _ => None,
+        }
+    }
+
+    /// Offsets a value with a fact by a known amount.
+    pub fn offset(&self, width: u16, offset: i64) -> Option<Fact> {
+        if offset == 0 {
+            return Some(self.clone());
+        }
+
+        let result = match self {
+            Fact::Range { bit_width, range } if *bit_width == width => Some(Fact::Range {
+                bit_width: *bit_width,
+                range: range.offset(offset.into()),
+            }),
+            Fact::Mem {
+                ty,
+                range,
+                nullable: false,
+            } => Some(Fact::Mem {
+                ty: *ty,
+                range: range.offset(offset.into()),
+                nullable: false,
+            }),
+            _ => None,
+        };
+        trace!("offset: {self:?} + {offset} in width {width} -> {result:?}");
+        result
     }
 }
 
@@ -1266,32 +1430,6 @@ impl<'a> FactContext<'a> {
         }
         let factor: u32 = 1 << amount;
         self.scale(fact, width, factor)
-    }
-
-    /// Offsets a value with a fact by a known amount.
-    pub fn offset(&self, fact: &Fact, width: u16, offset: i64) -> Option<Fact> {
-        if offset == 0 {
-            return Some(fact.clone());
-        }
-
-        let result = match fact {
-            Fact::Range { bit_width, range } if *bit_width == width => Some(Fact::Range {
-                bit_width: *bit_width,
-                range: range.offset(offset.into()),
-            }),
-            Fact::Mem {
-                ty,
-                range,
-                nullable: false,
-            } => Some(Fact::Mem {
-                ty: *ty,
-                range: range.offset(offset.into()),
-                nullable: false,
-            }),
-            _ => None,
-        };
-        trace!("offset: {fact:?} + {offset} in width {width} -> {result:?}");
-        result
     }
 
     /// Check that accessing memory via a pointer with this fact, with

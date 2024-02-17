@@ -346,9 +346,9 @@ pub(crate) fn check(
                     _ => unreachable!(),
                 };
                 let rm = ctx.apply_inequality(&rm, &cmp_rhs, &cmp_lhs, rhs_kind);
-                let union = ctx.union(&rn, &rm);
+                let union = Fact::union(&rn, &rm);
                 // Union the two facts.
-                clamp_range(ctx, 64, 64, union)
+                clamp_range(ctx, 64, 64, Some(union))
             })
         }
 

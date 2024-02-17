@@ -50,7 +50,6 @@ where
     Env: FuncEnvironment + ?Sized,
 {
     let pointer_bit_width = u16::try_from(env.pointer_type().bits()).unwrap();
-    let index_bit_width = u16::try_from(heap.index_type.bits()).unwrap();
     let orig_index = index;
     let index = cast_index_to_pointer_ty(
         index,
@@ -87,28 +86,16 @@ where
                 orig_index,
                 lhs_off.unwrap(),
             ));
-            // If the RHS is a symbolic value (v1 or gv1), we can
-            // emit a Compare fact.
+            // If the RHS has an exact expression (v1, gv1, or a
+            // numeric constant), we can emit a Compare fact.
             if let Some(rhs) = builder.func.dfg.facts[rhs]
                 .as_ref()
-                .and_then(|f| f.as_symbol())
+                .and_then(|f| f.as_expr())
             {
                 builder.func.dfg.facts[result] = Some(Fact::Compare {
                     kind: compare_kind,
                     lhs: Expr::offset(&Expr::value(orig_index), lhs_off.unwrap()).unwrap(),
                     rhs: Expr::offset(rhs, rhs_off.unwrap()).unwrap(),
-                });
-            }
-            // Likewise, if the RHS is a constant, we can emit a
-            // Compare fact.
-            if let Some(k) = builder.func.dfg.facts[rhs]
-                .as_ref()
-                .and_then(|f| f.as_const(pointer_bit_width))
-            {
-                builder.func.dfg.facts[result] = Some(Fact::Compare {
-                    kind: compare_kind,
-                    lhs: Expr::offset(&Expr::value(orig_index), lhs_off.unwrap()).unwrap(),
-                    rhs: Expr::offset(&Expr::constant(k), rhs_off.unwrap()).unwrap(),
                 });
             }
         }
@@ -463,7 +450,6 @@ where
     if enable_pcc {
         builder.func.dfg.facts[value] = Some(Fact::global_value(
             u16::try_from(env.pointer_type().bits()).unwrap(),
-            u16::try_from(env.pointer_type().bits()).unwrap(),
             gv,
         ));
     }
@@ -568,11 +554,14 @@ fn explicit_check_oob_condition_and_compute_addr(
                 pos.func.dfg.facts[null] =
                     Some(Fact::constant(u16::try_from(addr_ty.bits()).unwrap(), 0));
                 let max_static = size.checked_sub(u64::from(access_size)).unwrap();
-                pos.func.dfg.facts[addr] = Some(Fact::memory_with_range(
-                    ty,
-                    Fact::static_value_range(addr_bits, max_static),
-                    true,
-                ));
+                pos.func.dfg.facts[addr] = Some(
+                    Fact::memory_with_range(
+                        ty,
+                        Fact::static_value_range(addr_bits, max_static),
+                        true,
+                    )
+                    .unwrap(),
+                );
             }
             Some(AddrPcc::Dynamic(ty, gv)) => {
                 pos.func.dfg.facts[null] =
@@ -581,11 +570,10 @@ fn explicit_check_oob_condition_and_compute_addr(
                     gv,
                     i128::from(heap.offset_guard_size) - i128::from(access_size),
                 );
-                pos.func.dfg.facts[addr] = Some(Fact::memory_with_range(
-                    ty,
-                    Fact::dynamic_value_range(addr_bits, bound),
-                    true,
-                ));
+                pos.func.dfg.facts[addr] = Some(
+                    Fact::memory_with_range(ty, Fact::dynamic_value_range(addr_bits, bound), true)
+                        .unwrap(),
+                );
             }
         }
     }
@@ -627,23 +615,15 @@ fn compute_addr(
     match pcc {
         None => {}
         Some(AddrPcc::Static32(ty, _) | AddrPcc::Dynamic(ty, _)) => {
-            if let Some(idx) = pos.func.dfg.facts[index]
-                .as_ref()
-                .and_then(|f| f.as_symbol())
-                .cloned()
-            {
-                pos.func.dfg.facts[base_and_index] = Some(
-                    Fact::memory_with_range(
-                        ty,
-                        Fact::dynamic_value_range(addr_bits, Expr::value(idx)),
-                    )
-                    .unwrap(),
-                );
+            if let Some(idx) = pos.func.dfg.facts[index].as_ref() {
+                pos.func.dfg.facts[base_and_index] =
+                    Some(Fact::memory_with_range(ty, idx.clone(), false).unwrap());
             } else {
                 pos.func.dfg.facts[base_and_index] = Some(
                     Fact::memory_with_range(
                         ty,
                         Fact::static_value_range(addr_bits, u64::from(u32::MAX)),
+                        false,
                     )
                     .unwrap(),
                 );
@@ -672,19 +652,12 @@ fn compute_addr(
         match pcc {
             None => {}
             Some(AddrPcc::Static32(ty, _) | AddrPcc::Dynamic(ty, _)) => {
-                if let Some(idx) = pos.func.dfg.facts[index]
-                    .as_ref()
-                    .and_then(|f| f.as_symbol())
-                {
-                    pos.func.dfg.facts[result] = Some(Fact::memory_with_range(
-                        ty,
-                        Fact::dynamic_value_range(
-                            addr_bits,
-                            Expr::offset(idx, i64::from(offset)).unwrap(),
-                        )
-                        .unwrap(),
-                        false,
-                    ));
+                if let Some(base_and_index_fact) = pos.func.dfg.facts[base_and_index].as_ref() {
+                    pos.func.dfg.facts[result] = Some(
+                        base_and_index_fact
+                            .offset(addr_bits, i64::from(offset))
+                            .unwrap(),
+                    );
                 } else {
                     let max_static = u64::from(u32::MAX) + u64::from(offset);
                     pos.func.dfg.facts[result] = Some(
