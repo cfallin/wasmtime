@@ -345,6 +345,15 @@ impl Expr {
         })
     }
 
+    /// Determine if we can know the difference between two expressions.
+    pub fn difference(lhs: &Expr, rhs: &Expr) -> Option<i64> {
+        match (lhs.base, rhs.base) {
+            (BaseExpr::Max, _) | (_, BaseExpr::Max) => None,
+            (a, b) if a == b => i64::try_from(lhs.offset.checked_sub(rhs.offset)?).ok(),
+            _ => None,
+        }
+    }
+
     /// Is this Expr a BaseExpr with no offset? Return it if so.
     pub fn without_offset(&self) -> Option<&BaseExpr> {
         if self.offset == 0 {
@@ -1501,8 +1510,41 @@ impl<'a> FactContext<'a> {
         rhs: &Fact,
         kind: InequalityKind,
     ) -> Fact {
-        // TODO
-        let result = fact.clone();
+        // If `rhs` is an exact value, and we have an expression for
+        // it, and if `fact` is a range, look for that expression in
+        // the upper bounds of `fact`; if present (or offset), add the
+        // lower and upper bounds of `lhs` (properly offset if needed)
+        // to `fact`'s upper bounds.
+        let result = match (fact, rhs) {
+            (
+                Fact::Range {
+                    bit_width: bw_fact,
+                    range: ValueRange::Inclusive { min, max },
+                },
+                Fact::Range {
+                    bit_width: bw_rhs,
+                    range: ValueRange::Exact(equiv),
+                },
+            ) if bw_fact == bw_rhs => {
+                let offset = max
+                    .iter()
+                    .flat_map(|m| equiv.iter().flat_map(|e| Expr::difference(m, e)))
+                    .max();
+                if let Some(offset) = offset {
+                    let new_upper_bounds = equiv.iter().flat_map(|e| Expr::offset(e, offset));
+                    let max = max.iter().cloned().chain(new_upper_bounds).collect();
+                    let min = min.clone();
+                    Fact::Range {
+                        bit_width: *bw_fact,
+                        range: ValueRange::Inclusive { min, max },
+                    }
+                } else {
+                    fact.clone()
+                }
+            }
+            _ => fact.clone(),
+        };
+
         trace!("apply_inequality({fact:?}, {lhs:?}, {rhs:?}, {kind:?} -> {result:?}");
         result
     }
