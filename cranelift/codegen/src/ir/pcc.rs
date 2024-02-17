@@ -315,7 +315,7 @@ impl Expr {
     fn le(lhs: &Expr, rhs: &Expr) -> bool {
         let result = if rhs.base == BaseExpr::Max {
             true
-        } else if lhs == &Expr::constant(0) {
+        } else if lhs == &Expr::constant(0) && rhs.base != BaseExpr::None {
             true
         } else {
             BaseExpr::le(&lhs.base, &rhs.base) && lhs.offset <= rhs.offset
@@ -329,7 +329,7 @@ impl Expr {
         let Some(offset) = lhs.offset.checked_add(rhs.offset) else {
             return Expr::max_value();
         };
-        if lhs.base == rhs.base {
+        let result = if lhs.base == rhs.base {
             Expr {
                 base: lhs.base.clone(),
                 offset,
@@ -349,7 +349,9 @@ impl Expr {
                 base: BaseExpr::Max,
                 offset: 0,
             }
-        }
+        };
+        trace!("Expr::add: {lhs:?} + {rhs:?} -> {result:?}");
+        result
     }
 
     /// Add a static offset to an expression.
@@ -820,6 +822,7 @@ impl ValueRange {
 
     /// Find the range of the sum of two values described by ranges.
     pub fn add(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
+        trace!("ValueRange::add: {lhs:?} + {rhs:?}");
         match (lhs, rhs) {
             (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
                 let equivs = e1
@@ -827,7 +830,9 @@ impl ValueRange {
                     .flat_map(|e1| e2.iter().map(|e2| Expr::add(e1, e2)))
                     .collect();
                 let mut result = ValueRange::Exact(equivs);
+                trace!(" -> exact + exact: {result:?}");
                 result.simplify();
+                trace!(" -> {result:?}");
                 result
             }
             (ValueRange::Exact(exact), ValueRange::Inclusive { min, max })
@@ -841,7 +846,9 @@ impl ValueRange {
                     .flat_map(|m| exact.iter().map(|e| Expr::add(m, e)))
                     .collect();
                 let mut result = ValueRange::Inclusive { min, max };
+                trace!(" -> exact + inclusive: {result:?}");
                 result.simplify();
+                trace!(" -> {result:?}");
                 result
             }
             (
@@ -863,7 +870,9 @@ impl ValueRange {
                     .flat_map(|m1| max2.iter().map(|m2| Expr::add(m1, m2)))
                     .collect();
                 let mut result = ValueRange::Inclusive { min, max };
+                trace!(" -> inclusive + inclusive: {result:?}");
                 result.simplify();
+                trace!(" -> {result:?}");
                 result
             }
         }
@@ -871,11 +880,11 @@ impl ValueRange {
 
     /// Clamp a ValueRange given a bit-width for the result.
     fn clamp(self, width: u16) -> ValueRange {
-        if self.contains_expr(&Expr::constant128(-1))
+        trace!("ValueRange::clamp: {self:?} width {width}");
+        let result = if self.contains_expr(&Expr::constant128(-1))
             || self.contains_expr(&Expr::constant128(
                 i128::from(max_value_for_width(width)) + 1,
-            ))
-        {
+            )) {
             // Underflow or overflow is possible!
             ValueRange::Inclusive {
                 min: smallvec![],
@@ -883,7 +892,9 @@ impl ValueRange {
             }
         } else {
             self
-        }
+        };
+        trace!("ValueRange::clamp: -> {result:?}");
+        result
     }
 }
 
@@ -1397,7 +1408,7 @@ impl<'a> FactContext<'a> {
             _ => None,
         };
 
-        trace!("add: {lhs:?} + {rhs:?} -> {result:?}");
+        trace!("add({add_width}): {lhs:?} + {rhs:?} -> {result:?}");
         result
     }
 
