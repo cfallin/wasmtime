@@ -614,11 +614,14 @@ impl ValueRange {
                 // values between them are then contained in the LHS;
                 // or they are loose, and the true range is contained
                 // within them, which in turn is contained in the LHS.
-                min2.iter()
+                (min2
+                    .iter()
                     .any(|lower_bound2| range1.contains_expr(lower_bound2))
-                    && max2
+                    || min2.is_empty())
+                    && (max2
                         .iter()
                         .any(|upper_bound2| range1.contains_expr(upper_bound2))
+                        || max2.is_empty())
             }
         }
     }
@@ -1186,6 +1189,7 @@ impl<'a> FactContext<'a> {
 
     /// Computes whether `lhs` "subsumes" (implies) `rhs`.
     pub fn subsumes(&self, lhs: &Fact, rhs: &Fact) -> bool {
+        trace!("subsumes {lhs:?} {rhs:?}");
         match (lhs, rhs) {
             // Reflexivity.
             (l, r) if l == r => true,
