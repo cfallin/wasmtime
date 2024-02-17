@@ -625,11 +625,11 @@ impl ValueRange {
                 (min2
                     .iter()
                     .any(|lower_bound2| range1.contains_expr(lower_bound2))
-                    || min2.is_empty())
+                    || range1.contains_expr(&Expr::constant(0)))
                     && (max2
                         .iter()
                         .any(|upper_bound2| range1.contains_expr(upper_bound2))
-                        || max2.is_empty())
+                        || range1.contains_expr(&Expr::max_value()))
             }
         }
     }
