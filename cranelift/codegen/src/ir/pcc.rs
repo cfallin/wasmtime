@@ -246,34 +246,6 @@ impl BaseExpr {
         // (i) reflexivity; (ii) 0 <= x for all (unsigned) x; (iii) x <= max for all x.
         lhs == rhs || *lhs == BaseExpr::None || *rhs == BaseExpr::Max
     }
-
-    /// Compute some BaseExpr that will be less than or equal to both
-    /// inputs. This is a generalization of `min` (but looser).
-    fn min(lhs: &BaseExpr, rhs: &BaseExpr) -> BaseExpr {
-        if lhs == rhs {
-            lhs.clone()
-        } else if *lhs == BaseExpr::Max {
-            rhs.clone()
-        } else if *rhs == BaseExpr::Max {
-            lhs.clone()
-        } else {
-            BaseExpr::None // zero is <= x for all (unsigned) x.
-        }
-    }
-
-    /// Compute some BaseExpr that will be greater than or equal to
-    /// both inputs.
-    fn max(lhs: &BaseExpr, rhs: &BaseExpr) -> BaseExpr {
-        if lhs == rhs {
-            lhs.clone()
-        } else if *lhs == BaseExpr::None {
-            rhs.clone()
-        } else if *rhs == BaseExpr::None {
-            lhs.clone()
-        } else {
-            BaseExpr::Max
-        }
-    }
 }
 
 impl Expr {
@@ -333,36 +305,6 @@ impl Expr {
             true
         } else {
             BaseExpr::le(&lhs.base, &rhs.base) && lhs.offset <= rhs.offset
-        }
-    }
-
-    /// Generalization of `min`: compute some Expr that is less than
-    /// or equal to both inputs.
-    fn min(lhs: &Expr, rhs: &Expr) -> Expr {
-        if lhs.base == BaseExpr::None && lhs.offset == 0 {
-            lhs.clone()
-        } else if rhs.base == BaseExpr::None && rhs.offset == 0 {
-            rhs.clone()
-        } else {
-            Expr {
-                base: BaseExpr::min(&lhs.base, &rhs.base),
-                offset: std::cmp::min(lhs.offset, rhs.offset),
-            }
-        }
-    }
-
-    /// Generalization of `max`: compute some Expr that is greater
-    /// than or equal to both inputs.
-    fn max(lhs: &Expr, rhs: &Expr) -> Expr {
-        if lhs.base == BaseExpr::None && lhs.offset == 0 {
-            rhs.clone()
-        } else if rhs.base == BaseExpr::None && rhs.offset == 0 {
-            lhs.clone()
-        } else {
-            Expr {
-                base: BaseExpr::max(&lhs.base, &rhs.base),
-                offset: std::cmp::max(lhs.offset, rhs.offset),
-            }
         }
     }
 

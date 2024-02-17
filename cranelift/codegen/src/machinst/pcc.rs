@@ -1,6 +1,6 @@
 //! Common helpers for ISA-specific proof-carrying-code implementations.
 
-use crate::ir::pcc::{Expr, Fact, FactContext, PccError, PccResult};
+use crate::ir::pcc::{Fact, FactContext, PccError, PccResult};
 use crate::machinst::{Reg, VCode, VCodeInst, Writable};
 use crate::trace;
 
