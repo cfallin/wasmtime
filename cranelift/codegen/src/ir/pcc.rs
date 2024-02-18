@@ -881,10 +881,9 @@ impl ValueRange {
     /// Clamp a ValueRange given a bit-width for the result.
     fn clamp(self, width: u16) -> ValueRange {
         trace!("ValueRange::clamp: {self:?} width {width}");
-        let result = if self.contains_expr(&Expr::constant128(-1))
-            || self.contains_expr(&Expr::constant128(
-                i128::from(max_value_for_width(width)) + 1,
-            )) {
+        let result = if self.contains_expr(&Expr::constant128(
+            i128::from(max_value_for_width(width)) + 1,
+        )) {
             // Underflow or overflow is possible!
             ValueRange::Inclusive {
                 min: smallvec![],
