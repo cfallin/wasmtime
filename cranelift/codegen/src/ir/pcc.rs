@@ -566,37 +566,26 @@ impl ValueRange {
                 equivs.dedup();
             }
             ValueRange::Inclusive { min, max } => {
-                let mut out_min = 0;
-                for i in 0..min.len() {
-                    let redundant = min[0..out_min]
-                        .iter()
-                        .any(|other_bound| Expr::le(other_bound, &min[i]));
-                    if !redundant {
-                        if i > out_min {
-                            min.swap(out_min, i);
-                        }
-                        out_min += 1;
-                    }
-                }
-                min.truncate(out_min);
-                // Canonicalize to allow fast-path equality checks to more likely succeed.
+                // A lower bound `e` is not redundant if for all other
+                // lower bounds `other`, we cannot show that `e >=
+                // other`.
                 min.sort();
-
-                let mut out_max = 0;
-                for i in 0..max.len() {
-                    let redundant = max[0..out_max]
-                        .iter()
-                        .any(|other_bound| Expr::le(&max[i], other_bound));
-                    if !redundant {
-                        if i > out_max {
-                            max.swap(out_max, i);
-                        }
-                        out_max += 1;
-                    }
-                }
-                max.truncate(out_max);
-                // Canonicalize to allow fast-path equality checks to more likely succeed.
+                min.dedup();
+                let min = min
+                    .iter()
+                    .filter(|&e| min.iter().all(|other| e == other || !Expr::le(other, e)))
+                    .cloned()
+                    .collect::<SmallVec<[Expr; 1]>>();
+                // Likewise, an upper bound `e` is not redundant if
+                // for all other upper bounds `other`, we cannot show
+                // that `other >= e`.
                 max.sort();
+                max.dedup();
+                let max = max
+                    .iter()
+                    .filter(|&e| min.iter().all(|other| e == other || !Expr::le(e, other)))
+                    .cloned()
+                    .collect::<SmallVec<[Expr; 1]>>();
 
                 // If `min` and `max` are exactly one element each,
                 // and the same element, then we can narrow. Note that
@@ -605,6 +594,8 @@ impl ValueRange {
                 // (namely, the upper bound `v2`).
                 if min.len() == 1 && max.len() == 1 && min[0] == max[0] {
                     *self = ValueRange::Exact(smallvec![min[0].clone()]);
+                } else {
+                    *self = ValueRange::Inclusive { min, max };
                 }
             }
         }
@@ -895,6 +886,34 @@ impl ValueRange {
         trace!("ValueRange::clamp: -> {result:?}");
         result
     }
+
+    /// Add a new maximum to a range.
+    fn with_max(&self, new_max: Expr) -> ValueRange {
+        match self {
+            ValueRange::Exact(equiv) => {
+                let mut result = ValueRange::Inclusive {
+                    min: equiv.clone(),
+                    max: equiv
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(new_max))
+                        .collect(),
+                };
+                result.simplify();
+                result
+            }
+            ValueRange::Inclusive { min, max } => {
+                let mut max = max.clone();
+                max.push(new_max);
+                let mut result = ValueRange::Inclusive {
+                    min: min.clone(),
+                    max,
+                };
+                result.simplify();
+                result
+            }
+        }
+    }
 }
 
 impl Fact {
@@ -1150,22 +1169,22 @@ impl Fact {
                 Fact::Mem {
                     ty: ty_mem,
                     range: range_mem,
-                    nullable,
+                    nullable: _,
                 },
                 Fact::Range {
-                    bit_width,
+                    bit_width: _,
                     range: range_offset,
                 },
             )
             | (
                 Fact::Range {
-                    bit_width,
+                    bit_width: _,
                     range: range_offset,
                 },
                 Fact::Mem {
                     ty: ty_mem,
                     range: range_mem,
-                    nullable,
+                    nullable: _,
                 },
             ) if range_offset.le_expr(&Expr::constant(0)) => Fact::Mem {
                 ty: *ty_mem,
@@ -1246,6 +1265,15 @@ impl Fact {
                 range,
             },
             f => f.clone(),
+        }
+    }
+
+    /// Add a maximum to the range in either a Range or Mem fact.
+    pub fn with_max(&self, max: Expr) -> Fact {
+        if let Some(r) = self.range() {
+            self.with_range(r.with_max(max))
+        } else {
+            self.clone()
         }
     }
 }
@@ -1453,12 +1481,17 @@ impl<'a> FactContext<'a> {
         let result = match fact {
             Fact::Range { bit_width, range } if *bit_width == from_width => Some(Fact::Range {
                 bit_width: to_width,
-                range: range.clone(),
+                range: range
+                    .clone()
+                    .with_max(Expr::constant(max_value_for_width(from_width))),
             }),
 
             // If the claim is a definition of a value, we can say
             // that the output has a range of exactly that value.
-            Fact::Def { value } => Some(Fact::value(to_width, *value)),
+            Fact::Def { value } => Some(
+                Fact::value(to_width, *value)
+                    .with_max(Expr::constant(max_value_for_width(from_width))),
+            ),
 
             // Otherwise, we can at least claim that the value is
             // within the range of `from_width`.
