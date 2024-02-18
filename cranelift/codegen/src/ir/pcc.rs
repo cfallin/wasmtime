@@ -1294,12 +1294,14 @@ impl<'a> FactContext<'a> {
                 let rhs_is_trivially_true = range_rhs.contains_expr(&Expr::constant(0))
                     && range_rhs.contains_expr(&Expr::constant(max_value_for_width(*bw_rhs)));
                 // It can also still imply the RHS if the LHS's range
-                // is within the bitwidth of the RHS, so we don't have
-                // to worry about truncation/aliasing effects.
+                // is within the bitwidth of the RHS and the RHS
+                // otherwise contains the LHS's range, so we don't
+                // have to worry about truncation/aliasing effects.
                 let lhs_is_in_rhs_width_range =
                     range_lhs.le_expr(&Expr::constant(max_value_for_width(*bw_rhs)));
 
-                rhs_is_trivially_true || lhs_is_in_rhs_width_range
+                rhs_is_trivially_true
+                    || (lhs_is_in_rhs_width_range && range_rhs.contains(range_lhs))
             }
 
             (
