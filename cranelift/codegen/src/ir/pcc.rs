@@ -1481,17 +1481,12 @@ impl<'a> FactContext<'a> {
         let result = match fact {
             Fact::Range { bit_width, range } if *bit_width == from_width => Some(Fact::Range {
                 bit_width: to_width,
-                range: range
-                    .clone()
-                    .with_max(Expr::constant(max_value_for_width(from_width))),
+                range: range.clone(),
             }),
 
             // If the claim is a definition of a value, we can say
             // that the output has a range of exactly that value.
-            Fact::Def { value } => Some(
-                Fact::value(to_width, *value)
-                    .with_max(Expr::constant(max_value_for_width(from_width))),
-            ),
+            Fact::Def { value } => Some(Fact::value(to_width, *value)),
 
             // Otherwise, we can at least claim that the value is
             // within the range of `from_width`.
