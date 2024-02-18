@@ -1072,7 +1072,7 @@ impl Fact {
     /// merging multiple possibilities into a generalized / widened
     /// fact. We want to narrow here.)
     pub fn intersect(a: &Fact, b: &Fact) -> Fact {
-        match (a, b) {
+        let result = match (a, b) {
             (
                 Fact::Range {
                     bit_width: bw_lhs,
@@ -1105,14 +1105,16 @@ impl Fact {
             },
 
             _ => Fact::Conflict,
-        }
+        };
+        trace!("Fact::intersect: {a:?} {b:?} -> {result:?}");
+        result
     }
 
     /// Take the union of two facts: produce a fact that applies to a
     /// value that has either one fact or another (e.g., at a
     /// control-flow merge point or a conditional-select operator).
     pub fn union(a: &Fact, b: &Fact) -> Fact {
-        match (a, b) {
+        let result = match (a, b) {
             (
                 Fact::Range {
                     bit_width: bw_lhs,
@@ -1144,8 +1146,37 @@ impl Fact {
                 nullable: *nullable_lhs || *nullable_rhs,
             },
 
+            (
+                Fact::Mem {
+                    ty: ty_mem,
+                    range: range_mem,
+                    nullable,
+                },
+                Fact::Range {
+                    bit_width,
+                    range: range_offset,
+                },
+            )
+            | (
+                Fact::Range {
+                    bit_width,
+                    range: range_offset,
+                },
+                Fact::Mem {
+                    ty: ty_mem,
+                    range: range_mem,
+                    nullable,
+                },
+            ) if range_offset.le_expr(&Expr::constant(0)) => Fact::Mem {
+                ty: *ty_mem,
+                range: range_mem.clone(),
+                nullable: true,
+            },
+
             _ => Fact::Conflict,
-        }
+        };
+        trace!("Fact::union: {a:?} {b:?} -> {result:?}");
+        result
     }
 
     /// Does this fact describe an exact expression?
@@ -1689,10 +1720,7 @@ impl<'a> FactContext<'a> {
                                 max: new_upper_bounds,
                             }
                         } else {
-                            ValueRange::Inclusive {
-                                min: smallvec![],
-                                max: smallvec![],
-                            }
+                            ValueRange::Exact(equivs.clone())
                         }
                     }
                 };
