@@ -150,11 +150,11 @@ pub struct ValueRange {
     /// Lower bounds (inclusive). The list specifies a set of bounds;
     /// the concrete value is greater than or equal to *all* of these
     /// bounds. If the list is empty, then there is no lower bound.
-    min: SmallVec<[Expr; 1]>,
+    pub min: SmallVec<[Expr; 1]>,
     /// Upper bounds (inclusive). The list specifies a set of bounds;
     /// the concrete value is less than or equal to *all* of these
     /// bounds. If the list is empty, then there is no upper bound.
-    max: SmallVec<[Expr; 1]>,
+    pub max: SmallVec<[Expr; 1]>,
     /// Equalties (inclusive). The list specifies a set of values all
     /// of which are known to be equal to the value described by this
     /// range. Note that if this is non-empty, the range's "size"
@@ -162,7 +162,7 @@ pub struct ValueRange {
     /// value; but we may not know a concrete constant, and it is
     /// still useful to carry around the lower/upper bounds to enable
     /// further comparisons to be resolved.
-    equal: SmallVec<[Expr; 1]>,
+    pub equal: SmallVec<[Expr; 1]>,
 }
 
 /// A fact on a value.
@@ -533,7 +533,7 @@ impl fmt::Display for Fact {
                 nullable,
             } => {
                 let nullable_flag = if *nullable { ", nullable" } else { "" };
-                write!(f, "mem({ty}, {range}{nullable_flag})")
+                write!(f, "mem({ty}{nullable_flag}, {range})")
             }
             Fact::Def { value } => write!(f, "def({value})"),
             Fact::Compare { kind, lhs, rhs } => {

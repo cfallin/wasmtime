@@ -2179,10 +2179,8 @@ impl<'a> Parser<'a> {
 
     // Parse a "fact" for proof-carrying code, attached to a value.
     //
-    // fact ::= "range" "(" bit-width "," exprs ")"
-    //        | "range" "(" bit-width "," exprs "," exprs ")"
-    //        | "mem" "(" memory-type "," exprs [ "," "nullable" ] ")"
-    //        | "mem" "(" memory-type "," exprs "," exprs [ "," "nullable" ] ")"
+    // fact ::= "range" "(" bit-width "," range ")"
+    //        | "mem" "(" memory-type [ "," "nullable" ] "," range ")"
     //        | "conflict"
     // bit-width ::= uimm64
     fn parse_fact(&mut self) -> ParseResult<Fact> {
@@ -2194,17 +2192,7 @@ impl<'a> Parser<'a> {
                     .match_uimm64("expected a bit-width value for `range` fact")?
                     .into();
                 self.match_token(Token::Comma, "expected a comma")?;
-                let min_exprs = self.parse_exprs()?;
-                let range = if self.token() == Some(Token::Comma) {
-                    self.consume();
-                    let max_exprs = self.parse_exprs()?;
-                    ValueRange::Inclusive {
-                        min: min_exprs,
-                        max: max_exprs,
-                    }
-                } else {
-                    ValueRange::Exact(min_exprs)
-                };
+                let range = self.parse_range()?;
                 self.match_token(Token::RPar, "`range` fact needs a closing `)`")?;
                 Ok(Fact::Range {
                     bit_width: u16::try_from(bit_width).unwrap(),
@@ -2219,37 +2207,21 @@ impl<'a> Parser<'a> {
                     Token::Comma,
                     "expected a comma after memory type in `mem` fact",
                 )?;
-                let min_exprs = self.parse_exprs()?;
-                let (range, nullable) = if self.token() == Some(Token::Comma) {
+                let nullable = if self.token() == Some(Token::Identifier("nullable")) {
                     self.consume();
-                    if self.token() == Some(Token::Identifier("nullable")) {
-                        self.consume();
-                        (ValueRange::Exact(min_exprs), true)
-                    } else {
-                        let max_exprs = self.parse_exprs()?;
-                        let range = ValueRange::Inclusive {
-                            min: min_exprs,
-                            max: max_exprs,
-                        };
-                        if self.token() == Some(Token::Comma) {
-                            self.consume();
-                            self.match_token(
-                                Token::Identifier("nullable"),
-                                "expected `nullable` in last optional field of `mem`",
-                            )?;
-                            (range, true)
-                        } else {
-                            (range, false)
-                        }
-                    }
+                    self.match_token(
+                        Token::Comma,
+                        "expected a comma after `nullable` in `mem` fact",
+                    )?;
+                    true
                 } else {
-                    (ValueRange::Exact(min_exprs), false)
+                    false
                 };
-                self.match_token(Token::RPar, "expected a `)`")?;
+                let range = self.parse_range()?;
                 Ok(Fact::Mem {
                     ty,
-                    range,
                     nullable,
+                    range,
                 })
             }
             Some(Token::Identifier("def")) => {
@@ -2278,6 +2250,36 @@ impl<'a> Parser<'a> {
                 Ok(Fact::Conflict)
             }
             _ => Err(self.error("expected a `range`, `mem`, `def`, `compare` or `conflict` fact")),
+        }
+    }
+
+    // Parse a range with min-, equals-, and max-constraints.
+    //
+    // range ::= "=" exprs                      -- equals
+    //         | exprs "," exprs                -- min, max
+    //         | exprs "," "=" exprs "," exprs  -- min, equals, max
+    fn parse_range(&mut self) -> ParseResult<ValueRange> {
+        if self.token() == Some(Token::Equal) {
+            self.consume();
+            let equal = self.parse_exprs()?;
+            Ok(ValueRange {
+                equal,
+                min: smallvec![],
+                max: smallvec![],
+            })
+        } else {
+            let min = self.parse_exprs()?;
+            self.match_token(Token::Comma, "expected comma in range after min exprs")?;
+            let equal = if self.token() == Some(Token::Equal) {
+                self.consume();
+                let equal = self.parse_exprs()?;
+                self.match_token(Token::Comma, "expected comma n range after equal exprs")?;
+                equal
+            } else {
+                smallvec![]
+            };
+            let max = self.parse_exprs()?;
+            Ok(ValueRange { equal, min, max })
         }
     }
 
