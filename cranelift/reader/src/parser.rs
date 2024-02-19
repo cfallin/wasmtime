@@ -2218,6 +2218,7 @@ impl<'a> Parser<'a> {
                     false
                 };
                 let range = self.parse_range()?;
+                self.match_token(Token::RPar, "expected a `)`")?;
                 Ok(Fact::Mem {
                     ty,
                     nullable,

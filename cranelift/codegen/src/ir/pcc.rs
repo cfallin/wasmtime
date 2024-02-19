@@ -596,10 +596,11 @@ impl ValueRange {
 
     /// Is the expression definitely within the ValueRange?
     pub fn contains_expr(&self, expr: &Expr) -> bool {
-        let result = (self
-            .min
-            .iter()
-            .all(|lower_bound| Expr::le(lower_bound, expr))
+        let result = ((!self.min.is_empty() || !self.max.is_empty())
+            && self
+                .min
+                .iter()
+                .all(|lower_bound| Expr::le(lower_bound, expr))
             && self
                 .max
                 .iter()
@@ -675,7 +676,7 @@ impl ValueRange {
             && (other.max
                 .iter()
                 .any(|upper_bound2| self.contains_expr(upper_bound2))
-                        || self.contains_expr(&Expr::max_value()));
+                || self.contains_expr(&Expr::max_value()));
         trace!("ValueRange::contains: {self:?} {other:?} -> {result}");
         result
     }
