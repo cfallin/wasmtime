@@ -976,12 +976,14 @@ impl Fact {
     /// width.
     pub fn max_range_for_width_extended(from_width: u16, to_width: u16) -> Self {
         debug_assert!(from_width <= to_width);
+        let upper_bound = if from_width <= 64 {
+            Expr::constant(max_value_for_width(from_width))
+        } else {
+            Expr::max_value()
+        };
         Fact::Range {
             bit_width: to_width,
-            range: ValueRange::min_max(
-                Expr::constant(0),
-                Expr::constant(max_value_for_width(from_width)),
-            ),
+            range: ValueRange::min_max(Expr::constant(0), upper_bound),
         }
     }
 
@@ -1670,7 +1672,7 @@ impl<'a> FactContext<'a> {
     }
 }
 
-const fn max_value_for_width(bits: u16) -> u64 {
+fn max_value_for_width(bits: u16) -> u64 {
     assert!(bits <= 64);
     if bits == 64 {
         u64::MAX
