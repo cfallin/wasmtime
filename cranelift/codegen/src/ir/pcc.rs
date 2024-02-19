@@ -129,25 +129,40 @@ pub enum PccError {
 
 /// A range in an integer space. This can be used to describe a value
 /// or an offset into a memtype.
+///
+/// The value is described by three lists of symbolic expressions:
+/// lower bounds (inclusive), exact equalities, and upper bounds
+/// (inclusive).
+///
+/// We may need multiple such lower and upper bounds, and may want
+/// bounds even if we have exact equalities, because comparison is a
+/// *partial* relation: we can't say anything about how `v1` and `v2`
+/// are related, so it may be useful to know that `x < v1`, and also
+/// `x < v2`; or, say, that `x == v1` and also `x < v2`.
+///
+/// When producing a new range, we simplify these lists against each
+/// other, so if one lower bound is greater than or equal to another,
+/// or one upper bound is less than or equal to another, it will be
+/// removed.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
-pub enum ValueRange {
-    /// Exactly the value(s) given.
-    Exact(SmallVec<[Expr; 1]>),
-    /// A value that lies within all specified lower and upper bounds
-    /// (inclusive).
-    Inclusive {
-        /// Lower bounds (inclusive). The list specifies a set of
-        /// bounds; the concrete value is greater than or equal to
-        /// *all* of these bounds. If the list is empty, then there is
-        /// no lower bound.
-        min: SmallVec<[Expr; 1]>,
-        /// Upper bounds (inclusive). The list specifies a set of
-        /// bounds; the concrete value is less than or equal to *all*
-        /// of these bounds. If the list is empty, then there is no
-        /// upper bound.
-        max: SmallVec<[Expr; 1]>,
-    },
+pub struct ValueRange {
+    /// Lower bounds (inclusive). The list specifies a set of bounds;
+    /// the concrete value is greater than or equal to *all* of these
+    /// bounds. If the list is empty, then there is no lower bound.
+    min: SmallVec<[Expr; 1]>,
+    /// Upper bounds (inclusive). The list specifies a set of bounds;
+    /// the concrete value is less than or equal to *all* of these
+    /// bounds. If the list is empty, then there is no upper bound.
+    max: SmallVec<[Expr; 1]>,
+    /// Equalties (inclusive). The list specifies a set of values all
+    /// of which are known to be equal to the value described by this
+    /// range. Note that if this is non-empty, the range's "size"
+    /// (cardinality of the set of possible values) is exactly one
+    /// value; but we may not know a concrete constant, and it is
+    /// still useful to carry around the lower/upper bounds to enable
+    /// further comparisons to be resolved.
+    equal: SmallVec<[Expr; 1]>,
 }
 
 /// A fact on a value.
@@ -485,11 +500,23 @@ impl<'a> fmt::Display for DisplayExprs<'a> {
 
 impl fmt::Display for ValueRange {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ValueRange::Exact(exprs) => write!(f, "{}", DisplayExprs(exprs)),
-            ValueRange::Inclusive { min, max } => {
-                write!(f, "{}, {}", DisplayExprs(&min[..]), DisplayExprs(&max[..]))
-            }
+        if self.equal.is_empty() {
+            write!(
+                f,
+                "{}, {}",
+                DisplayExprs(&self.min[..]),
+                DisplayExprs(&self.max[..])
+            )
+        } else if self.min.is_empty() && self.max.is_empty() {
+            write!(f, "={}", DisplayExprs(&self.equal[..]))
+        } else {
+            write!(
+                f,
+                "{}, ={}, {}",
+                DisplayExprs(&self.min[..]),
+                DisplayExprs(&self.equal[..]),
+                DisplayExprs(&self.max[..])
+            )
         }
     }
 }
@@ -518,39 +545,66 @@ impl fmt::Display for Fact {
 }
 
 impl ValueRange {
+    /// Create a range that is exactly one expression.
+    pub fn exact(expr: Expr) -> Self {
+        ValueRange {
+            equal: smallvec![expr],
+            min: smallvec![],
+            max: smallvec![],
+        }
+    }
+
+    /// Create a range that has a min and max.
+    pub fn min_max(min: Expr, max: Expr) -> Self {
+        ValueRange {
+            equal: smallvec![],
+            min: smallvec![min],
+            max: smallvec![max],
+        }
+    }
+
+    /// Create a range that is exactly one expression, with another expression as an upper bound.
+    pub fn exact_with_max(expr: Expr, max: Expr) -> Self {
+        ValueRange {
+            equal: smallvec![expr],
+            min: smallvec![],
+            max: smallvec![max],
+        }
+    }
+
     /// Is this ValueRange an exact integer constant?
     pub fn as_const(&self) -> Option<i128> {
-        match self {
-            ValueRange::Exact(exact) => exact.iter().find_map(|&e| e.as_const()),
-            ValueRange::Inclusive { .. } => None,
-        }
+        self.equal.iter().find_map(|&e| e.as_const())
     }
 
     /// Is this ValueRange definitely less than or equal to the given expression?
     pub fn le_expr(&self, expr: &Expr) -> bool {
-        let result = match self {
-            ValueRange::Exact(exact) => exact.iter().any(|equiv| Expr::le(equiv, expr)),
-            // The range is <= the expr if *any* of its upper bounds
-            // are <= the expr, because each upper bound constrains
-            // the whole range (i.e., the range is the intersection of
-            // all combinations of bounds).
-            ValueRange::Inclusive { max, .. } => {
-                max.iter().any(|upper_bound| Expr::le(upper_bound, expr))
-            }
-        };
+        // The range is <= the expr if *any* of its upper bounds are
+        // <= the expr, because each upper bound constrains the whole
+        // range (i.e., the range is the intersection of all
+        // combinations of bounds). Likewise, if any expression that
+        // exactly determines the value less than `expr`, then we can
+        // definitely say the range is less than `expr`.
+        let result = self
+            .equal
+            .iter()
+            .chain(self.max.iter())
+            .any(|e| Expr::le(e, expr));
         trace!("ValueRange::le_expr: {self:?} {expr:?} -> {result}");
         result
     }
 
     /// Is the expression definitely within the ValueRange?
     pub fn contains_expr(&self, expr: &Expr) -> bool {
-        let result = match self {
-            ValueRange::Exact(exact) => exact.iter().any(|equiv| equiv == expr),
-            ValueRange::Inclusive { min, max } => {
-                min.iter().all(|lower_bound| Expr::le(lower_bound, expr))
-                    && max.iter().all(|upper_bound| Expr::le(expr, upper_bound))
-            }
-        };
+        let result = (self
+            .min
+            .iter()
+            .all(|lower_bound| Expr::le(lower_bound, expr))
+            && self
+                .max
+                .iter()
+                .all(|upper_bound| Expr::le(expr, upper_bound)))
+            || self.equal.iter().any(|equiv| equiv == expr);
         trace!("ValueRange::contains_expr: {self:?} {expr:?} -> {result}");
         result
     }
@@ -560,359 +614,207 @@ impl ValueRange {
     /// less than another upper bound, can be removed.
     pub fn simplify(&mut self) {
         trace!("simplify: {self:?}");
-        match self {
-            ValueRange::Exact(equivs) => {
-                equivs.sort();
-                equivs.dedup();
-            }
-            ValueRange::Inclusive { min, max } => {
-                // A lower bound `e` is not redundant if for all other
-                // lower bounds `other`, we cannot show that `e >=
-                // other`.
-                min.sort();
-                min.dedup();
-                let min = min
-                    .iter()
-                    .filter(|&e| min.iter().all(|other| e == other || !Expr::le(other, e)))
-                    .cloned()
-                    .collect::<SmallVec<[Expr; 1]>>();
-                // Likewise, an upper bound `e` is not redundant if
-                // for all other upper bounds `other`, we cannot show
-                // that `other >= e`.
-                max.sort();
-                max.dedup();
-                let max = max
-                    .iter()
-                    .filter(|&e| min.iter().all(|other| e == other || !Expr::le(e, other)))
-                    .cloned()
-                    .collect::<SmallVec<[Expr; 1]>>();
 
-                // If `min` and `max` are exactly one element each,
-                // and the same element, then we can narrow. Note that
-                // we don't sipmlify e.g. `range(32, {v1}, {v1, v2})`
-                // to `range(32, v1)` because this loses information
-                // (namely, the upper bound `v2`).
-                if min.len() == 1 && max.len() == 1 && min[0] == max[0] {
-                    *self = ValueRange::Exact(smallvec![min[0].clone()]);
-                } else {
-                    *self = ValueRange::Inclusive { min, max };
-                }
-            }
-        }
+        // Note an important invariant: syntactic equality of Exprs
+        // implies symbolic equality. This is required to ensure we
+        // don't remove both `x` and `y` if `x <= y` and `y <= x`,
+        // given the logic below.
+        self.equal.sort();
+        self.equal.dedup();
+
+        // A lower bound `e` is not redundant if for all other
+        // lower bounds `other`, we cannot show that `e >=
+        // other`.
+        self.min.sort();
+        self.min.dedup();
+        let min = self
+            .min
+            .iter()
+            .filter(|&e| {
+                self.min
+                    .iter()
+                    .all(|other| e == other || !Expr::le(other, e))
+            })
+            .cloned()
+            .collect::<SmallVec<[Expr; 1]>>();
+        self.min = min;
+
+        // Likewise, an upper bound `e` is not redundant if
+        // for all other upper bounds `other`, we cannot show
+        // that `other >= e`.
+        self.max.sort();
+        self.max.dedup();
+        let max = self
+            .max
+            .iter()
+            .filter(|&e| {
+                self.min
+                    .iter()
+                    .all(|other| e == other || !Expr::le(e, other))
+            })
+            .cloned()
+            .collect::<SmallVec<[Expr; 1]>>();
+        self.max = max;
+
         trace!("simplify: produced {self:?}");
     }
 
     /// Does one ValueRange contain another? Assumes both sides are already simplified.
     pub fn contains(&self, other: &ValueRange) -> bool {
-        let result = match (self, other) {
-            (a, b) if a == b => true,
-            (ValueRange::Exact(expr1), ValueRange::Exact(expr2)) => {
-                expr1.iter().any(|e| expr2.contains(e))
-            }
-            (range @ ValueRange::Inclusive { .. }, ValueRange::Exact(expr)) => {
-                expr.iter().any(|e| range.contains_expr(e))
-            }
-            (ValueRange::Exact(..), ValueRange::Inclusive { .. }) => false,
-            (
-                range1 @ ValueRange::Inclusive { .. },
-                ValueRange::Inclusive {
-                    min: min2,
-                    max: max2,
-                },
-            ) => {
-                // *Some* lower bound and *some* upper bound of the
-                // RHS must be contained in the LHS. Either those
-                // lower and upper bounds are tight, in which case all
-                // values between them are then contained in the LHS;
-                // or they are loose, and the true range is contained
-                // within them, which in turn is contained in the LHS.
-                (min2
-                    .iter()
-                    .any(|lower_bound2| range1.contains_expr(lower_bound2))
-                    || range1.contains_expr(&Expr::constant(0)))
-                    && (max2
-                        .iter()
-                        .any(|upper_bound2| range1.contains_expr(upper_bound2))
-                        || range1.contains_expr(&Expr::max_value()))
-            }
-        };
+        let result = other.equal.iter().any(|e| self.contains_expr(e)) ||
+        // *Some* lower bound and *some* upper bound of the RHS must
+        // be contained in the LHS. Either those lower and upper
+        // bounds are tight, in which case all values between them are
+        // then contained in the LHS; or they are loose, and the true
+        // range is contained within them, which in turn is contained
+        // in the LHS.
+            (other.min
+             .iter()
+             .any(|lower_bound2| self.contains_expr(lower_bound2))
+             || self.contains_expr(&Expr::constant(0)))
+            && (other.max
+                .iter()
+                .any(|upper_bound2| self.contains_expr(upper_bound2))
+                        || self.contains_expr(&Expr::max_value()));
         trace!("ValueRange::contains: {self:?} {other:?} -> {result}");
         result
     }
 
     /// Intersect two ValueRanges.
     pub fn intersect(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
-        match (lhs, rhs) {
-            (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
-                let mut result =
-                    ValueRange::Exact(e1.iter().cloned().chain(e2.iter().cloned()).collect());
-                result.simplify();
-                result
-            }
-            (ValueRange::Exact(equiv), ValueRange::Inclusive { min, max })
-            | (ValueRange::Inclusive { min, max }, ValueRange::Exact(equiv)) => {
-                let mut min = min.clone();
-                let mut max = max.clone();
-                min.extend(equiv.iter().cloned());
-                max.extend(equiv.iter().cloned());
-                let mut result = ValueRange::Inclusive { min, max };
-                result.simplify();
-                result
-            }
-            (
-                ValueRange::Inclusive {
-                    min: min1,
-                    max: max1,
-                },
-                ValueRange::Inclusive {
-                    min: min2,
-                    max: max2,
-                },
-            ) => {
-                let mut min = min1.clone();
-                let mut max = max1.clone();
-                min.extend(min2.iter().cloned());
-                max.extend(max2.iter().cloned());
-                let mut result = ValueRange::Inclusive { min, max };
-                result.simplify();
-                result
-            }
-        }
+        let equal = lhs
+            .equal
+            .iter()
+            .cloned()
+            .chain(rhs.equal.iter().cloned())
+            .collect();
+        let min = lhs
+            .min
+            .iter()
+            .cloned()
+            .chain(rhs.min.iter().cloned())
+            .collect();
+        let max = lhs
+            .max
+            .iter()
+            .cloned()
+            .chain(rhs.max.iter().cloned())
+            .collect();
+        let mut result = ValueRange { equal, min, max };
+        result.simplify();
+        result
     }
 
     /// Take the union of two ranges.
     pub fn union(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
-        match (lhs, rhs) {
-            (ValueRange::Exact(e1), ValueRange::Exact(e2)) if lhs.contains(rhs) => {
-                let combined = e1.iter().cloned().chain(e2.iter().cloned()).collect();
-                let mut result = ValueRange::Exact(combined);
-                result.simplify();
-                result
-            }
-            (ValueRange::Exact(_), ValueRange::Exact(_)) => {
-                // TODO: we could check whether one Exact is less than
-                // the other, and if so, create a range from one to
-                // the other. For now, let's just return a range that
-                // covers everything.
-                ValueRange::Inclusive {
-                    min: smallvec![],
-                    max: smallvec![],
-                }
-            }
-            (e @ ValueRange::Exact(equiv), r @ ValueRange::Inclusive { min, max })
-            | (r @ ValueRange::Inclusive { min, max }, e @ ValueRange::Exact(equiv)) => {
-                if r.contains(e) {
-                    r.clone()
-                } else {
-                    let min = min
-                        .iter()
-                        .filter(|&e| equiv.iter().any(|eq| Expr::le(e, eq)))
-                        .cloned()
-                        .collect();
-                    let max = max
-                        .iter()
-                        .filter(|&e| equiv.iter().any(|eq| Expr::le(eq, e)))
-                        .cloned()
-                        .collect();
-                    // No need to simplify -- we are only removing
-                    // constraints, so no bounds will be newly
-                    // subsumed.
-                    ValueRange::Inclusive { min, max }
-                }
-            }
-            (
-                ValueRange::Inclusive {
-                    min: min1,
-                    max: max1,
-                },
-                ValueRange::Inclusive {
-                    min: min2,
-                    max: max2,
-                },
-            ) => {
-                // Take lower bounds from LHS that are less than all
-                // lower bounds on the RHS; and likewise the other
-                // way; and likewise for upper bounds.
-                let min = min1
+        // Take lower bounds from LHS that are less than all
+        // lower bounds on the RHS; and likewise the other
+        // way; and likewise for upper bounds.
+        let min = lhs
+            .min
+            .iter()
+            .filter(|&e| rhs.min.iter().all(|e2| Expr::le(e, e2)))
+            .cloned()
+            .chain(
+                rhs.min
                     .iter()
-                    .filter(|&e| min2.iter().all(|e2| Expr::le(e, e2)))
-                    .cloned()
-                    .chain(
-                        min2.iter()
-                            .filter(|e| min1.iter().all(|e2| Expr::le(e, e2)))
-                            .cloned(),
-                    )
-                    .collect();
-                let max = max1
+                    .filter(|e| lhs.min.iter().all(|e2| Expr::le(e, e2)))
+                    .cloned(),
+            )
+            .collect();
+        let max = lhs
+            .max
+            .iter()
+            .filter(|&e| rhs.max.iter().all(|e2| Expr::le(e2, e)))
+            .cloned()
+            .chain(
+                rhs.max
                     .iter()
-                    .filter(|&e| max2.iter().all(|e2| Expr::le(e2, e)))
-                    .cloned()
-                    .chain(
-                        max2.iter()
-                            .filter(|e| max1.iter().all(|e2| Expr::le(e2, e)))
-                            .cloned(),
-                    )
-                    .collect();
-                let mut result = ValueRange::Inclusive { min, max };
-                result.simplify();
-                result
-            }
-        }
+                    .filter(|e| lhs.max.iter().all(|e2| Expr::le(e2, e)))
+                    .cloned(),
+            )
+            .collect();
+        let equal = lhs
+            .equal
+            .iter()
+            .filter(|&e| rhs.equal.iter().any(|e2| e == e2))
+            .cloned()
+            .chain(
+                rhs.equal
+                    .iter()
+                    .filter(|&e| lhs.equal.iter().any(|e2| e == e2))
+                    .cloned(),
+            )
+            .collect();
+        let mut result = ValueRange { min, max, equal };
+        result.simplify();
+        result
     }
 
     /// Scale a range by a factor.
     pub fn scale(&self, factor: u32) -> ValueRange {
-        match self {
-            ValueRange::Exact(equivs) => {
-                let equivs = equivs
-                    .iter()
-                    .filter_map(|e| e.scale(factor))
-                    .collect::<SmallVec<[Expr; 1]>>();
-                if equivs.is_empty() {
-                    let mut result = ValueRange::Inclusive {
-                        min: smallvec![],
-                        max: smallvec![],
-                    };
-                    result.simplify();
-                    result
-                } else {
-                    ValueRange::Exact(equivs)
-                }
-            }
-            ValueRange::Inclusive { min, max } => {
-                let min = min.iter().map(|e| e.scale_downward(factor)).collect();
-                let max = max.iter().map(|e| e.scale_upward(factor)).collect();
-                let mut result = ValueRange::Inclusive { min, max };
-                result.simplify();
-                result
-            }
-        }
+        let equal = self.equal.iter().filter_map(|e| e.scale(factor)).collect();
+        let min = self.min.iter().map(|e| e.scale_downward(factor)).collect();
+        let max = self.max.iter().map(|e| e.scale_upward(factor)).collect();
+        let mut result = ValueRange { equal, min, max };
+        result.simplify();
+        result
     }
 
     /// Add an offset to the lower and upper bounds of a range.
     pub fn offset(&self, offset: i64) -> ValueRange {
-        match self {
-            ValueRange::Exact(equivs) => {
-                let equivs = equivs
-                    .iter()
-                    .flat_map(|e| Expr::offset(e, offset))
-                    .collect();
-                let mut result = ValueRange::Exact(equivs);
-                result.simplify();
-                result
-            }
-            ValueRange::Inclusive { min, max } => {
-                let min = min.iter().flat_map(|e| Expr::offset(e, offset)).collect();
-                let max = max.iter().flat_map(|e| Expr::offset(e, offset)).collect();
-                let mut result = ValueRange::Inclusive { min, max };
-                result.simplify();
-                result
-            }
-        }
+        let equal = self
+            .equal
+            .iter()
+            .flat_map(|e| Expr::offset(e, offset))
+            .collect();
+        let min = self
+            .min
+            .iter()
+            .flat_map(|e| Expr::offset(e, offset))
+            .collect();
+        let max = self
+            .max
+            .iter()
+            .flat_map(|e| Expr::offset(e, offset))
+            .collect();
+        let mut result = ValueRange { equal, min, max };
+        result.simplify();
+        result
     }
 
     /// Find the range of the sum of two values described by ranges.
     pub fn add(lhs: &ValueRange, rhs: &ValueRange) -> ValueRange {
         trace!("ValueRange::add: {lhs:?} + {rhs:?}");
-        match (lhs, rhs) {
-            (ValueRange::Exact(e1), ValueRange::Exact(e2)) => {
-                let equivs = e1
-                    .iter()
-                    .flat_map(|e1| e2.iter().map(|e2| Expr::add(e1, e2)))
-                    .collect();
-                let mut result = ValueRange::Exact(equivs);
-                trace!(" -> exact + exact: {result:?}");
-                result.simplify();
-                trace!(" -> {result:?}");
-                result
-            }
-            (ValueRange::Exact(exact), ValueRange::Inclusive { min, max })
-            | (ValueRange::Inclusive { min, max }, ValueRange::Exact(exact)) => {
-                let min = min
-                    .iter()
-                    .flat_map(|m| exact.iter().map(|e| Expr::add(m, e)))
-                    .collect();
-                let max = max
-                    .iter()
-                    .flat_map(|m| exact.iter().map(|e| Expr::add(m, e)))
-                    .collect();
-                let mut result = ValueRange::Inclusive { min, max };
-                trace!(" -> exact + inclusive: {result:?}");
-                result.simplify();
-                trace!(" -> {result:?}");
-                result
-            }
-            (
-                ValueRange::Inclusive {
-                    min: min1,
-                    max: max1,
-                },
-                ValueRange::Inclusive {
-                    min: min2,
-                    max: max2,
-                },
-            ) => {
-                let min = min1
-                    .iter()
-                    .flat_map(|m1| min2.iter().map(|m2| Expr::add(m1, m2)))
-                    .collect();
-                let max = max1
-                    .iter()
-                    .flat_map(|m1| max2.iter().map(|m2| Expr::add(m1, m2)))
-                    .collect();
-                let mut result = ValueRange::Inclusive { min, max };
-                trace!(" -> inclusive + inclusive: {result:?}");
-                result.simplify();
-                trace!(" -> {result:?}");
-                result
-            }
-        }
-    }
-
-    /// Clamp a ValueRange given a bit-width for the result.
-    fn clamp(self, width: u16) -> ValueRange {
-        trace!("ValueRange::clamp: {self:?} width {width}");
-        let result = if self.contains_expr(&Expr::constant128(
-            i128::from(max_value_for_width(width)) + 1,
-        )) {
-            // Underflow or overflow is possible!
-            ValueRange::Inclusive {
-                min: smallvec![],
-                max: smallvec![Expr::constant(max_value_for_width(width))],
-            }
-        } else {
-            self
-        };
-        trace!("ValueRange::clamp: -> {result:?}");
+        let min = lhs
+            .min
+            .iter()
+            .flat_map(|m1| rhs.min.iter().map(|m2| Expr::add(m1, m2)))
+            .collect();
+        let max = lhs
+            .max
+            .iter()
+            .flat_map(|m1| rhs.max.iter().map(|m2| Expr::add(m1, m2)))
+            .collect();
+        let equal = lhs
+            .equal
+            .iter()
+            .flat_map(|m1| rhs.equal.iter().map(|m2| Expr::add(m1, m2)))
+            .collect();
+        let mut result = ValueRange { equal, min, max };
+        trace!(" -> inclusive + inclusive: {result:?}");
+        result.simplify();
+        trace!(" -> {result:?}");
         result
     }
 
-    /// Add a new maximum to a range.
-    fn with_max(&self, new_max: Expr) -> ValueRange {
-        match self {
-            ValueRange::Exact(equiv) => {
-                let mut result = ValueRange::Inclusive {
-                    min: equiv.clone(),
-                    max: equiv
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once(new_max))
-                        .collect(),
-                };
-                result.simplify();
-                result
-            }
-            ValueRange::Inclusive { min, max } => {
-                let mut max = max.clone();
-                max.push(new_max);
-                let mut result = ValueRange::Inclusive {
-                    min: min.clone(),
-                    max,
-                };
-                result.simplify();
-                result
-            }
-        }
+    /// Clamp a ValueRange given a bit-width for the result.
+    fn clamp(mut self, width: u16) -> ValueRange {
+        trace!("ValueRange::clamp: {self:?} width {width}");
+        self.max.push(Expr::constant(max_value_for_width(width)));
+        self.simplify();
+        trace!("ValueRange::clamp: -> {self:?}");
+        self
     }
 }
 
@@ -924,7 +826,7 @@ impl Fact {
         // exactly one value.
         Fact::Range {
             bit_width,
-            range: ValueRange::Exact(smallvec![Expr::constant(value)]),
+            range: ValueRange::exact(Expr::constant(value)),
         }
     }
 
@@ -932,7 +834,7 @@ impl Fact {
     pub fn dynamic_base_ptr(ty: ir::MemoryType) -> Self {
         Fact::Mem {
             ty,
-            range: ValueRange::Exact(smallvec![Expr::constant(0)]),
+            range: ValueRange::exact(Expr::constant(0)),
             nullable: false,
         }
     }
@@ -947,7 +849,10 @@ impl Fact {
     pub fn value(bit_width: u16, value: ir::Value) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Exact(smallvec![Expr::value(value)]),
+            range: ValueRange::exact_with_max(
+                Expr::value(value),
+                Expr::constant(max_value_for_width(bit_width)),
+            ),
         }
     }
 
@@ -955,7 +860,10 @@ impl Fact {
     pub fn value_offset(bit_width: u16, value: ir::Value, offset: i64) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Exact(smallvec![Expr::value_offset(value, offset.into())]),
+            range: ValueRange::exact_with_max(
+                Expr::value_offset(value, offset.into()),
+                Expr::constant(max_value_for_width(bit_width)),
+            ),
         }
     }
 
@@ -963,7 +871,10 @@ impl Fact {
     pub fn global_value(bit_width: u16, gv: ir::GlobalValue) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Exact(smallvec![Expr::global_value(gv)]),
+            range: ValueRange::exact_with_max(
+                Expr::global_value(gv),
+                Expr::constant(max_value_for_width(bit_width)),
+            ),
         }
     }
 
@@ -971,7 +882,10 @@ impl Fact {
     pub fn global_value_offset(bit_width: u16, gv: ir::GlobalValue, offset: i64) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Exact(smallvec![Expr::global_value_offset(gv, offset.into())]),
+            range: ValueRange::exact_with_max(
+                Expr::global_value_offset(gv, offset.into()),
+                Expr::constant(max_value_for_width(bit_width)),
+            ),
         }
     }
 
@@ -980,10 +894,7 @@ impl Fact {
     pub fn static_value_range(bit_width: u16, max: u64) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Inclusive {
-                min: smallvec![],
-                max: smallvec![Expr::constant(max)],
-            },
+            range: ValueRange::min_max(Expr::constant(0), Expr::constant(max)),
         }
     }
 
@@ -992,10 +903,7 @@ impl Fact {
     pub fn static_value_two_ended_range(bit_width: u16, min: u64, max: u64) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Inclusive {
-                min: smallvec![Expr::constant(min)],
-                max: smallvec![Expr::constant(max)],
-            },
+            range: ValueRange::min_max(Expr::constant(min), Expr::constant(max)),
         }
     }
 
@@ -1003,20 +911,20 @@ impl Fact {
     pub fn dynamic_value_range(bit_width: u16, max: Expr) -> Self {
         Fact::Range {
             bit_width,
-            range: ValueRange::Inclusive {
-                min: smallvec![],
-                max: smallvec![max],
-            },
+            range: ValueRange::min_max(Expr::constant(0), max),
         }
     }
 
     /// Create a range fact that specifies the maximum range for a
     /// value of the given bit-width.
     pub fn max_range_for_width(bit_width: u16) -> Self {
-        let min = smallvec![];
-        let max = smallvec![Expr::constant(max_value_for_width(bit_width))];
-        let range = ValueRange::Inclusive { min, max };
-        Fact::Range { bit_width, range }
+        Fact::Range {
+            bit_width,
+            range: ValueRange::min_max(
+                Expr::constant(0),
+                Expr::constant(max_value_for_width(bit_width)),
+            ),
+        }
     }
 
     /// Create a fact that describes the base pointer for a memory
@@ -1024,7 +932,7 @@ impl Fact {
     pub fn memory_base(ty: ir::MemoryType) -> Self {
         Fact::Mem {
             ty,
-            range: ValueRange::Exact(smallvec![Expr::constant(0)]),
+            range: ValueRange::exact(Expr::constant(0)),
             nullable: false,
         }
     }
@@ -1055,12 +963,12 @@ impl Fact {
     /// width.
     pub fn max_range_for_width_extended(from_width: u16, to_width: u16) -> Self {
         debug_assert!(from_width <= to_width);
-        let min = smallvec![];
-        let max = smallvec![Expr::constant(max_value_for_width(from_width))];
-        let range = ValueRange::Inclusive { min, max };
         Fact::Range {
             bit_width: to_width,
-            range,
+            range: ValueRange::min_max(
+                Expr::constant(0),
+                Expr::constant(max_value_for_width(from_width)),
+            ),
         }
     }
 
@@ -1202,9 +1110,9 @@ impl Fact {
     pub fn as_expr(&self) -> Option<&Expr> {
         match self {
             Fact::Range {
-                range: ValueRange::Exact(equiv),
+                range: ValueRange { equal, .. },
                 ..
-            } => equiv.first(),
+            } => equal.first(),
             _ => None,
         }
     }
@@ -1265,15 +1173,6 @@ impl Fact {
                 range,
             },
             f => f.clone(),
-        }
-    }
-
-    /// Add a maximum to the range in either a Range or Mem fact.
-    pub fn with_max(&self, max: Expr) -> Fact {
-        if let Some(r) = self.range() {
-            self.with_range(r.with_max(max))
-        } else {
-            self.clone()
         }
     }
 }
@@ -1687,74 +1586,70 @@ impl<'a> FactContext<'a> {
         kind: InequalityKind,
     ) -> Fact {
         trace!("apply_inequality: fact {fact:?} lhs {lhs:?} rhs {rhs:?} kind {kind:?}");
-        // If `rhs` is an exact value, and we have an expression for
-        // it, and if `fact` is a range, look for that expression in
-        // the upper bounds of `fact`; if present (or offset), add the
-        // lower and upper bounds of `lhs` (properly offset if needed)
-        // to `fact`'s upper bounds.
-        let result = match (fact.range(), lhs, rhs) {
-            (
-                Some(range),
-                Fact::Range {
-                    range: ValueRange::Exact(equiv_lhs),
-                    ..
-                },
-                Fact::Range {
-                    range: ValueRange::Exact(equiv_rhs),
-                    ..
-                },
-            ) => {
-                trace!(" -> range {range:?} LHS equiv {equiv_lhs:?} RHS equiv {equiv_rhs:?}");
-                let new_range = match range {
-                    ValueRange::Inclusive { min, max } => {
-                        let offset = max
-                            .iter()
-                            .flat_map(|m| equiv_rhs.iter().flat_map(|e| Expr::difference(m, e)))
-                            .max();
-                        trace!(" -> offset {offset:?}");
-                        if let Some(offset) = offset {
-                            let offset = match kind {
-                                InequalityKind::Loose => offset,
-                                InequalityKind::Strict => offset - 1,
-                            };
-                            let new_upper_bounds =
-                                equiv_lhs.iter().flat_map(|e| Expr::offset(e, offset));
-                            let max = max.iter().cloned().chain(new_upper_bounds).collect();
-                            let min = min.clone();
-                            ValueRange::Inclusive { min, max }
-                        } else {
-                            range.clone()
-                        }
-                    }
-                    ValueRange::Exact(equivs) => {
-                        let offset = equivs
-                            .iter()
-                            .flat_map(|m| equiv_rhs.iter().flat_map(|e| Expr::difference(m, e)))
-                            .max();
-                        trace!(" -> offset {offset:?}");
-                        if let Some(offset) = offset {
-                            let offset = match kind {
-                                InequalityKind::Loose => offset,
-                                InequalityKind::Strict => offset - 1,
-                            };
-                            let new_upper_bounds = equiv_lhs
-                                .iter()
-                                .flat_map(|e| Expr::offset(e, offset))
-                                .chain(equivs.iter().cloned())
-                                .collect();
-                            trace!(" -> new_upper_bounds {new_upper_bounds:?}");
-                            ValueRange::Inclusive {
-                                min: equivs.clone(),
-                                max: new_upper_bounds,
-                            }
-                        } else {
-                            ValueRange::Exact(equivs.clone())
-                        }
-                    }
+
+        // The basic idea is that if `fact` is <= RHS, and RHS <= LHS,
+        // then we know that `fact` is <= LHS as well (transitivity).
+        //
+        // We thus first check if `fact` is indeed <= RHS: are any of
+        // its upper bounds <= any lower or equal bounds on RHS? If
+        // so, what is the minimum headroom (known difference)? E.g.,
+        // if `fact` is known to be `v1`, and RHS is equal to or
+        // greater than `v1 + 4`, then the known difference is at
+        // least 4.
+        //
+        // If such a difference is known, we then take all lower,
+        // equal and upper bounds of LHS, add that offset, and add
+        // these as upper bounds on `fact`. So for example, if we know
+        // that `v1 + 4 <= gv1`, then we can update the fact to be
+        // `range(bit_width, {}, =v1, gv1 - 4)`: it is still equal to
+        // `v1`, but it is also at most `gv1 - 4`.
+
+        let result = if let (Some(fact_range), Some(lhs_range), Some(rhs_range)) =
+            (fact.range(), lhs.range(), rhs.range())
+        {
+            let offset = fact_range
+                .equal
+                .iter()
+                .chain(fact_range.max.iter())
+                .flat_map(|fact_expr| {
+                    rhs_range
+                        .min
+                        .iter()
+                        .chain(rhs_range.equal.iter())
+                        .flat_map(|rhs_expr| Expr::difference(rhs_expr, fact_expr))
+                })
+                .max();
+
+            // Positive offset indicates that RHS is greater than fact by that amount.
+            if let Some(offset) = offset {
+                let offset = match kind {
+                    InequalityKind::Loose => offset,
+                    // If the inequality is strict, we get
+                    // one extra free increment: x < y
+                    // implies x <= y - 1.
+                    InequalityKind::Strict => offset + 1,
                 };
-                fact.with_range(new_range)
+                let new_upper_bounds = lhs_range
+                    .min
+                    .iter()
+                    .chain(lhs_range.equal.iter())
+                    .flat_map(|e| Expr::offset(e, -offset));
+                let max = fact_range
+                    .max
+                    .iter()
+                    .cloned()
+                    .chain(new_upper_bounds)
+                    .collect::<SmallVec<[Expr; 1]>>();
+                fact.with_range(ValueRange {
+                    min: fact_range.min.clone(),
+                    equal: fact_range.equal.clone(),
+                    max,
+                })
+            } else {
+                fact.clone()
             }
-            _ => fact.clone(),
+        } else {
+            fact.clone()
         };
 
         trace!("apply_inequality({fact:?}, {lhs:?}, {rhs:?}, {kind:?} -> {result:?}");
