@@ -789,12 +789,24 @@ impl ValueRange {
         let min = lhs
             .min
             .iter()
-            .flat_map(|m1| rhs.min.iter().map(|m2| Expr::add(m1, m2)))
+            .chain(lhs.equal.iter())
+            .flat_map(|m1| {
+                rhs.min
+                    .iter()
+                    .chain(rhs.equal.iter())
+                    .map(|m2| Expr::add(m1, m2))
+            })
             .collect();
         let max = lhs
             .max
             .iter()
-            .flat_map(|m1| rhs.max.iter().map(|m2| Expr::add(m1, m2)))
+            .chain(lhs.equal.iter())
+            .flat_map(|m1| {
+                rhs.max
+                    .iter()
+                    .chain(rhs.equal.iter())
+                    .map(|m2| Expr::add(m1, m2))
+            })
             .collect();
         let equal = lhs
             .equal
