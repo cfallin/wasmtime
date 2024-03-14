@@ -415,6 +415,30 @@ impl Table {
     }
 }
 
+/// An opaque reference to a node in the proof-carrying code partial order graph.
+///
+/// PCC order-graph nodes are used to represent known inequalities; the
+/// order-graph is a compact way of representing the context for the
+/// entire function body in a way that shares what would otherwise have
+/// been replicated in many PCC facts.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub struct OrderNode(u32);
+entity_impl!(OrderNode, "ordernode");
+
+impl OrderNode {
+    /// Create a new order-node reference from its number.
+    ///
+    /// This method is for use by the parser.
+    pub fn with_number(n: u32) -> Option<Self> {
+        if n < u32::MAX {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+}
+
 /// An opaque reference to any of the entities defined in this module that can appear in CLIF IR.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
@@ -447,6 +471,8 @@ pub enum AnyEntity {
     SigRef(SigRef),
     /// A table.
     Table(Table),
+    /// A node in the order-graph.
+    OrderNode(OrderNode),
     /// A function's stack limit
     StackLimit,
 }
@@ -468,6 +494,7 @@ impl fmt::Display for AnyEntity {
             Self::FuncRef(r) => r.fmt(f),
             Self::SigRef(r) => r.fmt(f),
             Self::Table(r) => r.fmt(f),
+            Self::OrderNode(r) => r.fmt(f),
             Self::StackLimit => write!(f, "stack_limit"),
         }
     }
@@ -554,6 +581,12 @@ impl From<SigRef> for AnyEntity {
 impl From<Table> for AnyEntity {
     fn from(r: Table) -> Self {
         Self::Table(r)
+    }
+}
+
+impl From<OrderNode> for AnyEntity {
+    fn from(r: OrderNode) -> Self {
+        Self::OrderNode(r)
     }
 }
 

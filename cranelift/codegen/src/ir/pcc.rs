@@ -80,6 +80,8 @@ use crate::trace;
 use regalloc2::Function as _;
 use std::fmt;
 
+pub mod order;
+
 #[cfg(feature = "enable-serde")]
 use serde_derive::{Deserialize, Serialize};
 
