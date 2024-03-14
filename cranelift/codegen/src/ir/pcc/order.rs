@@ -35,6 +35,7 @@
 //!    Queries may be performed under a specified-true predicate.
 
 use crate::ir::OrderNode;
+use cranelift_entity::PrimaryMap;
 use std::collections::BTreeSet;
 
 /// An Order Graph: represents a shared context in which queries may be
@@ -45,11 +46,22 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct OrderGraph {
-    /// Next order node index to allocate.
-    next_node: u32,
-
+    /// Order nodes: arbitrary symbolic values that can be compared.
+    pub nodes: PrimaryMap<OrderNode, OrderNodeData>,
     /// Edges between Order Nodes.
     pub edges: BTreeSet<OrderEdge>,
+}
+
+/// An "order node": a value in the program about which we know some
+/// ordering relations, and for which we may know a specific constant
+/// value.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub struct OrderNodeData {
+    /// Known minimum static value.
+    pub min: u64,
+    /// Known maximum static value.
+    pub max: u64,
 }
 
 /// An edge from the given node to another node, with the given
@@ -127,16 +139,30 @@ impl OrderGraph {
     /// Create a new OrderGraph.
     pub fn new() -> Self {
         Self {
-            next_node: 0,
+            nodes: PrimaryMap::default(),
             edges: BTreeSet::new(),
         }
     }
 
-    /// Add a new node to an OrderGraph.
-    pub fn add_node(&mut self) -> OrderNode {
-        let ret = OrderNode::from_u32(self.next_node);
-        self.next_node += 1;
-        ret
+    /// Add a new symbolic node to an OrderGraph.
+    pub fn symbolic(&mut self) -> OrderNode {
+        self.nodes.push(OrderNodeData {
+            min: 0,
+            max: u64::MAX,
+        })
+    }
+
+    /// Add a new exact node to an OrderGraph.
+    pub fn exact(&mut self, value: u64) -> OrderNode {
+        self.nodes.push(OrderNodeData {
+            min: value,
+            max: value,
+        })
+    }
+
+    /// Add a new node with a static upper bound to an OrderGraph.
+    pub fn static_upper_bound(&mut self, max: u64) -> OrderNode {
+        self.nodes.push(OrderNodeData { min: 0, max })
     }
 
     /// Add a new edge between two nodes, optionally with some distance,
@@ -158,6 +184,9 @@ impl OrderGraph {
 
     /// Finalize the order-graph: compute the transitive closure.
     pub fn finalize(&mut self) {
+        // Find the transitive closure of inequalities via the
+        // "semi-naive evaluation algorithm" (a fixpoint algorithm with
+        // batches).
         let mut to_process = self.edges.clone();
         let mut new_edges = BTreeSet::new();
         while !to_process.is_empty() {
@@ -177,6 +206,24 @@ impl OrderGraph {
 
             to_process = new_edges.clone();
             self.edges.append(&mut new_edges);
+        }
+
+        // Propagate min and max across all edges in the transitive
+        // closure.
+        for edge in &self.edges {
+            if edge.pred.is_some() {
+                continue;
+            }
+            let from_max = self.nodes[edge.to]
+                .max
+                .checked_sub(edge.distance)
+                .unwrap_or(0);
+            let to_min = self.nodes[edge.from]
+                .min
+                .checked_add(edge.distance)
+                .unwrap_or(u64::MAX);
+            self.nodes[edge.from].max = std::cmp::min(self.nodes[edge.from].max, from_max);
+            self.nodes[edge.to].min = std::cmp::max(self.nodes[edge.to].min, to_min);
         }
     }
 
@@ -211,6 +258,11 @@ impl OrderGraph {
 
         best_edge.map(|e| e.distance)
     }
+
+    /// Get the lower and upper bounds on a node.
+    pub fn bounds(&self, node: OrderNode) -> (u64, u64) {
+        (self.nodes[node].min, self.nodes[node].max)
+    }
 }
 
 #[cfg(test)]
@@ -218,14 +270,14 @@ mod test {
     use super::*;
 
     #[test]
-    fn basic_order() {
+    fn sym_order() {
         let mut o = OrderGraph::new();
-        let n1 = o.add_node();
-        let n2 = o.add_node();
-        let n3 = o.add_node();
-        let n4 = o.add_node();
-        let n5 = o.add_node();
-        let n6 = o.add_node();
+        let n1 = o.symbolic();
+        let n2 = o.symbolic();
+        let n3 = o.symbolic();
+        let n4 = o.symbolic();
+        let n5 = o.symbolic();
+        let n6 = o.symbolic();
         o.add_edge(n1, n2, 0, None);
         o.add_edge(n2, n3, 10, Some((n5, n6)));
         o.add_edge(n3, n4, 5, None);
@@ -238,5 +290,19 @@ mod test {
         o.add_edge(n2, n4, 7, None);
         o.finalize();
         assert_eq!(o.query(n1, n4, None), Some(7));
+    }
+
+    #[test]
+    fn min_max_values() {
+        let mut o = OrderGraph::new();
+        let n1 = o.exact(42);
+        let n2 = o.symbolic();
+        let n3 = o.static_upper_bound(100);
+        let n4 = o.static_upper_bound(90);
+        o.add_edge(n1, n2, 5, None);
+        o.add_edge(n2, n3, 10, None);
+        o.add_edge(n3, n4, 0, None);
+        o.finalize();
+        assert_eq!(o.bounds(n2), (47, 80));
     }
 }
