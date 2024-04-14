@@ -208,7 +208,7 @@ impl wasmtime_environ::Compiler for Compiler {
             global_type: isa.pointer_type(),
             flags: MemFlags::trusted(),
         });
-        context.func.stack_limit = Some(stack_limit);
+        //context.func.stack_limit = Some(stack_limit);
         let FunctionBodyData {
             validator,
             body,
