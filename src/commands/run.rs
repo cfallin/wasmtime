@@ -252,6 +252,8 @@ impl RunCommand {
         store: &mut Store<Host>,
         modules: Vec<(String, Module)>,
     ) -> Result<Box<dyn FnOnce(&mut Store<Host>)>> {
+        store.set_epoch_deadline(1);
+
         if let Some(Profile::Guest { path, interval }) = &self.run.profile {
             #[cfg(feature = "profiling")]
             return Ok(self.setup_guest_profiler(store, modules, path, *interval));
