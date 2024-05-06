@@ -116,8 +116,6 @@ pub struct FunctionBodyData<'a> {
     pub body: FunctionBody<'a>,
     /// Validator for the function body
     pub validator: FuncToValidate<ValidatorResources>,
-    /// The start index for call-indirects in this body.
-    pub call_indirect_start: usize,
 }
 
 #[derive(Debug, Default)]
@@ -436,9 +434,6 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                         // this never gets past validation
                         ExternalKind::Tag => unreachable!(),
                     };
-                    if let EntityIndex::Table(table) = entity {
-                        self.flag_written_table(table);
-                    }
                     self.result
                         .module
                         .exports
@@ -504,10 +499,6 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                             let (offset, escaped) = ConstExpr::from_wasmparser(offset_expr)?;
                             debug_assert!(escaped.is_empty());
 
-                            if !offset.provably_nonzero_i32() {
-                                self.flag_table_possibly_non_null_zero_element(table_index);
-                            }
-
                             self.result
                                 .module
                                 .table_initialization
@@ -548,8 +539,6 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                     self.result.code_index + self.result.module.num_imported_funcs as u32;
                 let func_index = FuncIndex::from_u32(func_index);
 
-                let call_indirect_start = self.result.module.num_call_indirect_caches;
-
                 if self.tunables.generate_native_debuginfo {
                     let sig_index = self.result.module.functions[func_index].signature;
                     let sig = self.types[sig_index].unwrap_func();
@@ -568,13 +557,10 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                             params: sig.params().into(),
                         });
                 }
-                self.prescan_code_section(&body)?;
                 body.allow_memarg64(self.validator.features().contains(WasmFeatures::MEMORY64));
-                self.result.function_body_inputs.push(FunctionBodyData {
-                    validator,
-                    body,
-                    call_indirect_start,
-                });
+                self.result
+                    .function_body_inputs
+                    .push(FunctionBodyData { validator, body });
                 self.result.code_index += 1;
             }
 
@@ -693,83 +679,6 @@ and for re-adding support for interface types you can see this issue:
         Ok(())
     }
 
-    /// Check various properties in function bodies in a "pre-pass" as
-    /// needed, before we actually generate code. Currently this is
-    /// used for:
-    ///
-    /// - Call-indirect caching: we need to know whether a table is
-    ///   "immutable", i.e., there are opcodes that could update its
-    ///   entries. If this is the case then the optimization isn't
-    ///   applicable. We can check this by simply scanning all functions
-    ///   for the relevant opcodes.
-    ///
-    ///   We also need to know how many `call_indirect` opcodes are in
-    ///   the whole module so that we know how large a `vmctx` struct
-    ///   to reserve and what its layout will be; and the starting
-    ///   index in this count for each function, so we can generate
-    ///   its code (with accesses to its own `call_indirect` callsite
-    ///   caches) in parallel.
-    fn prescan_code_section(&mut self, body: &FunctionBody<'_>) -> Result<()> {
-        if self.tunables.cache_call_indirects {
-            for op in body.get_operators_reader()? {
-                let op = op?;
-                match op {
-                    // Check whether a table may be mutated by any
-                    // opcode. (Note that we separately check for
-                    // table exports so we can detect mutations from
-                    // the outside; here we are only concerned with
-                    // mutations by our own module's code.)
-                    Operator::TableSet { table }
-                    | Operator::TableFill { table }
-                    | Operator::TableInit { table, .. }
-                    | Operator::TableCopy {
-                        dst_table: table, ..
-                    } => {
-                        // We haven't yet validated the body during
-                        // this pre-scan, so we need to check that
-                        // `dst_table` is in bounds. Ignore if not:
-                        // we'll catch the error later.
-                        let table = TableIndex::from_u32(table);
-                        if table.index() < self.result.module.table_plans.len() {
-                            self.flag_written_table(table);
-                        }
-                    }
-                    // Count the `call_indirect` sites so we can
-                    // assign them unique slots.
-                    //
-                    // We record the value of this counter as a
-                    // start-index as we start to scan each function,
-                    // and that function's compilation (which is
-                    // normally a separate parallel task) counts on
-                    // its own from that start index.
-                    Operator::CallIndirect { .. } => {
-                        self.result.module.num_call_indirect_caches += 1;
-
-                        // Cap the `num_call_indirect_caches` counter
-                        // at `max_call_indirect_cache_slots` so that
-                        // we don't allocate more than that amount of
-                        // space in the VMContext struct.
-                        //
-                        // Note that we also separately check against
-                        // this limit when emitting code for each
-                        // individual slot because we may cross the
-                        // limit in the middle of a function; also
-                        // once we hit the limit, the start-index for
-                        // each subsequent function will be saturated
-                        // at the limit.
-                        self.result.module.num_call_indirect_caches = core::cmp::min(
-                            self.result.module.num_call_indirect_caches,
-                            self.tunables.max_call_indirect_cache_slots,
-                        );
-                    }
-
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn register_dwarf_section(&mut self, section: &CustomSectionReader<'data>) {
         let name = section.name().trim_end_matches(".dwo");
         if !name.starts_with(".debug_") {
@@ -880,14 +789,6 @@ and for re-adding support for interface types you can see this issue:
         let index = self.result.module.num_escaped_funcs as u32;
         ty.func_ref = FuncRefIndex::from_u32(index);
         self.result.module.num_escaped_funcs += 1;
-    }
-
-    fn flag_written_table(&mut self, table: TableIndex) {
-        self.result.module.table_plans[table].written = true;
-    }
-
-    fn flag_table_possibly_non_null_zero_element(&mut self, table: TableIndex) {
-        self.result.module.table_plans[table].non_null_zero = true;
     }
 
     /// Parses the Name section of the wasm module.

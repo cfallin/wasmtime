@@ -559,12 +559,6 @@ impl CommonOptions {
         if let Some(enable) = self.opts.memory_init_cow {
             config.memory_init_cow(enable);
         }
-        if let Some(enable) = self.opts.cache_call_indirects {
-            config.cache_call_indirects(enable);
-        }
-        if let Some(max) = self.opts.max_call_indirect_cache_slots {
-            config.max_call_indirect_cache_slots(max);
-        }
 
         match_feature! {
             ["pooling-allocator" : self.opts.pooling_allocator.or(pooling_allocator_default)]
