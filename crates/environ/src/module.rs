@@ -464,6 +464,9 @@ pub struct Module {
     /// an `func_ref` index (and is the maximum func_ref index).
     pub num_escaped_funcs: usize,
 
+    /// Number of call-indirect caches.
+    pub num_call_indirect_caches: usize,
+
     /// Types of functions, imported and local.
     pub functions: PrimaryMap<FuncIndex, FunctionType>,
 

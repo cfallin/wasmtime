@@ -358,6 +358,8 @@ impl Metadata<'_> {
             relaxed_simd_deterministic,
             tail_callable,
             winch_callable,
+            cache_call_indirects,
+            max_call_indirect_cache_slots,
 
             // This doesn't affect compilation, it's just a runtime setting.
             dynamic_memory_growth_reserve: _,

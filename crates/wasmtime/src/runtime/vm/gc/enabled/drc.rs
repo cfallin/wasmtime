@@ -901,6 +901,7 @@ mod tests {
             num_owned_memories: 0,
             num_defined_globals: 0,
             num_escaped_funcs: 0,
+            num_call_indirect_caches: 0,
         });
 
         assert_eq!(
@@ -929,6 +930,7 @@ mod tests {
             num_owned_memories: 0,
             num_defined_globals: 0,
             num_escaped_funcs: 0,
+            num_call_indirect_caches: 0,
         });
         assert_eq!(
             offsets.vm_gc_ref_activation_table_next() as usize,
@@ -956,6 +958,7 @@ mod tests {
             num_owned_memories: 0,
             num_defined_globals: 0,
             num_escaped_funcs: 0,
+            num_call_indirect_caches: 0,
         });
         assert_eq!(
             offsets.vm_gc_ref_activation_table_end() as usize,
