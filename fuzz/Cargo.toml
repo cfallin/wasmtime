@@ -39,7 +39,7 @@ quote = "1.0"
 component-fuzz-util = { workspace = true }
 
 [features]
-default = ['fuzz-spec-interpreter']
+default = []
 fuzz-spec-interpreter = ['wasmtime-fuzzing/fuzz-spec-interpreter']
 chaos = ["cranelift-control/chaos"]
 
