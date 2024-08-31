@@ -53,7 +53,7 @@ cranelift-codegen-meta = { path = "meta", version = "0.112.0" }
 cranelift-isle = { path = "../isle/isle", version = "=0.112.0" }
 
 [features]
-default = ["std", "unwind", "host-arch", "timing"]
+default = ["std", "unwind", "host-arch", "timing", "trace-log"]
 
 # The "std" feature enables use of libstd. The "core" feature enables use
 # of some minimal std-like replacement libraries. At least one of these two
