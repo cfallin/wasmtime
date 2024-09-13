@@ -27,6 +27,7 @@ use std::hash::Hasher;
 
 mod cost;
 mod elaborate;
+mod full;
 
 /// Pass over a Function that does the whole aegraph thing.
 ///
@@ -102,6 +103,7 @@ where
     pub(crate) rewrite_depth: usize,
     pub(crate) subsume_values: FxHashSet<Value>,
     optimized_values: SmallVec<[Value; MATCHES_LIMIT]>,
+    nested_rewrite_enabled: bool,
 }
 
 /// For passing to `insert_pure_enode`. Sometimes the enode already
@@ -212,7 +214,11 @@ where
             self.attach_constant_fact(inst, result, ty);
 
             self.available_block[result] = self.get_available_block(inst);
-            let opt_value = self.optimize_pure_enode(inst);
+            let opt_value = if self.nested_rewrite_enabled {
+                self.optimize_pure_enode(inst)
+            } else {
+                result
+            };
 
             for &argument in self.func.dfg.inst_args(inst) {
                 self.eclasses.pin_index(argument);
@@ -302,7 +308,9 @@ where
         self.stats.rewrite_rule_invoked += 1;
         debug_assert!(optimized_values.is_empty());
         crate::opts::generated_code::constructor_simplify(
-            &mut IsleContext { ctx: self },
+            &mut IsleContext {
+                ctx: &mut EgraphIsleContext { ctx: self },
+            },
             orig_value,
             &mut optimized_values,
         );
@@ -500,6 +508,37 @@ where
     }
 }
 
+struct EgraphIsleContext<'a, 'b, 'c>
+where
+    'b: 'a,
+    'c: 'b,
+{
+    ctx: &'a mut OptimizeCtx<'b, 'c>,
+}
+
+impl<'a, 'b, 'c> crate::opts::EgraphImpl for EgraphIsleContext<'a, 'b, 'c>
+where
+    'b: 'a,
+    'c: 'b,
+{
+    fn insert_node(&mut self, op: InstructionData, ty: Type) -> Value {
+        self.ctx.insert_pure_enode(NewOrExistingInst::New(op, ty))
+    }
+    fn func(&mut self) -> &mut Function {
+        &mut self.ctx.func
+    }
+    fn remat(&mut self, value: Value) -> Value {
+        self.ctx.remat_values.insert(value);
+        self.ctx.stats.remat += 1;
+        value
+    }
+    fn subsume(&mut self, value: Value) -> Value {
+        self.ctx.subsume_values.insert(value);
+        self.ctx.stats.subsume += 1;
+        value
+    }
+}
+
 impl<'a> EgraphPass<'a> {
     /// Create a new EgraphPass.
     pub fn new(
@@ -528,22 +567,26 @@ impl<'a> EgraphPass<'a> {
 
     /// Run the process.
     pub fn run(&mut self) {
-        self.remove_pure_and_optimize();
+        if self.flags.enable_full_egraph() {
+            full::FullCongruence::new(self).run();
+        } else {
+            self.remove_pure_and_optimize();
 
-        trace!("egraph built:\n{}\n", self.func.display());
-        if cfg!(feature = "trace-log") {
-            for (value, def) in self.func.dfg.values_and_defs() {
-                trace!(" -> {} = {:?}", value, def);
-                match def {
-                    ValueDef::Result(i, 0) => {
-                        trace!("  -> {} = {:?}", i, self.func.dfg.insts[i]);
+            trace!("egraph built:\n{}\n", self.func.display());
+            if cfg!(feature = "trace-log") {
+                for (value, def) in self.func.dfg.values_and_defs() {
+                    trace!(" -> {} = {:?}", value, def);
+                    match def {
+                        ValueDef::Result(i, 0) => {
+                            trace!("  -> {} = {:?}", i, self.func.dfg.insts[i]);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
+            trace!("stats: {:#?}", self.stats);
+            trace!("pinned_union_count: {}", self.eclasses.pinned_union_count);
         }
-        trace!("stats: {:#?}", self.stats);
-        trace!("pinned_union_count: {}", self.eclasses.pinned_union_count);
         self.elaborate();
     }
 
@@ -691,6 +734,7 @@ impl<'a> EgraphPass<'a> {
                             flags: self.flags,
                             ctrl_plane: self.ctrl_plane,
                             optimized_values: Default::default(),
+                            nested_rewrite_enabled: true,
                         };
 
                         if is_pure_for_egraph(ctx.func, inst) {

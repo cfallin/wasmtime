@@ -54,6 +54,41 @@ pub(crate) fn define() -> SettingGroup {
     );
 
     settings.add_bool(
+        "enable_full_egraph",
+        "Enable full congruence in the egraph-based mid-end.",
+        r#"
+            This enables full congruence closure and repeated rewriting in a fixpoint loop
+            in the mid-end optimizer. In short, this means that Cranelift may perform more
+            optimizations, by more fully carrying through the implications of its simplifications:
+            it finds the "transitive closure" of all equivalent forms of expressions that are
+            possible. When this option is turned off, instead, Cranelift performs a single-pass
+            eager rewrite that still achieves good optimization but may miss some opportunities.
+        "#,
+        false,
+    );
+
+    settings.add_num(
+        "full_egraph_max_passes",
+        "Maximum number of passes in the fixpoint loop of full congruence.",
+        r#"
+            This determines the maximum number of times rewrite rules and congruence will
+            pass over the egraph, avoiding potentially very long runtimes.
+        "#,
+        5,
+    );
+
+    settings.add_num(
+        "full_egraph_max_inflation",
+        "Maximum inflation factor for number of value nodes in egraph.",
+        r#"
+            This determines the maximum growth factor of the egraph during rewriting and
+            congruence closure, preventing exponential blowup.
+        "#,
+        10,
+    );
+
+
+    settings.add_bool(
         "enable_verifier",
         "Run the Cranelift IR verifier at strategic times during compilation.",
         r#"
