@@ -269,10 +269,11 @@ impl<'a> AliasAnalysis<'a> {
         inst: Inst,
     ) -> Option<Value> {
         trace!(
-            "alias analysis: scanning at inst{} with state {:?} ({:?})",
+            "alias analysis: scanning at inst{} with state {:?} ({:?}), mem_values {:?}",
             inst.index(),
             state,
             func.dfg.insts[inst],
+            self.mem_values,
         );
 
         let replacing_value = if let Some((address, offset, ty)) = inst_addr_offset_type(func, inst)
@@ -390,6 +391,14 @@ impl<'a> AliasAnalysis<'a> {
                 }
             }
         }
+    }
+
+    /// When running the main traversal loop outside of this module,
+    /// and reusing an `AliasAnalysis` over again, we need to reset
+    /// `mem_values` at the start of each block since it is
+    /// fundamentally flow-sensitive state.
+    pub fn start_block(&mut self) {
+        self.mem_values.clear();
     }
 }
 

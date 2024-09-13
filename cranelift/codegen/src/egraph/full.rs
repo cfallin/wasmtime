@@ -3,6 +3,7 @@
 //! TODO: integrate alias analysis.
 
 use super::*;
+use crate::trace;
 use cranelift_entity::SecondaryMap;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -50,6 +51,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         }
         self.remove_cycles();
         self.latest_args();
+        trace!("after full egraph:\n{:?}", self.egraph.func);
     }
 
     /// Remove pure ops from the CFG, leaving the skeleton.
@@ -75,18 +77,17 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             if self.egraph.func.dfg.resolve_aliases(value) != value {
                 continue;
             }
+            self.egraph.eclasses.add(value);
+            self.eclasses[value].push(value);
+            self.eclass_list.push(value);
             match def {
                 ValueDef::Result(inst, ..) => {
-                    self.egraph.eclasses.add(value);
                     if is_pure_for_egraph(self.egraph.func, inst) {
                         log::trace!(
                             "pure op result {} of inst {} becomes singleton eclass",
                             value,
                             inst
                         );
-                        self.eclass_list.push(value);
-                        self.eclasses[value].push(value);
-                        self.egraph.eclasses.add(value);
                         let ty = self.egraph.func.dfg.ctrl_typevar(inst);
                         let old = self
                             .dedup
@@ -103,7 +104,6 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     }
                 }
                 ValueDef::Param(..) => {
-                    self.egraph.eclasses.add(value);
                     log::trace!("blockparam {} is terminal singleton eclass", value);
                 }
                 ValueDef::Union(..) => {}
@@ -117,19 +117,28 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut cursor = FuncCursor::new(self.egraph.func);
         while let Some(block) = cursor.next_block() {
             let mut state = self.egraph.alias_analysis.block_starting_state(block);
+            self.egraph.alias_analysis.start_block();
             while let Some(inst) = cursor.next_inst() {
                 log::trace!(
                     "running alias analysis at skeleton inst {}: state {:?}",
                     inst,
                     state
                 );
+
                 if let Some(new_value) =
                     self.egraph
                         .alias_analysis
                         .process_inst(cursor.func, &mut state, inst)
                 {
                     let result = cursor.func.dfg.first_result(inst);
-                    cursor.func.dfg.change_to_alias(new_value, result);
+                    log::trace!(
+                        "replacing load {} result {} with {}",
+                        inst,
+                        result,
+                        new_value
+                    );
+                    cursor.func.dfg.clear_results(inst);
+                    cursor.func.dfg.change_to_alias(result, new_value);
                     cursor.remove_inst_and_step_back();
                     changed = true;
                 }
@@ -173,6 +182,18 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     self.egraph.eclasses.add(result);
                     self.egraph.eclasses.union(eclass, result);
                 }
+            }
+        }
+
+        // For every skeleton node, canonicalize args.
+        let mut cursor = FuncCursor::new(self.egraph.func);
+        while let Some(_block) = cursor.next_block() {
+            while let Some(inst) = cursor.next_inst() {
+                let pos = cursor.position();
+                let mut op = self.egraph.func.dfg.insts[inst];
+                self.canonicalize_args(&mut op);
+                self.egraph.func.dfg.insts[inst] = op;
+                cursor = FuncCursor::new(self.egraph.func).at_position(pos);
             }
         }
     }
@@ -412,6 +433,11 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut latest: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
         for &eclass in &self.eclass_list {
+            log::trace!(
+                "computing latest for eclass {} with enodes {:?}",
+                eclass,
+                self.eclasses[eclass]
+            );
             latest[eclass] = self.eclasses[eclass][0];
             for &enode in self.eclasses[eclass].iter().skip(1) {
                 let union = self.egraph.func.dfg.union(latest[eclass], enode);
