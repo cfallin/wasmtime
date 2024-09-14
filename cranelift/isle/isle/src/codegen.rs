@@ -648,6 +648,12 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 &ctx.indent,
                                 pos.pretty_print_line(&self.files)
                             )?;
+                            writeln!(
+                                ctx.out,
+                                "{}log::trace!(\"rule at {}.\");",
+                                &ctx.indent,
+                                pos.pretty_print_line(&self.files)
+                            )?;
                             write!(ctx.out, "{}", &ctx.indent)?;
                             match ret_kind {
                                 ReturnKind::Plain | ReturnKind::Option => {

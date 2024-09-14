@@ -295,127 +295,95 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
     /// and rewriting. Unnecessary if the egraph is used only in
     /// single-pass eager rewrite mode.
     fn remove_cycles(&mut self) {
-        // Step 1: collect the "available block" (highest point in the
-        // domtree) at which an eclass is available. We seed this with
-        // locations from the skeleton in this step and complete it
-        // for pure nodes with a fixpoint below.
-        let mut available_block_eclass: SecondaryMap<Value, Block> =
-            SecondaryMap::with_default(Block::reserved_value());
-        let mut available_block_enode: SecondaryMap<Value, Block> =
-            SecondaryMap::with_default(Block::reserved_value());
+        // Collect an "available generation" for every eclass and
+        // enode. The available generation for an eclass is the
+        // minimum of that of its enodes; for an enode, the maximum of
+        // that of its arguments. Skeleton enodes and eclasses have an
+        // available generation of 0.
+        //
+        // We compute this in a fixpoint. It is guaranteed to
+        // terminate, even in the presence of cycles, as long as there
+        // is *some* non-cyclic path from roots to compute any given
+        // value. The graph starts this way (from the input CFG), and
+        // we never remove nodes during rewriting/congruence, so this
+        // must be the case.
+        let mut gen_eclass: SecondaryMap<Value, u32> = SecondaryMap::with_default(u32::MAX);
+        let mut gen_enode: SecondaryMap<Value, u32> = SecondaryMap::with_default(u32::MAX);
 
-        for (value, def) in self.egraph.func.dfg.values_and_defs() {
-            if self.egraph.func.dfg.resolve_aliases(value) != value {
-                continue;
+        let mut cursor = FuncCursor::new(self.egraph.func);
+        while let Some(block) = cursor.next_block() {
+            for &param in cursor.func.dfg.block_params(block) {
+                let eclass = self.egraph.eclasses.find(param);
+                gen_eclass[eclass] = 0;
+                gen_enode[param] = 0;
+                log::trace!("eclass {} blockparam {} avail at gen 0", eclass, param);
             }
-            match def {
-                ValueDef::Result(inst, ..) => {
-                    // Skeleton insts remain in the layout; set
-                    // their available block.
-                    if let Some(block) = self.egraph.func.layout.inst_block(inst) {
-                        available_block_eclass[value] = block;
-                        available_block_enode[value] = block;
+            while let Some(inst) = cursor.next_inst() {
+                for &result in cursor.func.dfg.inst_results(inst) {
+                    let eclass = self.egraph.eclasses.find(result);
+                    gen_eclass[eclass] = 0;
+                    gen_enode[result] = 0;
+                    log::trace!(
+                        "eclass {} result {} in skeleton avail at gen 0",
+                        eclass,
+                        result
+                    );
+                }
+            }
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &eclass in &self.eclass_list {
+                let mut eclass_avail = u32::MAX;
+                for &enode in &self.eclasses[eclass] {
+                    if let ValueDef::Result(inst, ..) = self.egraph.func.dfg.value_def(enode) {
+                        let gen = self
+                            .egraph
+                            .func
+                            .dfg
+                            .inst_args(inst)
+                            .iter()
+                            .map(|&arg| {
+                                let arg = self.egraph.func.dfg.resolve_aliases(arg);
+                                let eclass = self.egraph.eclasses.find(arg);
+                                gen_eclass[eclass]
+                            })
+                            .fold(0, std::cmp::max)
+                            .saturating_add(1);
                         log::trace!(
-                            "remove_cycles: non-pure inst {}: result {} is available in {}",
-                            inst,
-                            value,
-                            block
+                            "enode {} (eclass {}): available at generation {}",
+                            enode,
+                            eclass,
+                            gen
                         );
+                        let gen = std::cmp::min(gen, gen_enode[enode]);
+                        gen_enode[enode] = gen;
+                        eclass_avail = std::cmp::min(eclass_avail, gen);
                     }
                 }
-                ValueDef::Param(block, ..) => {
-                    available_block_eclass[value] = block;
-                    available_block_enode[value] = block;
-                    log::trace!(
-                        "remove_cycles: blockparam {} is available in {}",
-                        value,
-                        block
-                    );
-                }
-                ValueDef::Union(..) => {}
-            }
-        }
-
-        let entry = self.egraph.func.layout.entry_block().unwrap();
-        let meet_up_domtree = |b1: Block, b2: Block| {
-            if b2.is_reserved_value() {
-                b1
-            } else if b1.is_reserved_value() {
-                b2
-            } else if b1 == b2 {
-                b1
-            } else if self.egraph.domtree.dominates(b1, b2) {
-                b1
-            } else {
-                assert!(self.egraph.domtree.dominates(b2, b1));
-                b2
-            }
-        };
-        let meet_down_domtree = |b1: Block, b2: Block| {
-            if b2.is_reserved_value() || b1.is_reserved_value() {
-                Block::reserved_value()
-            } else if b1 == b2 {
-                b1
-            } else if self.egraph.domtree.dominates(b1, b2) {
-                b2
-            } else {
-                assert!(self.egraph.domtree.dominates(b2, b1));
-                b1
-            }
-        };
-
-        let mut avail_changed = true;
-        while avail_changed {
-            avail_changed = false;
-
-            for &eclass in &self.eclass_list {
-                // Iterate over all enodes in the class, finding
-                // the available-block for each (or not yet
-                // available). Then find the highest-in-domtree
-                // available block.
-                let mut best_avail = Block::reserved_value();
-                for &member in &self.eclasses[eclass] {
-                    let ValueDef::Result(inst, ..) = self.egraph.func.dfg.value_def(member) else {
-                        continue;
-                    };
-                    let node_args = self.egraph.func.dfg.inst_args(inst);
-                    log::trace!("eclass {} current best_avail {}", eclass, best_avail);
-                    let best_node = node_args
-                        .iter()
-                        .map(|&arg| self.egraph.func.dfg.resolve_aliases(arg))
-                        .map(|arg| self.egraph.eclasses.find_and_update(arg))
-                        .map(|arg| available_block_eclass[arg])
-                        .fold(entry, meet_down_domtree);
-                    available_block_enode[member] = best_node;
-                    best_avail = meet_up_domtree(best_avail, best_node);
-                    log::trace!(
-                        "eclass {} enode {} best_node {} -> eclass best_avail {}",
-                        eclass,
-                        member,
-                        best_node,
-                        best_avail
-                    );
-                }
-                log::trace!("eclass {}: best avail {}", eclass, best_avail);
-
-                if best_avail != available_block_eclass[eclass] {
-                    avail_changed = true;
-                    available_block_eclass[eclass] = best_avail;
+                if eclass_avail < gen_eclass[eclass] {
+                    gen_eclass[eclass] = eclass_avail;
+                    changed = true;
+                    log::trace!("eclass {}: available at {}", eclass, eclass_avail);
                 }
             }
         }
 
-        // Step 2: trim eclasses according to dominance to preserve
-        // acyclicity:
-        // - For each eclass, iterate over members and their
-        //   "available blocks";
-        // - Make note of nodes that must be removed;
-        // - Filter the enode list.
+        // Now filter each eclass to enodes with available generation
+        // at the minimum for the eclass.
         for &eclass in &self.eclass_list {
             let mut enodes = std::mem::take(&mut self.eclasses[eclass]);
             enodes.retain(|&mut enode| {
-                available_block_enode[enode]
-                    == available_block_eclass[self.egraph.eclasses.find_and_update(enode)]
+                log::trace!(
+                    "testing eclass {} enode {}: enode gen {} eclass gen {}",
+                    eclass,
+                    enode,
+                    gen_enode[enode],
+                    gen_eclass[eclass]
+                );
+                gen_enode[enode] == gen_eclass[eclass]
             });
             log::trace!("eclass {}: trimmed to {:?}", eclass, enodes);
             self.eclasses[eclass] = enodes;
