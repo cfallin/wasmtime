@@ -113,7 +113,6 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
 
     /// Apply alias analysis across the skeleton.
     fn alias_analysis(&mut self) {
-        let mut changed = false;
         let mut cursor = FuncCursor::new(self.egraph.func);
         while let Some(block) = cursor.next_block() {
             let mut state = self.egraph.alias_analysis.block_starting_state(block);
@@ -139,14 +138,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     );
                     cursor.func.dfg.clear_results(inst);
                     cursor.func.dfg.change_to_alias(result, new_value);
+                    self.egraph.eclasses.union(result, new_value);
                     cursor.remove_inst_and_step_back();
-                    changed = true;
                 }
             }
-        }
-
-        if changed {
-            self.egraph.func.dfg.resolve_all_aliases();
         }
     }
 
@@ -544,6 +539,11 @@ impl<'a, 'b> crate::opts::EgraphImpl for FullCongruence<'a, 'b> {
         true
     }
     fn eclass_members(&self, value: Value) -> SmallVec<[Value; 8]> {
-        self.eclasses[value].clone()
+        let mut ret = self.eclasses[value].clone();
+        ret.retain(|e| {
+            log::trace!("eclass_member: {}", e);
+            matches!(self.egraph.func.dfg.value_def(*e), ValueDef::Result(..))
+        });
+        ret
     }
 }
