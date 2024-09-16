@@ -4,8 +4,8 @@ use crate::ir::pcc::*;
 use crate::ir::types::*;
 use crate::isa::x64::args::AvxOpcode;
 use crate::isa::x64::inst::args::{
-    AluRmiROpcode, Amode, Gpr, Imm8Reg, RegMem, RegMemImm, ShiftKind, SseOpcode, SyntheticAmode,
-    ToWritableReg, CC,
+    AluRmiROpcode, Amode, CmpOpcode, Gpr, Imm8Reg, RegMem, RegMemImm, ShiftKind, SseOpcode,
+    SyntheticAmode, ToWritableReg, CC,
 };
 use crate::isa::x64::inst::Inst;
 use crate::machinst::pcc::*;
@@ -441,11 +441,14 @@ pub(crate) fn check(
             size,
             src1,
             ref src2,
-            ..
-        } => match <&RegMemImm>::from(src2) {
-            RegMemImm::Mem {
-                addr: SyntheticAmode::ConstantOffset(k),
-            } => {
+            opcode,
+        } => match (<&RegMemImm>::from(src2), opcode) {
+            (
+                RegMemImm::Mem {
+                    addr: SyntheticAmode::ConstantOffset(k),
+                },
+                CmpOpcode::Cmp,
+            ) => {
                 match vcode.constants.get(*k) {
                     VCodeConstantData::U64(bytes) => {
                         let value = u64::from_le_bytes(*bytes);
@@ -457,23 +460,38 @@ pub(crate) fn check(
                 }
                 Ok(())
             }
-            RegMemImm::Mem { ref addr } => {
+            (RegMemImm::Mem { ref addr }, CmpOpcode::Cmp) => {
                 if let Some(rhs) = check_load(ctx, None, addr, vcode, size.to_type(), 64)? {
                     let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
                     state.cmp_flags = Some((lhs, rhs));
                 }
                 Ok(())
             }
-            RegMemImm::Reg { reg } => {
+            (RegMemImm::Reg { reg }, CmpOpcode::Cmp) => {
                 let rhs = get_fact_or_default(vcode, *reg, 64);
                 let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
                 state.cmp_flags = Some((lhs, rhs));
                 Ok(())
             }
-            RegMemImm::Imm { simm32 } => {
+            (RegMemImm::Reg { reg }, CmpOpcode::Test) => {
+                if *reg == src1.to_reg() {
+                    // `test reg, reg` is like `cmp reg, 0`.
+                    let rhs = Fact::constant(64, 0);
+                    let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
+                    state.cmp_flags = Some((lhs, rhs));
+                } else {
+                    state.cmp_flags = None;
+                }
+                Ok(())
+            }
+            (RegMemImm::Imm { simm32 }, CmpOpcode::Cmp) => {
                 let lhs = get_fact_or_default(vcode, src1.to_reg(), 64);
                 let rhs = Fact::constant(64, (*simm32 as i32) as i64 as u64);
                 state.cmp_flags = Some((lhs, rhs));
+                Ok(())
+            }
+            _ => {
+                state.cmp_flags = None;
                 Ok(())
             }
         },
