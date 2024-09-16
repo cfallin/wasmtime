@@ -68,7 +68,9 @@ fn put_input_in_regs(ctx: &mut Lower<Inst>, spec: InsnInput) -> ValueRegs<Reg> {
         };
         assert!(is_int_or_ref_ty(ty)); // Only used for addresses.
         let cst_copy = ctx.alloc_tmp(ty);
-        ctx.emit(Inst::imm(size, c, cst_copy.only_reg().unwrap()));
+        let dst = cst_copy.only_reg().unwrap();
+        ctx.emit(Inst::imm(size, c, dst));
+        ctx.add_range_fact(dst.to_reg(), 64, c, c);
         non_writable_value_regs(cst_copy)
     } else {
         ctx.put_input_in_regs(spec.insn, spec.input)

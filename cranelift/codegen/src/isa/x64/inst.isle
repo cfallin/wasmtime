@@ -2722,7 +2722,7 @@
       (let ((dst WritableGpr (temp_writable_gpr))
             (size OperandSize (operand_size_of_type_32_64 ty))
             (_ Unit (emit (MInst.Imm size simm64 dst))))
-        dst))
+        (add_range_fact dst 64 simm64 simm64)))
 
 ;; `f16` immediates.
 (rule 2 (imm $F16 (u64_nonzero bits))
@@ -2741,14 +2741,14 @@
 (rule 2 (imm $I64 (nonzero_u64_fits_in_u32 x))
       (let ((dst WritableGpr (temp_writable_gpr))
             (_ Unit (emit (MInst.Imm (OperandSize.Size32) x dst))))
-        dst))
+        (add_range_fact dst 64 x x)))
 
 ;; Special case for integer zero immediates: turn them into an `xor r, r`.
 (rule 1 (imm (fits_in_64 ty) (u64_zero))
       (let ((wgpr WritableGpr (temp_writable_gpr))
             (size OperandSize (operand_size_of_type_32_64 ty))
             (_ Unit (emit (MInst.AluConstOp (AluRmiROpcode.Xor) size wgpr))))
-        (gpr_to_reg wgpr)))
+        (add_range_fact (gpr_to_reg wgpr) 64 0 0)))
 
 ;; Special case for zero immediates with vector types, they turn into an xor
 ;; specific to the vector type.
