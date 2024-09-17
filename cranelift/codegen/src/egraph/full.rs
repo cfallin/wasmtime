@@ -411,6 +411,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut latest: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
         for &eclass in &self.eclass_list {
+            let eclass = self.egraph.eclasses.find_and_update(eclass);
             log::trace!(
                 "computing latest for eclass {} with enodes {:?}",
                 eclass,
@@ -429,19 +430,33 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             log::trace!("eclass {}: latest is {}", eclass, latest[eclass]);
         }
 
+        let rewrite_arg = |func: &mut Function, arg: Value| -> Value {
+            let arg = func.dfg.resolve_aliases(arg);
+            let arg = self.egraph.eclasses.find(arg);
+            let value = if latest[arg].is_reserved_value() {
+                arg
+            } else {
+                latest[arg]
+            };
+            log::trace!(" -> orig arg {} to latest {}", arg, value);
+            value
+        };
+
         let rewrite_inst = |func: &mut Function, inst: Inst| {
             let mut op = func.dfg.insts[inst];
             for i in 0..op.arguments(&mut func.dfg.value_lists).len() {
                 let arg = op.arguments(&mut func.dfg.value_lists)[i];
-                let arg = func.dfg.resolve_aliases(arg);
-                let arg = self.egraph.eclasses.find(arg);
-                let value = if latest[arg].is_reserved_value() {
-                    arg
-                } else {
-                    latest[arg]
-                };
-                log::trace!(" -> orig arg {} to latest {}", arg, value);
+                let value = rewrite_arg(func, arg);
                 op.arguments_mut(&mut func.dfg.value_lists)[i] = value;
+            }
+            for i in 0..op.branch_destination(&func.dfg.jump_tables).len() {
+                let mut call = op.branch_destination(&func.dfg.jump_tables)[i];
+                for j in 0..call.args_slice(&func.dfg.value_lists).len() {
+                    let arg = call.args_slice(&func.dfg.value_lists)[j];
+                    let value = rewrite_arg(func, arg);
+                    call.args_slice_mut(&mut func.dfg.value_lists)[j] = value;
+                }
+                op.branch_destination_mut(&mut func.dfg.jump_tables)[i] = call;
             }
             func.dfg.insts[inst] = op;
         };
