@@ -74,8 +74,8 @@ block0(v0: i16, v1: i16):
     return v4
 }
 
-; check: v7 = uextend.i64 v2
-; check: return v7
+; check: v6 = uextend.i64 v2
+; check: return v6
 
 function %sextend_then_reduce(i16) -> i16 {
 block0(v1: i16):
@@ -192,8 +192,8 @@ block0(v0: i64, v1: i64):
     return v5
 }
 
-; check: v6 = bxor v0, v1
-; check: return v6
+; check: v10 = bxor v0, v1
+; check: return v10
 
 function %extend_band_reduce(i16, i16) -> i16 {
 block0(v0: i16, v1: i16):

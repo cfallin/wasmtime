@@ -720,8 +720,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_eq_eq(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp eq v0, v1
-;     return v2
+;     v5 = icmp eq v0, v1
+;     return v5
 ; }
 
 function %icmp_and_eq_ne(i32, i32) -> i8 {
@@ -874,8 +874,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_ne_ne(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ne v0, v1
-;     return v2
+;     v5 = icmp ne v0, v1
+;     return v5
 ; }
 
 function %icmp_and_ne_ult(i32, i32) -> i8 {
@@ -1028,8 +1028,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_ult_ult(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ult v0, v1
-;     return v2
+;     v5 = icmp ult v0, v1
+;     return v5
 ; }
 
 function %icmp_and_ult_ule(i32, i32) -> i8 {
@@ -1190,8 +1190,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_ule_ule(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ule v0, v1
-;     return v2
+;     v5 = icmp ule v0, v1
+;     return v5
 ; }
 
 function %icmp_and_ule_ugt(i32, i32) -> i8 {
@@ -1352,8 +1352,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_ugt_ugt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ugt v0, v1
-;     return v2
+;     v5 = icmp ugt v0, v1
+;     return v5
 ; }
 
 function %icmp_and_ugt_uge(i32, i32) -> i8 {
@@ -1514,8 +1514,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_uge_uge(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp uge v0, v1
-;     return v2
+;     v5 = icmp uge v0, v1
+;     return v5
 ; }
 
 function %icmp_and_uge_slt(i32, i32) -> i8 {
@@ -1684,8 +1684,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_slt_slt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp slt v0, v1
-;     return v2
+;     v5 = icmp slt v0, v1
+;     return v5
 ; }
 
 function %icmp_and_slt_sle(i32, i32) -> i8 {
@@ -1846,8 +1846,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_sle_sle(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sle v0, v1
-;     return v2
+;     v5 = icmp sle v0, v1
+;     return v5
 ; }
 
 function %icmp_and_sle_sgt(i32, i32) -> i8 {
@@ -2008,8 +2008,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_sgt_sgt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sgt v0, v1
-;     return v2
+;     v5 = icmp sgt v0, v1
+;     return v5
 ; }
 
 function %icmp_and_sgt_sge(i32, i32) -> i8 {
@@ -2170,8 +2170,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_and_sge_sge(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sge v0, v1
-;     return v2
+;     v5 = icmp sge v0, v1
+;     return v5
 ; }
 
 function %icmp_or_eq_eq(i32, i32) -> i8 {
@@ -2184,8 +2184,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_eq_eq(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp eq v0, v1
-;     return v2
+;     v5 = icmp eq v0, v1
+;     return v5
 ; }
 
 function %icmp_or_eq_ne(i32, i32) -> i8 {
@@ -2338,8 +2338,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_ne_ne(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ne v0, v1
-;     return v2
+;     v5 = icmp ne v0, v1
+;     return v5
 ; }
 
 function %icmp_or_ne_ult(i32, i32) -> i8 {
@@ -2492,8 +2492,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_ult_ult(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ult v0, v1
-;     return v2
+;     v5 = icmp ult v0, v1
+;     return v5
 ; }
 
 function %icmp_or_ult_ule(i32, i32) -> i8 {
@@ -2654,8 +2654,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_ule_ule(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ule v0, v1
-;     return v2
+;     v5 = icmp ule v0, v1
+;     return v5
 ; }
 
 function %icmp_or_ule_ugt(i32, i32) -> i8 {
@@ -2816,8 +2816,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_ugt_ugt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp ugt v0, v1
-;     return v2
+;     v5 = icmp ugt v0, v1
+;     return v5
 ; }
 
 function %icmp_or_ugt_uge(i32, i32) -> i8 {
@@ -2978,8 +2978,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_uge_uge(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp uge v0, v1
-;     return v2
+;     v5 = icmp uge v0, v1
+;     return v5
 ; }
 
 function %icmp_or_uge_slt(i32, i32) -> i8 {
@@ -3148,8 +3148,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_slt_slt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp slt v0, v1
-;     return v2
+;     v5 = icmp slt v0, v1
+;     return v5
 ; }
 
 function %icmp_or_slt_sle(i32, i32) -> i8 {
@@ -3310,8 +3310,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_sle_sle(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sle v0, v1
-;     return v2
+;     v5 = icmp sle v0, v1
+;     return v5
 ; }
 
 function %icmp_or_sle_sgt(i32, i32) -> i8 {
@@ -3472,8 +3472,8 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_sgt_sgt(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sgt v0, v1
-;     return v2
+;     v5 = icmp sgt v0, v1
+;     return v5
 ; }
 
 function %icmp_or_sgt_sge(i32, i32) -> i8 {
@@ -3634,6 +3634,7 @@ block0(v0: i32, v1: i32):
 
 ; function %icmp_or_sge_sge(i32, i32) -> i8 fast {
 ; block0(v0: i32, v1: i32):
-;     v2 = icmp sge v0, v1
-;     return v2
+;     v5 = icmp sge v0, v1
+;     return v5
 ; }
+

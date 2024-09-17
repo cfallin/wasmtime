@@ -71,7 +71,8 @@ block4:
 ; check:     brif.i32 v1, block3, block4
 
 ; check: block3:
-; check:     return v4
+; check:     v5 = udiv.i32 v1, v2
+; check:     return v5
 
 ; check: block4:
 ; check:     return v4

@@ -153,8 +153,8 @@ block0(v0: i64):
     return v9
 }
 
-; check: v14 = bmask.i64 v0
-; check: return v14
+; check: v13 = bmask.i64 v0
+; check: return v13
 
 function %bmask_sshr(i64) -> i64 {
 block0(v0: i64):

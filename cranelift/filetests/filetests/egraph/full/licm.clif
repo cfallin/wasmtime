@@ -25,17 +25,17 @@ block2(v9: i32):
 
 ; check:  block1(v2: i32):
 ;; constants are rematerialized in each block where used
-; check:      v10 = iconst.i32 40
-; check:      v11 = icmp eq v2, v10
-; check:      v12 = iconst.i32 1
-; check:      v13 = iadd v2, v12
-; check:      brif v11, block2, block1(v13)
+; check:      v11 = iconst.i32 40
+; check:      v12 = icmp eq v2, v11
+; check:      v13 = iconst.i32 1
+; check:      v14 = iadd v2, v13
+; check:      brif v12, block2, block1(v14)
 
 
 ; check:  block2:
-; check:      v14 = iconst.i32 1
-; check:      v15 = iadd.i32 v1, v14
-; check:      return v15
+; check:      v15 = iconst.i32 1
+; check:      v16 = iadd.i32 v1, v15
+; check:      return v16
 
 function %f(i64x2, i32) -> i64x2 {
 block0(v0: i64x2, v1: i32):
@@ -94,14 +94,14 @@ block4:
 ; check:      v8 = vconst.i64x2 const0
 ; check:      jump block2(v3, v1)
 ; check:  block2(v6: i64x2, v7: i32):
-; check:      v15 = iconst.i32 1
-; check:      v16 = isub v7, v15
+; check:      v16 = iconst.i32 1
+; check:      v17 = isub v7, v16
 ; check:      v9 = iadd v6, v8
-; check:      brif v16, block2(v9, v16), block3
+; check:      brif v17, block2(v9, v17), block3
 ; check:  block3:
-; check:      v17 = iconst.i32 1
-; check:      v18 = isub.i32 v5, v17
-; check:      brif v18, block1(v9, v18), block4
+; check:      v18 = iconst.i32 1
+; check:      v19 = isub.i32 v5, v18
+; check:      brif v19, block1(v9, v19), block4
 ; check:  block4:
 ; check:      return v9
 

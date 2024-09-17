@@ -12,9 +12,9 @@ block0(v0: i32):
     v3 = iconst.i32 2
     v4 = ishl v2, v3
     return v4
-; check:  v6 = iconst.i32 4
-; nextln: v7 = ishl v6, v0
-; check:  return v7
+; check:  v7 = iconst.i32 4
+; nextln: v6 = ishl v7, v0
+; check:  return v6
 }
 
 function %b(i32) -> i32 {

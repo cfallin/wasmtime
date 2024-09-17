@@ -11,18 +11,16 @@ function %bxor_self_i128(i128) -> i128 {
 block0(v0: i128):
     v1 = bxor v0, v0
     return v1
-    ; check: v2 = iconst.i64 0
-    ; check: v3 = uextend.i128 v2
-    ; check: return v3
+    ; check: v1 = bxor v0, v0
+    ; check: return v1
 }
 
 function %isub_self_i128(i128) -> i128 {
 block0(v0: i128):
     v1 = isub v0, v0
     return v1
-    ; check: v2 = iconst.i64 0
-    ; check: v3 = uextend.i128 v2  ; v2 = 0
-    ; check: return v3
+    ; check: v1 = isub v0, v0
+    ; check: return v1
 }
 
 function %band_bnot_self_i128(i128) -> i128 {
@@ -95,9 +93,9 @@ block0:
     v3 = uextend.i128 v2
     v4 = bor v1, v3
     return v4
-    ; check: v6 = iconst.i32 13
-    ; check: v12 = uextend.i128 v6  ; v6 = 13
-    ; check: return v12
+    ; check: v7 = iconst.i32 13
+    ; check: v6 = uextend.i128 v7  ; v7 = 13
+    ; check: return v6
 }
 
 ;; These are big enough that they overflow u64, so should not be collapsed

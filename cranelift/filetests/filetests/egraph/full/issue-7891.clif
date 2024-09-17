@@ -66,13 +66,13 @@ block3:
 }
 
 ; check: block2(v2: i32):
-; check:     v8 = iconst.i32 0
-; check:     v4 = icmp.i32 eq v0, v8  ; v8 = 0
-; check:     return v4
+; check:     v10 = iconst.i32 0
+; check:     v5 = icmp.i32 eq v0, v10  ; v10 = 0
+; check:     return v5
 ; check: block3:
-; check:     v6 = iconst.i32 0
-; check:     v7 = icmp.i32 eq v0, v6  ; v6 = 0
-; check:     return v7
+; check:     v8 = iconst.i32 0
+; check:     v9 = icmp.i32 eq v0, v8  ; v8 = 0
+; check:     return v9
 
 function %bad_effect_reuse(i64) -> i8 {
 block0(v0: i64):
@@ -95,10 +95,10 @@ block2:
 
 ; check: block1:
 ; check:     v1 = load.i64 heap v0
-; check:     v7 = iconst.i64 0
-; check:     v8 = icmp.i64 eq v0, v7  ; v7 = 0
-; check:     return v8
+; check:     v8 = iconst.i64 0
+; check:     v9 = icmp.i64 eq v0, v8  ; v8 = 0
+; check:     return v9
 ; check: block2:
-; check:     v6 = iconst.i64 0
-; check:     v3 = icmp.i64 eq v0, v6  ; v6 = 0
-; check:     return v3
+; check:     v4 = iconst.i64 0
+; check:     v5 = icmp.i64 eq v0, v4  ; v4 = 0
+; check:     return v5
