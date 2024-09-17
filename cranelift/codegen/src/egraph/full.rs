@@ -294,9 +294,14 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                 } else {
                     new_eclass_list.push(eclass);
                 }
+
+                self.eclasses[eclass].sort_unstable();
+                self.eclasses[eclass].dedup();
             }
             log::trace!("new eclass list: {:?}", new_eclass_list);
             self.eclass_list = new_eclass_list;
+            self.eclass_list.sort_unstable();
+            self.eclass_list.dedup();
 
             if changed {
                 any_changed = true;

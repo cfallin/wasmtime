@@ -355,6 +355,9 @@ impl Engine {
             | "tls_model" // wasmtime doesn't use tls right now
             | "stack_switch_model" // wasmtime doesn't use stack switching right now
             | "opt_level" // opt level doesn't change semantics
+            | "enable_full_egraph"
+            | "full_egraph_max_passes"
+            | "full_egraph_max_inflation"
             | "enable_alias_analysis" // alias analysis-based opts don't change semantics
             | "probestack_size_log2" // probestack above asserted disabled
             | "regalloc" // shouldn't change semantics
