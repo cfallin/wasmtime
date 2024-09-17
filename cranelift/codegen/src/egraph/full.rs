@@ -5,7 +5,7 @@
 use super::*;
 use crate::trace;
 use cranelift_entity::SecondaryMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
 use std::vec::Vec;
@@ -20,6 +20,8 @@ pub struct FullCongruence<'a, 'b> {
     eclasses: SecondaryMap<Value, SmallVec<[Value; 8]>>,
     /// List of canonicalized eclass IDs.
     eclass_list: Vec<Value>,
+    /// List of enode IDs that are non-pure.
+    non_pure: FxHashSet<Value>,
 }
 
 impl<'a, 'b> FullCongruence<'a, 'b> {
@@ -30,6 +32,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             dedup: FxHashMap::default(),
             eclasses: SecondaryMap::default(),
             eclass_list: vec![],
+            non_pure: FxHashSet::default(),
         }
     }
 
@@ -57,11 +60,18 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
     /// Remove pure ops from the CFG, leaving the skeleton.
     fn remove_pure_ops_from_skeleton(&mut self) {
         let mut pos = FuncCursor::new(self.egraph.func);
-        while let Some(_block) = pos.next_block() {
+        while let Some(block) = pos.next_block() {
+            for &param in pos.func.dfg.block_params(block) {
+                self.non_pure.insert(param);
+            }
             while let Some(inst) = pos.next_inst() {
                 if is_pure_for_egraph(pos.func, inst) {
                     log::trace!("pure inst removed from skeleton: {}", inst);
                     pos.remove_inst_and_step_back();
+                } else {
+                    for &result in pos.func.dfg.inst_results(inst) {
+                        self.non_pure.insert(result);
+                    }
                 }
             }
         }
@@ -158,6 +168,9 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             let eclass = self.eclass_list[i];
             for j in 0..self.eclasses[eclass].len() {
                 let enode = self.eclasses[eclass][j];
+                if self.non_pure.contains(&enode) {
+                    continue;
+                }
                 log::trace!("batch rewrite: eclass {} enode {}", eclass, enode);
                 crate::opts::generated_code::constructor_simplify(
                     &mut IsleContext { ctx: self },
@@ -228,12 +241,14 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
 
                 for j in 0..self.eclasses[eclass].len() {
                     let enode = self.eclasses[eclass][j];
+                    if self.non_pure.contains(&enode) {
+                        continue;
+                    }
                     log::trace!("enode {}", enode);
                     // Get the InstructionData and Type; remove from
                     // dedup map; re-canonicalize args; re-insert,
                     // pointing to canonical eclass.
                     let ValueDef::Result(inst, ..) = self.egraph.func.dfg.value_def(enode) else {
-                        log::trace!(" -> non-pure, skipping");
                         continue;
                     };
                     let ty = self.egraph.func.dfg.ctrl_typevar(inst);
