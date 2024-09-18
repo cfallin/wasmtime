@@ -43,6 +43,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let limit_nodes =
             self.dedup.len() * usize::from(self.egraph.flags.full_egraph_max_inflation());
         for _ in 0..self.egraph.flags.full_egraph_max_passes() {
+            self.egraph.stats.full_passes += 1;
             self.alias_analysis();
             self.batch_rewrite();
             if !self.batch_congruence() {
@@ -87,6 +88,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             if self.egraph.func.dfg.resolve_aliases(value) != value {
                 continue;
             }
+            self.egraph.stats.full_orig_eclasses += 1;
             self.egraph.eclasses.add(value);
             self.eclasses[value].push(value);
             self.eclass_list.push(value);
@@ -172,6 +174,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     continue;
                 }
                 log::trace!("batch rewrite: eclass {} enode {}", eclass, enode);
+                self.egraph.stats.full_rewrites += 1;
                 crate::opts::generated_code::constructor_simplify(
                     &mut IsleContext { ctx: self },
                     enode,
@@ -181,6 +184,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     if result == enode {
                         continue;
                     }
+                    self.egraph.stats.full_rewrite_results += 1;
                     log::trace!(
                         "batch rewrite of eclass {} enode {} got new enode {}",
                         eclass,
@@ -223,6 +227,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut any_changed = false;
         let mut changed = true;
         while changed {
+            self.egraph.stats.full_congruence_fixpoint_iters += 1;
             changed = false;
             log::trace!("batch congruence: new iteration");
 
@@ -257,12 +262,14 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     log::trace!("enode {} has ty {:?} op {:?}", enode, ty, op);
                     self.canonicalize_args(&mut op);
                     log::trace!(" -> canonicalized: {:?}", op);
+                    self.egraph.stats.full_dedup_lookups += 1;
                     match self.dedup.entry((ty, op)) {
                         Entry::Vacant(v) => {
                             log::trace!("inserting {} back into dedup map", canonical_eclass);
                             v.insert(canonical_eclass);
                         }
                         Entry::Occupied(o) => {
+                            self.egraph.stats.full_dedup_hits += 1;
                             log::trace!(
                                 "already in dedup map as {}; unioning with {}",
                                 o.get(),
@@ -291,6 +298,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     self.eclasses[canonical_eclass].extend(members.into_iter());
                     log::trace!(" -> enode list: {:?}", self.eclasses[canonical_eclass]);
                     changed = true;
+                    self.egraph.stats.full_congruence_eclass_merges += 1;
                 } else {
                     new_eclass_list.push(eclass);
                 }
@@ -354,6 +362,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
 
         let mut changed = true;
         while changed {
+            self.egraph.stats.full_cycle_fixpoint_iters += 1;
             changed = false;
             for &eclass in &self.eclass_list {
                 let mut eclass_avail = u32::MAX;
@@ -416,6 +425,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut latest: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
         for &eclass in &self.eclass_list {
+            self.egraph.stats.full_eclasses += 1;
             let eclass = self.egraph.eclasses.find_and_update(eclass);
             log::trace!(
                 "computing latest for eclass {} with enodes {:?}",
@@ -424,6 +434,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             );
             latest[eclass] = self.eclasses[eclass][0];
             for &enode in self.eclasses[eclass].iter().skip(1) {
+                self.egraph.stats.full_enodes += 1;
                 let union = self.egraph.func.dfg.union(latest[eclass], enode);
                 self.egraph.eclasses.add(union);
                 self.egraph.eclasses.union(latest[eclass], union);
@@ -506,8 +517,12 @@ impl<'a, 'b> crate::opts::EgraphImpl for FullCongruence<'a, 'b> {
     fn insert_node(&mut self, mut op: InstructionData, ty: Type) -> Value {
         self.canonicalize_args(&mut op);
         // Intern in the GVN map.
+        self.egraph.stats.full_dedup_lookups += 1;
         match self.dedup.entry((ty, op)) {
-            Entry::Occupied(o) => *o.get(),
+            Entry::Occupied(o) => {
+                self.egraph.stats.full_dedup_hits += 1;
+                *o.get()
+            }
             Entry::Vacant(v) => {
                 // Create the node.
                 let inst = self.egraph.func.dfg.make_inst(op);
@@ -517,6 +532,7 @@ impl<'a, 'b> crate::opts::EgraphImpl for FullCongruence<'a, 'b> {
                 self.egraph.eclasses.add(result);
                 self.eclasses[result].push(result);
                 self.eclass_list.push(result);
+                self.egraph.stats.full_rewrite_new_nodes += 1;
                 log::trace!(
                     "insert_node: created {} with ty {:?} op {:?}",
                     result,

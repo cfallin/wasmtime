@@ -588,6 +588,7 @@ impl<'a> EgraphPass<'a> {
             trace!("pinned_union_count: {}", self.eclasses.pinned_union_count);
         }
         self.elaborate();
+        eprintln!("stats: {:?}", self.stats);
     }
 
     /// Remove pure nodes from the `Layout` of the function, ensuring
@@ -876,4 +877,17 @@ pub(crate) struct Stats {
     pub(crate) elaborate_func_pre_insts: u64,
     pub(crate) elaborate_func_post_insts: u64,
     pub(crate) elaborate_best_cost_fixpoint_iters: u64,
-}
+    // Full-congruence mode:
+    pub(crate) full_orig_eclasses: u64,
+    pub(crate) full_eclasses: u64,
+    pub(crate) full_enodes: u64,
+    pub(crate) full_dedup_lookups: u64,
+    pub(crate) full_dedup_hits: u64,
+    pub(crate) full_passes: u64,
+    pub(crate) full_rewrites: u64,
+    pub(crate) full_rewrite_new_nodes: u64,
+    pub(crate) full_rewrite_results: u64,
+    pub(crate) full_congruence_fixpoint_iters: u64,
+    pub(crate) full_congruence_eclass_merges: u64,
+    pub(crate) full_cycle_fixpoint_iters: u64,
+ }
