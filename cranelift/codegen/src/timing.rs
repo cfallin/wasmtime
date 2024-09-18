@@ -77,6 +77,12 @@ define_passes! {
     layout_renumber: "Layout full renumbering",
 
     canonicalize_nans: "Canonicalization of NaNs",
+
+    full_egraph_init: "initialization of full egraph",
+    full_egraph_alias: "alias analysis in full egraph",
+    full_egraph_rewrite: "batch rewrite phase in full egraph",
+    full_egraph_congruence: "batch congruence phase in full egraph",
+    full_egraph_finish: "cycle removal and latest-args post-passes in full egraph",
 }
 
 impl Pass {

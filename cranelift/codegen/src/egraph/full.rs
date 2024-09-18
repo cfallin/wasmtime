@@ -1,8 +1,7 @@
 //! Full congruence mode for the (a)egraph.
-//!
-//! TODO: integrate alias analysis.
 
 use super::*;
+use crate::timing;
 use crate::trace;
 use cranelift_entity::SecondaryMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -38,8 +37,12 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
 
     /// Run the overall optimization fixpoint loop.
     pub fn run(&mut self) {
-        self.remove_pure_ops_from_skeleton();
-        self.build_eclasses();
+        {
+            let _tt = timing::full_egraph_init();
+            self.remove_pure_ops_from_skeleton();
+            self.build_eclasses();
+        }
+
         let limit_nodes =
             self.dedup.len() * usize::from(self.egraph.flags.full_egraph_max_inflation());
         for _ in 0..self.egraph.flags.full_egraph_max_passes() {
@@ -53,8 +56,12 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                 break;
             }
         }
-        self.remove_cycles();
-        self.latest_args();
+
+        {
+            let _tt = timing::full_egraph_finish();
+            self.remove_cycles();
+            self.latest_args();
+        }
         trace!("after full egraph:\n{:?}", self.egraph.func);
     }
 
@@ -125,6 +132,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
 
     /// Apply alias analysis across the skeleton.
     fn alias_analysis(&mut self) {
+        let _tt = timing::full_egraph_alias();
         let mut cursor = FuncCursor::new(self.egraph.func);
         while let Some(block) = cursor.next_block() {
             let mut state = self.egraph.alias_analysis.block_starting_state(block);
@@ -162,6 +170,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
     /// To be run after the egraph has been constructed, and before it
     /// is elaborated.
     fn batch_rewrite(&mut self) {
+        let _tt = timing::full_egraph_rewrite();
         // For every value node, invoke the mid-end rewrite rule entry
         // point with a context that creates new nodes but does not
         // recursively rewrite (add a flag for this on OptimizeCtx).
@@ -220,6 +229,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
     ///
     /// Returns `true` if any changes were made.
     fn batch_congruence(&mut self) -> bool {
+        let _tt = timing::full_egraph_congruence();
         // In a fixpoint loop, edit args and re-intern nodes:
         // - For each node, canonicalize args according to union-find.
         // - Look up in GVN map; if maps to another canonical node
