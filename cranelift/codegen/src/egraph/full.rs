@@ -7,6 +7,7 @@ use cranelift_entity::SecondaryMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::collections::hash_map::Entry;
+use std::collections::BTreeSet;
 use std::vec::Vec;
 
 /// State for a full-congruence optimization pass over the egraph.
@@ -19,6 +20,12 @@ pub struct FullCongruence<'a, 'b> {
     eclasses: SecondaryMap<Value, SmallVec<[Value; 8]>>,
     /// List of canonicalized eclass IDs.
     eclass_list: Vec<Value>,
+    /// List of users of each eclass. Used when merging.
+    users: SecondaryMap<Value, FxHashSet<Value>>,
+    /// Worklist of merged-but-not-processed eclasses.
+    ///
+    /// `BTreeSet` for determinism in processing order.
+    worklist: BTreeSet<Value>,
     /// List of enode IDs that are non-pure.
     non_pure: FxHashSet<Value>,
 }
@@ -31,6 +38,8 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             dedup: FxHashMap::default(),
             eclasses: SecondaryMap::default(),
             eclass_list: vec![],
+            users: SecondaryMap::default(),
+            worklist: BTreeSet::default(),
             non_pure: FxHashSet::default(),
         }
     }
@@ -49,9 +58,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             self.egraph.stats.full_passes += 1;
             self.alias_analysis();
             self.batch_rewrite();
-            if !self.batch_congruence() {
+            if self.worklist.is_empty() {
                 break;
             }
+            self.batch_congruence();
             if self.dedup.len() > limit_nodes {
                 break;
             }
@@ -113,6 +123,13 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                             .insert((ty, self.egraph.func.dfg.insts[inst]), value);
                         if let Some(old) = old {
                             self.egraph.eclasses.union(old, value);
+                            self.worklist
+                                .insert(self.egraph.eclasses.find_and_update(old));
+                        }
+
+                        for &arg in self.egraph.func.dfg.inst_args(inst) {
+                            let arg = self.egraph.func.dfg.resolve_aliases(arg);
+                            self.users[arg].insert(arg);
                         }
                     } else {
                         log::trace!(
@@ -159,6 +176,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     cursor.func.dfg.clear_results(inst);
                     cursor.func.dfg.change_to_alias(result, new_value);
                     self.egraph.eclasses.union(result, new_value);
+                    self.worklist.insert(new_value);
                     cursor.remove_inst_and_step_back();
                 }
             }
@@ -177,6 +195,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut optimized_values: SmallVec<[Value; 5]> = SmallVec::new();
         for i in 0..self.eclass_list.len() {
             let eclass = self.eclass_list[i];
+            if self.egraph.eclasses.find_and_update(eclass) != eclass {
+                continue;
+            }
+
             for j in 0..self.eclasses[eclass].len() {
                 let enode = self.eclasses[eclass][j];
                 if self.non_pure.contains(&enode) {
@@ -190,7 +212,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     &mut optimized_values,
                 );
                 for result in optimized_values.drain(..) {
-                    if result == enode {
+                    if result == enode || result == eclass {
                         continue;
                     }
                     self.egraph.stats.full_rewrite_results += 1;
@@ -202,6 +224,7 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     );
                     self.egraph.eclasses.add(result);
                     self.egraph.eclasses.union(eclass, result);
+                    self.worklist.insert(result);
                 }
             }
         }
@@ -226,23 +249,18 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
     ///
     /// To be run after the egraph has been constructed, and before it
     /// is elaborated.
-    ///
-    /// Returns `true` if any changes were made.
-    fn batch_congruence(&mut self) -> bool {
+    fn batch_congruence(&mut self) {
         let _tt = timing::full_egraph_congruence();
         // In a fixpoint loop, edit args and re-intern nodes:
         // - For each node, canonicalize args according to union-find.
         // - Look up in GVN map; if maps to another canonical node
         //   (eclass), union them.
-        let mut any_changed = false;
-        let mut changed = true;
-        while changed {
+        while !self.worklist.is_empty() {
             self.egraph.stats.full_congruence_fixpoint_iters += 1;
-            changed = false;
             log::trace!("batch congruence: new iteration");
 
-            for i in 0..self.eclass_list.len() {
-                let eclass = self.eclass_list[i];
+            let worklist = std::mem::take(&mut self.worklist);
+            for &eclass in &worklist {
                 let canonical_eclass = self.egraph.eclasses.find_and_update(eclass);
                 log::trace!(
                     "eclass {} canonical {}: {:?}",
@@ -250,9 +268,6 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                     canonical_eclass,
                     self.eclasses[canonical_eclass]
                 );
-                if eclass != canonical_eclass {
-                    changed = true;
-                }
 
                 for j in 0..self.eclasses[eclass].len() {
                     let enode = self.eclasses[eclass][j];
@@ -286,7 +301,8 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
                                 canonical_eclass
                             );
                             self.egraph.eclasses.union(*o.get(), canonical_eclass);
-                            changed = true;
+                            self.worklist
+                                .insert(self.egraph.eclasses.find_and_update(canonical_eclass));
                         }
                     }
                     self.egraph.func.dfg.insts[inst] = op;
@@ -294,39 +310,33 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             }
 
             // Now that we've performed unions in the union-find,
-            // iterate over all eclasses in the `eclass_list`; if
-            // merged into another eclass, move the enodes over to the
-            // new canonical eclass's node list, and create a
-            // union-node and upate `latest`.
-            let mut new_eclass_list = vec![];
-            for i in 0..self.eclass_list.len() {
-                let eclass = self.eclass_list[i];
+            // iterate over all eclasses in the worklist; if merged
+            // into another eclass, move the enodes over to the new
+            // canonical eclass's node list, and create a union-node
+            // and upate `latest`.
+            for eclass in worklist {
                 let canonical_eclass = self.egraph.eclasses.find_and_update(eclass);
                 if canonical_eclass != eclass {
                     log::trace!("merging eclasses {} and {}", eclass, canonical_eclass);
                     let members = std::mem::take(&mut self.eclasses[eclass]);
                     self.eclasses[canonical_eclass].extend(members.into_iter());
                     log::trace!(" -> enode list: {:?}", self.eclasses[canonical_eclass]);
-                    changed = true;
+                    let users = std::mem::take(&mut self.users[eclass]);
+                    self.users[canonical_eclass].extend(users);
+                    log::trace!(" -> users: {:?}", self.users[canonical_eclass]);
+
                     self.egraph.stats.full_congruence_eclass_merges += 1;
-                } else {
-                    new_eclass_list.push(eclass);
+
+                    for &user in &self.users[canonical_eclass] {
+                        let user = self.egraph.eclasses.find_and_update(user);
+                        self.worklist.insert(user);
+                    }
                 }
 
                 self.eclasses[eclass].sort_unstable();
                 self.eclasses[eclass].dedup();
             }
-            log::trace!("new eclass list: {:?}", new_eclass_list);
-            self.eclass_list = new_eclass_list;
-            self.eclass_list.sort_unstable();
-            self.eclass_list.dedup();
-
-            if changed {
-                any_changed = true;
-            }
         }
-
-        any_changed
     }
 
     /// Remove cycles, after doing a fixpoint of full batch-congruence
@@ -375,6 +385,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
             self.egraph.stats.full_cycle_fixpoint_iters += 1;
             changed = false;
             for &eclass in &self.eclass_list {
+                if self.egraph.eclasses.find(eclass) != eclass {
+                    continue;
+                }
+
                 let mut eclass_avail = u32::MAX;
                 for &enode in &self.eclasses[eclass] {
                     if let ValueDef::Result(inst, ..) = self.egraph.func.dfg.value_def(enode) {
@@ -413,6 +427,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         // Now filter each eclass to enodes with available generation
         // at the minimum for the eclass.
         for &eclass in &self.eclass_list {
+            if self.egraph.eclasses.find(eclass) != eclass {
+                continue;
+            }
+
             let mut enodes = std::mem::take(&mut self.eclasses[eclass]);
             enodes.retain(|&mut enode| {
                 log::trace!(
@@ -435,6 +453,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         let mut latest: SecondaryMap<Value, Value> =
             SecondaryMap::with_default(Value::reserved_value());
         for &eclass in &self.eclass_list {
+            if self.egraph.eclasses.find(eclass) != eclass {
+                continue;
+            }
+
             self.egraph.stats.full_eclasses += 1;
             let eclass = self.egraph.eclasses.find_and_update(eclass);
             log::trace!(
@@ -488,6 +510,10 @@ impl<'a, 'b> FullCongruence<'a, 'b> {
         };
 
         for &eclass in &self.eclass_list {
+            if self.egraph.eclasses.find(eclass) != eclass {
+                continue;
+            }
+
             log::trace!("eclass {}: nodes: {:?}", eclass, self.eclasses[eclass]);
             for &enode in &self.eclasses[eclass] {
                 let ValueDef::Result(inst, _) = self.egraph.func.dfg.value_def(enode) else {
@@ -549,6 +575,13 @@ impl<'a, 'b> crate::opts::EgraphImpl for FullCongruence<'a, 'b> {
                     ty,
                     op
                 );
+
+                for &arg in self.egraph.func.dfg.inst_args(inst) {
+                    let arg = self.egraph.func.dfg.resolve_aliases(arg);
+                    let arg_eclass = self.egraph.eclasses.find_and_update(arg);
+                    self.users[arg_eclass].insert(result);
+                }
+
                 *v.insert(result)
             }
         }
