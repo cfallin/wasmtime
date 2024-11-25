@@ -67,10 +67,6 @@ pub struct OrderGraph {
     pub nodes: PrimaryMap<OrderNode, OrderNodeData>,
     /// Next fresh variable to allocate.
     next_var: u32,
-    /// Worklist for simplification.
-    worklist: Vec<OrderNode>,
-    /// Dedup filter for worklist.
-    worklist_dedup: BTreeSet<OrderNode>,
 }
 
 /// Data at one node in the order graph.
@@ -89,10 +85,10 @@ pub struct OrderNodeData {
 /// An ordering edge from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderEdge {
-    /// Kind of edge: equality or inequality.
-    pub kind: OrderEdgeKind,
     /// The other (right-hand side) node in the ordering relation.
     pub dest: OrderNode,
+    /// Kind of edge: equality or inequality.
+    pub kind: OrderEdgeKind,
     /// The offset (distance) denoted by this edge.
     pub offset: u64,
 }
@@ -143,29 +139,21 @@ impl OrderGraph {
 
     /// Mark one node, plus an offset, as equal to the other.
     pub fn eq(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
-        if self.nodes[a].edges.insert(OrderEdge {
+        self.nodes[a].edges.insert(OrderEdge {
             kind: OrderEdgeKind::Eq,
             dest: b,
             offset,
-        }) {
-            if self.worklist_dedup.insert(a) {
-                self.worklist.push(a);
-            }
-        }
+        });
     }
 
     /// Mark one node, plus an offset, as less than or equal to the
     /// other.
     pub fn le(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
-        if self.nodes[a].edges.insert(OrderEdge {
+        self.nodes[a].edges.insert(OrderEdge {
             kind: OrderEdgeKind::Le,
             dest: b,
             offset,
-        }) {
-            if self.worklist_dedup.insert(a) {
-                self.worklist.push(a);
-            }
-        }
+        });
     }
 
     /// Mark a node as having a fixed constant value.
@@ -208,7 +196,102 @@ impl OrderGraph {
     /// Simplify the order graph, potentially finding a contradiction
     /// and returning an error.
     pub fn simplify(&mut self) -> OrderResult<()> {
-        todo!()
+        while self.simplify_iter()? {}
+        Ok(())
+    }
+
+    /// One fixpoint iteration of node simplification. Returns `true`
+    /// if any node was updated or merged.
+    fn simplify_iter(&mut self) -> OrderResult<bool> {
+        let mut changed = false;
+
+        // For each node, merge edges where possible.
+        for node in self.nodes.keys() {
+            // Iterate through edges grouped by destination node. Note
+            // that `dest` is the first field in the edge struct,
+            // hence iteration order with the derived `Ord` ensures we
+            // see edges to the same dest node sequentially.
+            let mut edges = std::mem::take(&mut self.nodes[node].edges);
+            let mut new_edges = BTreeSet::new();
+            let mut best_edge: Option<OrderEdge> = None;
+            for edge in &edges {
+                if best_edge.is_some() && edge.dest != best_edge.unwrap().dest {
+                    new_edges.insert(best_edge.take().unwrap());
+                }
+                match best_edge {
+                    None => {
+                        best_edge = Some(*edge);
+                    }
+                    Some(cur) => {
+                        assert!(cur != *edge);
+                        match (cur.kind, edge.kind) {
+                            (OrderEdgeKind::Eq, OrderEdgeKind::Eq) => {
+                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
+                            }
+                            (OrderEdgeKind::Eq, OrderEdgeKind::Le) if cur.offset < edge.offset => {
+                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
+                            }
+                            (OrderEdgeKind::Le, OrderEdgeKind::Eq) if edge.offset < cur.offset => {
+                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
+                            }
+                            (OrderEdgeKind::Eq, OrderEdgeKind::Le) => {
+                                best_edge = Some(cur);
+                            }
+                            (OrderEdgeKind::Le, OrderEdgeKind::Eq) => {
+                                best_edge = Some(*edge);
+                            }
+                            (OrderEdgeKind::Le, OrderEdgeKind::Le) => {
+                                best_edge = Some(OrderEdge {
+                                    kind: OrderEdgeKind::Le,
+                                    dest: cur.dest,
+                                    offset: std::cmp::max(cur.offset, edge.offset),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(best_edge) = best_edge {
+                new_edges.insert(best_edge);
+            }
+            if new_edges != edges {
+                changed = true;
+            }
+            self.nodes[node].edges = new_edges;
+        }
+
+        // Update each node's lo/hi range based on edges.
+        let lo_updates: Vec<(OrderNode, u64)> = vec![];
+        for node in self.nodes.keys() {
+            let mut hi = self.nodes[node].hi;
+            // Invariant: we'll have at most one edge per dest node,
+            // so deferring dest nodes' `lo` updates is safe (we won't
+            // have two conflicting updates).
+            for edge in &self.nodes[node].edges {
+                if let Some(offset_hi) = hi.map(|val| val.saturating_add(edge.offset)) {
+                    let dest_lo = self.nodes[edge.dest].lo.unwrap_or(offset_hi);
+                    todo!()
+                }
+            }
+
+            if hi != self.nodes[node].hi || lo_updates.len() > 0 {
+                changed = true;
+            }
+            self.nodes[node].hi = hi;
+            for (node, lo) in lo_updates.drain(..) {
+                self.nodes[node].lo = Some(lo);
+            }
+        }
+
+        // If any two nodes have the same constant value, merge them.
+
+        // For each node, if outgoing edges imply two destination
+        // nodes are exactly equal, merge them.
+
+        // Look for inequality cycles with nonzero distance and flag
+        // an error (contradiction) if so.
+
+        Ok(changed)
     }
 
     /// Query the order graph, determining whether a given node is
