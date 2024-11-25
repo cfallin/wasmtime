@@ -202,12 +202,40 @@ pub(crate) fn check(
             extendop,
         } if has_fact(vcode, rn) && has_fact(vcode, rm) => {
             check_binop(ctx, vcode, 64, rd, rn, rm, |rn, rm| {
+                trace!("ALURRRExtend: rn {:?} rm {:?}", rn, rm);
                 let rm_extended = fail_if_missing(extend_fact(ctx, rm, extendop))?;
                 clamp_range(
                     ctx,
                     64,
                     size.bits().into(),
                     ctx.add(&rn, &rm_extended, size.bits().into()),
+                )
+            })
+        }
+        Inst::AluRRRExtend {
+            alu_op: ALUOp::Add,
+            rd,
+            size,
+            extendop: e @ ExtendOp::UXTB | e @ ExtendOp::UXTH | e @ ExtendOp::UXTW,
+            rn,
+            ..
+        } if has_fact(vcode, rn) => {
+            let add_width: u16 = size.bits().into();
+            let rn = get_fact_or_default(vcode, rn, add_width);
+            let rm_width = match e {
+                ExtendOp::UXTB => 8,
+                ExtendOp::UXTH => 16,
+                ExtendOp::UXTW => 32,
+                _ => unreachable!(),
+            };
+            let rm = Fact::max_range_for_width(rm_width);
+            let rm = ctx.uextend(&rm, rm_width, add_width).unwrap();
+            check_output(ctx, vcode, rd, &[], |_vcode| {
+                clamp_range(
+                    ctx,
+                    64,
+                    size.bits().into(),
+                    ctx.add(&rn, &rm, size.bits().into()),
                 )
             })
         }
@@ -268,8 +296,8 @@ pub(crate) fn check(
         Inst::AluRRR { rd, size, .. }
         | Inst::AluRRImm12 { rd, size, .. }
         | Inst::AluRRRShift { rd, size, .. }
-        | Inst::AluRRRExtend { rd, size, .. }
         | Inst::AluRRImmLogic { rd, size, .. }
+        | Inst::AluRRRExtend { rd, size, .. }
         | Inst::AluRRImmShift { rd, size, .. } => check_output(ctx, vcode, rd, &[], |_vcode| {
             clamp_range(ctx, 64, size.bits().into(), None)
         }),
