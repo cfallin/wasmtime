@@ -27,7 +27,7 @@
 //! (that would result in many inequality edges implied by transitive
 //! combinations of existing edges), but rather to union as many nodes
 //! together as possible according to equalities. We do this by, for
-//! each node in a worklist (initialized with all nodes):
+//! each node, iterating until fixpoint:
 //!
 //! - Sort all outgoing edges by destination node. If any two edges
 //!   are to the same node, pick the edge that implies greater
@@ -37,8 +37,7 @@
 //!   y), flag an error. If two equality edges contradict (e.g., x + 5
 //!   == y and x + 3 == y), flag an error.
 //! - If equality edges exist with the same offset to two distinct
-//!   destination nodes, merge those two nodes into one and place the
-//!   one on the worklist.
+//!   destination nodes, merge those two nodes into one.
 //!
 //! ## Queries
 //!
@@ -48,7 +47,7 @@
 //! exploring outward.
 
 use crate::entity::{entity_impl, PrimaryMap};
-use crate::fx::HashSet;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 /// A node in the order graph.
@@ -71,7 +70,7 @@ pub struct OrderGraph {
     /// Worklist for simplification.
     worklist: Vec<OrderNode>,
     /// Dedup filter for worklist.
-    worklist_dedup: HashSet<OrderNode>,
+    worklist_dedup: BTreeSet<OrderNode>,
 }
 
 /// Data at one node in the order graph.
@@ -84,11 +83,11 @@ pub struct OrderNodeData {
     /// Variables in the equivalence class represented by this node.
     pub exprs: Vec<OrderVar>,
     /// Ordering edges to other nodes.
-    pub edges: Vec<OrderEdge>,
+    pub edges: BTreeSet<OrderEdge>,
 }
 
 /// An ordering edge from one node to another.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderEdge {
     /// Kind of edge: equality or inequality.
     pub kind: OrderEdgeKind,
@@ -118,7 +117,12 @@ pub enum OrderGraphError {
     /// Two or more edges conflict originating from the given node and
     /// going to the given node.
     ConflictingEdges(OrderNode, OrderNode),
+    /// Two or more constant ranges conflict on the given node.
+    ConstantConflict(OrderNode),
 }
+
+/// Result type alias for methods returning order-graph errors.
+pub type OrderResult<T> = std::result::Result<T, OrderGraphError>;
 
 /// Either a node ID or a constant value.
 #[derive(Clone, Copy, Debug)]
@@ -138,30 +142,72 @@ impl OrderGraph {
     }
 
     /// Mark one node, plus an offset, as equal to the other.
-    pub fn eq(&mut self, _a: OrderNode, _b: OrderNode, _offset: u64) {
-        todo!()
+    pub fn eq(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
+        if self.nodes[a].edges.insert(OrderEdge {
+            kind: OrderEdgeKind::Eq,
+            dest: b,
+            offset,
+        }) {
+            if self.worklist_dedup.insert(a) {
+                self.worklist.push(a);
+            }
+        }
     }
 
     /// Mark one node, plus an offset, as less than or equal to the
     /// other.
-    pub fn le(&mut self, _a: OrderNode, _b: OrderNode, _offset: u64) {
-        todo!()
+    pub fn le(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
+        if self.nodes[a].edges.insert(OrderEdge {
+            kind: OrderEdgeKind::Le,
+            dest: b,
+            offset,
+        }) {
+            if self.worklist_dedup.insert(a) {
+                self.worklist.push(a);
+            }
+        }
     }
 
     /// Mark a node as having a fixed constant value.
-    pub fn constant(&mut self, _a: OrderNode, _value: u64) {
-        todo!()
+    pub fn constant(&mut self, a: OrderNode, value: u64) -> OrderResult<()> {
+        let node = &mut self.nodes[a];
+        if node.lo.is_some() && Some(value) < node.lo {
+            return Err(OrderGraphError::ConstantConflict(a));
+        }
+        if node.hi.is_some() && Some(value) > node.hi {
+            return Err(OrderGraphError::ConstantConflict(a));
+        }
+        node.lo = Some(value);
+        node.hi = Some(value);
+        Ok(())
     }
 
     /// Mark a node as having a fixed lower or upper (or both)
     /// constant-value bound. Both ends are inclusive.
-    pub fn bounded(&mut self, _a: OrderNode, _lo: Option<u64>, _hi: Option<u64>) {
-        todo!()
+    pub fn bounded(&mut self, a: OrderNode, lo: Option<u64>, hi: Option<u64>) -> OrderResult<()> {
+        let node = &mut self.nodes[a];
+        let lo = match (node.lo, lo) {
+            (None, lo) | (lo, None) => lo,
+            (Some(existing), Some(new)) => Some(std::cmp::max(existing, new)),
+        };
+        node.lo = lo;
+        let hi = match (node.hi, hi) {
+            (None, hi) | (hi, None) => hi,
+            (Some(existing), Some(new)) => Some(std::cmp::min(existing, new)),
+        };
+        node.hi = hi;
+
+        if let (Some(lo), Some(hi)) = (node.lo, node.hi) {
+            if lo > hi {
+                return Err(OrderGraphError::ConstantConflict(a));
+            }
+        }
+        Ok(())
     }
 
     /// Simplify the order graph, potentially finding a contradiction
     /// and returning an error.
-    pub fn simplify(&mut self) -> std::result::Result<(), OrderGraphError> {
+    pub fn simplify(&mut self) -> OrderResult<()> {
         todo!()
     }
 
@@ -170,10 +216,10 @@ impl OrderGraph {
     /// value with at least a certain offset.
     pub fn query(
         &self,
-        lhs: OrderNode,
-        rhs: OrderNodeOrConst,
-        kind: OrderEdgeKind,
-        offset: u64,
+        _lhs: OrderNode,
+        _rhs: OrderNodeOrConst,
+        _kind: OrderEdgeKind,
+        _offset: u64,
     ) -> bool {
         todo!()
     }
