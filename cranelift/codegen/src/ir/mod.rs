@@ -19,6 +19,7 @@ pub mod layout;
 pub(crate) mod libcall;
 mod memflags;
 mod memtype;
+pub mod ordergraph;
 pub mod pcc;
 mod progpoint;
 mod sourceloc;
