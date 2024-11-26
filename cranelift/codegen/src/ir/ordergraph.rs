@@ -52,7 +52,7 @@ use crate::entity::{entity_impl, PrimaryMap};
 use crate::unionfind::UnionFind;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A node in the order graph.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -267,7 +267,7 @@ impl OrderGraph {
     /// and returning an error.
     pub fn simplify(&mut self) -> OrderResult<()> {
         const MAX_ITERS: usize = 10;
-        
+
         let mut uf = UnionFind::with_capacity(self.nodes.len());
         for node_idx in self.nodes.keys() {
             uf.add(node_idx);
@@ -398,21 +398,138 @@ impl OrderGraph {
 
         // TODO: look for inequality cycles with nonzero distance and
         // flag an error (contradiction) if so. Inequality cycles with
-        // zero distance merge all the nodes in the cycle.        
+        // zero distance merge all the nodes in the cycle.
 
         Ok(changed)
     }
 
     /// Query the order graph, determining whether a given node is
-    /// {equal to, less than or equal to} another node or constant
-    /// value with at least a certain offset.
-    pub fn query(
-        &self,
-        _lhs: OrderNode,
-        _rhs: OrderNodeOrConst,
-        _kind: OrderEdgeKind,
-        _offset: u64,
-    ) -> bool {
-        todo!()
+    /// less than or equal to another node or constant value with at
+    /// least a certain offset.
+    pub fn query(&self, lhs: OrderNode, rhs: OrderNodeOrConst, offset: u64) -> bool {
+        match rhs {
+            OrderNodeOrConst::Const(k) => {
+                let Some(k) = k.checked_sub(offset) else {
+                    return false;
+                };
+                match self.nodes[lhs].bound {
+                    ConstantBound::Eq(val) | ConstantBound::Le(val) if val <= k => true,
+                    _ => false,
+                }
+            }
+            OrderNodeOrConst::Node(rhs) => {
+                // Do a DFS, searching outward in the graph and
+                // accumulating path lengths.
+                let mut visited = FxHashSet::default();
+                visited.insert(lhs);
+                let mut stack = vec![(lhs, 0)];
+                while let Some(&(top_node, top_offset)) = stack.last() {
+                    // Do we have an ordering path to the RHS with at
+                    // least the given offset?
+                    if top_node == rhs && top_offset >= offset {
+                        return true;
+                    }
+                    // Pop this node and push all outgoing edges to non-visited nodes.
+                    stack.pop();
+                    for edge in self.edges(top_node) {
+                        assert_eq!(edge.lhs, top_node);
+                        if visited.insert(edge.rhs) {
+                            let offset = top_offset.saturating_add(edge.offset);
+                            stack.push((edge.rhs, offset));
+                        }
+                    }
+                }
+
+                false
+            }
+        }
+    }
+
+    fn edges(&self, lhs: OrderNode) -> impl Iterator<Item = &OrderEdge> {
+        let min = OrderEdge {
+            lhs,
+            rhs: OrderNode::from_bits(0),
+            kind: OrderEdgeKind::Eq,
+            offset: 0,
+        };
+        let max = OrderEdge {
+            lhs: OrderNode::from_bits(lhs.as_bits() + 1),
+            rhs: OrderNode::from_bits(0),
+            kind: OrderEdgeKind::Eq,
+            offset: 0,
+        };
+        self.edges.range(min..max)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        og.eq(a, b, 10);
+        og.le(a, b, 8);
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Node(b), 5));
+        assert!(og.query(a, OrderNodeOrConst::Node(b), 10));
+        assert!(!og.query(a, OrderNodeOrConst::Node(b), 11));
+        og.le(a, b, 11);
+        assert!(og.simplify().is_err());
+    }
+
+    #[test]
+    fn transitive() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        let c = og.fresh_var();
+        og.le(a, b, 10);
+        og.le(b, c, 8);
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Node(c), 18));
+    }
+
+    #[test]
+    fn constant_bounds() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        let c = og.fresh_var();
+        og.le(a, b, 10);
+        og.le(b, c, 8);
+        og.constant(c, 20).unwrap();
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Const(2), 0));
+        assert!(!og.query(a, OrderNodeOrConst::Const(1), 0));
+    }
+
+    #[test]
+    fn constant_bounds_le() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        let c = og.fresh_var();
+        og.le(a, b, 10);
+        og.le(b, c, 8);
+        og.le_constant(c, 20).unwrap();
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Const(2), 0));
+        assert!(!og.query(a, OrderNodeOrConst::Const(1), 0));
+    }
+
+    #[test]
+    fn merge() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        let c = og.fresh_var();
+        og.le(a, c, 10);
+        og.eq(b, c, 0);
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Node(b), 10));
     }
 }
