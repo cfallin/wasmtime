@@ -65,6 +65,8 @@ entity_impl!(OrderVar, "order_var");
 pub struct OrderGraph {
     /// Nodes in the order graph.
     pub nodes: PrimaryMap<OrderNode, OrderNodeData>,
+    /// Edges in the order graph.
+    pub edges: BTreeSet<OrderEdge>,
     /// Next fresh variable to allocate.
     next_var: u32,
 }
@@ -78,15 +80,15 @@ pub struct OrderNodeData {
     pub hi: Option<u64>,
     /// Variables in the equivalence class represented by this node.
     pub exprs: Vec<OrderVar>,
-    /// Ordering edges to other nodes.
-    pub edges: BTreeSet<OrderEdge>,
 }
 
 /// An ordering edge from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderEdge {
-    /// The other (right-hand side) node in the ordering relation.
-    pub dest: OrderNode,
+    /// The left-hand-side node in the ordering relation.
+    pub lhs: OrderNode,
+    /// The right-hand side node in the ordering relation.
+    pub rhs: OrderNode,
     /// Kind of edge: equality or inequality.
     pub kind: OrderEdgeKind,
     /// The offset (distance) denoted by this edge.
@@ -139,9 +141,10 @@ impl OrderGraph {
 
     /// Mark one node, plus an offset, as equal to the other.
     pub fn eq(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
-        self.nodes[a].edges.insert(OrderEdge {
+        self.edges.insert(OrderEdge {
             kind: OrderEdgeKind::Eq,
-            dest: b,
+            lhs: a,
+            rhs: b,
             offset,
         });
     }
@@ -149,9 +152,10 @@ impl OrderGraph {
     /// Mark one node, plus an offset, as less than or equal to the
     /// other.
     pub fn le(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
-        self.nodes[a].edges.insert(OrderEdge {
+        self.edges.insert(OrderEdge {
             kind: OrderEdgeKind::Le,
-            dest: b,
+            lhs: a,
+            rhs: b,
             offset,
         });
     }
@@ -205,63 +209,91 @@ impl OrderGraph {
     fn simplify_iter(&mut self) -> OrderResult<bool> {
         let mut changed = false;
 
-        // For each node, merge edges where possible.
-        for node in self.nodes.keys() {
-            // Iterate through edges grouped by destination node. Note
-            // that `dest` is the first field in the edge struct,
-            // hence iteration order with the derived `Ord` ensures we
-            // see edges to the same dest node sequentially.
-            let mut edges = std::mem::take(&mut self.nodes[node].edges);
-            let mut new_edges = BTreeSet::new();
-            let mut best_edge: Option<OrderEdge> = None;
-            for edge in &edges {
-                if best_edge.is_some() && edge.dest != best_edge.unwrap().dest {
-                    new_edges.insert(best_edge.take().unwrap());
+        // Merge edges where possible.  Iterate through edges grouped
+        // by destination node. Note that `src` and `dest` are the
+        // first fields in the edge struct, hence iteration order with
+        // the derived `Ord` ensures we see edges between the same two
+        // nodes sequentially.
+        let mut edges = std::mem::take(&mut self.edges);
+        let mut new_edges = BTreeSet::new();
+        let mut best_edge: Option<OrderEdge> = None;
+        for edge in &edges {
+            if let Some(e) = best_edge {
+                if (edge.lhs, edge.rhs) != (e.lhs, e.rhs) {
+                    new_edges.insert(e);
+                    best_edge = None;
                 }
-                match best_edge {
-                    None => {
-                        best_edge = Some(*edge);
-                    }
-                    Some(cur) => {
-                        assert!(cur != *edge);
-                        match (cur.kind, edge.kind) {
-                            (OrderEdgeKind::Eq, OrderEdgeKind::Eq) => {
-                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
-                            }
-                            (OrderEdgeKind::Eq, OrderEdgeKind::Le) if cur.offset < edge.offset => {
-                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
-                            }
-                            (OrderEdgeKind::Le, OrderEdgeKind::Eq) if edge.offset < cur.offset => {
-                                return Err(OrderGraphError::ConflictingEdges(node, edge.dest));
-                            }
-                            (OrderEdgeKind::Eq, OrderEdgeKind::Le) => {
-                                best_edge = Some(cur);
-                            }
-                            (OrderEdgeKind::Le, OrderEdgeKind::Eq) => {
-                                best_edge = Some(*edge);
-                            }
-                            (OrderEdgeKind::Le, OrderEdgeKind::Le) => {
-                                best_edge = Some(OrderEdge {
-                                    kind: OrderEdgeKind::Le,
-                                    dest: cur.dest,
-                                    offset: std::cmp::max(cur.offset, edge.offset),
-                                });
-                            }
+            }
+            match best_edge {
+                None => {
+                    best_edge = Some(*edge);
+                }
+                Some(cur) => {
+                    assert!(cur != *edge);
+                    match (cur.kind, edge.kind) {
+                        (OrderEdgeKind::Eq, OrderEdgeKind::Eq) => {
+                            return Err(OrderGraphError::ConflictingEdges(edge.lhs, edge.rhs));
+                        }
+                        (OrderEdgeKind::Eq, OrderEdgeKind::Le) if cur.offset < edge.offset => {
+                            return Err(OrderGraphError::ConflictingEdges(edge.lhs, edge.rhs));
+                        }
+                        (OrderEdgeKind::Le, OrderEdgeKind::Eq) if edge.offset < cur.offset => {
+                            return Err(OrderGraphError::ConflictingEdges(edge.lhs, edge.rhs));
+                        }
+                        (OrderEdgeKind::Eq, OrderEdgeKind::Le) => {
+                            best_edge = Some(cur);
+                        }
+                        (OrderEdgeKind::Le, OrderEdgeKind::Eq) => {
+                            best_edge = Some(*edge);
+                        }
+                        (OrderEdgeKind::Le, OrderEdgeKind::Le) => {
+                            best_edge = Some(OrderEdge {
+                                kind: OrderEdgeKind::Le,
+                                lhs: cur.lhs,
+                                rhs: cur.rhs,
+                                offset: std::cmp::max(cur.offset, edge.offset),
+                            });
                         }
                     }
                 }
             }
-            if let Some(best_edge) = best_edge {
-                new_edges.insert(best_edge);
-            }
-            if new_edges != edges {
-                changed = true;
-            }
-            self.nodes[node].edges = new_edges;
         }
+        if let Some(best_edge) = best_edge {
+            new_edges.insert(best_edge);
+        }
+        if new_edges != edges {
+            changed = true;
+        }
+        self.edges = new_edges;
 
         // Update each node's lo/hi range based on edges.
-        let lo_updates: Vec<(OrderNode, u64)> = vec![];
+        for edge in &self.edges {
+            assert_ne!(edge.lhs, edge.rhs);
+            match edge.kind {
+                OrderEdgeKind::Le => {
+                    let (x, y) = unify_le(self.nodes[edge.lhs].lo, self.nodes[edge.rhs].lo);
+                    self.nodes[edge.lhs].lo = x;
+                    self.nodes[edge.rhs].lo = y;
+                    let (x, y) = unify_le(self.nodes[edge.lhs].hi, self.nodes[edge.rhs].hi);
+                    self.nodes[edge.lhs].hi = x;
+                    self.nodes[edge.rhs].hi = y;
+                }
+                OrderEdgeKind::Eq => {
+                    match (lhs_hi, rhs_lo) {
+                        (Some(a), Some(b)) => {
+                            if a.saturating_add(edge.offset) != b {
+                                return Err(OrderGraphError::ConflictingEdges(edge.lhs, edge.rhs));
+                            }
+                        }
+                        (Some(a), None) => {
+                            self.nodes[edge.rhs].lo
+                        }
+                    }
+                }
+            }
+        }
+
+        
         for node in self.nodes.keys() {
             let mut hi = self.nodes[node].hi;
             // Invariant: we'll have at most one edge per dest node,
