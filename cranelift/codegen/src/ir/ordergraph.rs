@@ -1,50 +1,37 @@
 //! Order graph: data structure used for PCC facts. Represents
 //! inequalities between symbolic and concrete quantities.
 //!
-//! A node in the graph is an equivalence class of expressions. Each
-//! expression is (i) a constant value, or (ii) a symbolic
-//! var. Symbolic vars are allocated fresh as needed and correspond to
-//! values in facts, but are not otherwise defined by or implicitly
-//! equal to any value in the program; they are a separate index
-//! space.
+//! A node in the graph is an equivalence class of variables, with an
+//! optional constant-value constraint. Symbolic vars are allocated
+//! fresh as needed and correspond to values in facts, but are not
+//! otherwise defined by or implicitly equal to any value in the
+//! program; they are a separate index space. The constant-value
+//! constraint may be "equal to K" or "less than or equal to K".
 //!
 //! A directed edge in the graph is either an equality edge or an
 //! inequality edge (i.e., `==` or `<=`), with an optional
-//! non-negative (zero or positive) offset.
+//! non-negative (zero or positive) offset. If there is an edge from
+//! `x` to `y` with kind `<=` and offset C, that edge denotes that `x
+//! + C <= y`.
 //!
-//! We support adding nodes, adding edges, union'ing nodes (equivalent
-//! to adding an equality edge with zero offset), and
-//! "simplification".
-//!
-//! The graph is acyclic once simplified: a cycle implies equality (if
-//! all offsets are zero) or an impossible situation (if any offset is
-//! greater than zero). In the latter case, simplification flags the
-//! error and further use of the order graph is invalid.
+//! We support adding nodes, adding edges, setting the constant
+//! constraint on a node, and "simplification".
 //!
 //! ## Simplification
 //!
 //! The goal of simplification is not to compute a transitive closure
 //! (that would result in many inequality edges implied by transitive
 //! combinations of existing edges), but rather to union as many nodes
-//! together as possible according to equalities. We do this by, for
-//! each node, iterating until fixpoint:
-//!
-//! - Sort all outgoing edges by destination node. If any two edges
-//!   are to the same node, pick the edge that implies greater
-//!   distance (so if x + 5 <= y and x + 10 <= y, then keep x + 10 <=
-//!   y). Pick equality edges over inequality edges. If an equality
-//!   edge contradicts an inequality (e.g., x + 5 <= y and x + 3 ==
-//!   y), flag an error. If two equality edges contradict (e.g., x + 5
-//!   == y and x + 3 == y), flag an error.
-//! - If equality edges exist with the same offset to two distinct
-//!   destination nodes, merge those two nodes into one.
+//! together as possible according to equalities and to update
+//! constant constraints as implied by edges.
 //!
 //! ## Queries
 //!
 //! We support one kind of query: is one value (constant or symbolic
 //! value) necessarily less than or equal to another value, with at
 //! least some offset? We compute the result of this query by
-//! exploring outward.
+//! performing a DFS, tracking the sum of all offsets of traversed
+//! edges along any given path.
 
 use std::collections::hash_map::Entry;
 
@@ -52,7 +39,7 @@ use crate::entity::{entity_impl, PrimaryMap};
 use crate::unionfind::UnionFind;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// A node in the order graph.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -418,12 +405,16 @@ impl OrderGraph {
                 }
             }
             OrderNodeOrConst::Node(rhs) => {
+                const MAX_ITER: usize = 20;
                 // Do a DFS, searching outward in the graph and
                 // accumulating path lengths.
-                let mut visited = FxHashSet::default();
-                visited.insert(lhs);
                 let mut stack = vec![(lhs, 0)];
+                let mut iter = 0;
                 while let Some(&(top_node, top_offset)) = stack.last() {
+                    iter += 1;
+                    if iter > MAX_ITER {
+                        break;
+                    }
                     // Do we have an ordering path to the RHS with at
                     // least the given offset?
                     if top_node == rhs && top_offset >= offset {
@@ -433,10 +424,8 @@ impl OrderGraph {
                     stack.pop();
                     for edge in self.edges(top_node) {
                         assert_eq!(edge.lhs, top_node);
-                        if visited.insert(edge.rhs) {
-                            let offset = top_offset.saturating_add(edge.offset);
-                            stack.push((edge.rhs, offset));
-                        }
+                        let offset = top_offset.saturating_add(edge.offset);
+                        stack.push((edge.rhs, offset));
                     }
                 }
 
