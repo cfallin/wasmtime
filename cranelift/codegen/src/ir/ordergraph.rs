@@ -521,4 +521,17 @@ mod test {
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Node(b), 10));
     }
+
+    #[test]
+    fn two_paths() {
+        let mut og = OrderGraph::default();
+        let a = og.fresh_var();
+        let b = og.fresh_var();
+        let c = og.fresh_var();
+        og.le(a, b, 10);
+        og.le(b, c, 10);
+        og.le(a, c, 30);
+        og.simplify().unwrap();
+        assert!(og.query(a, OrderNodeOrConst::Node(c), 25));
+    }
 }
