@@ -43,16 +43,20 @@ use rustc_hash::FxHashMap;
 
 /// A node in the order graph.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct OrderNode(u32);
-/// A variable in the order graph.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OrderVar(u32);
 
 entity_impl!(OrderNode, "order_node");
-entity_impl!(OrderVar, "order_var");
 
 /// An order graph.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct OrderGraph {
     /// Nodes in the order graph.
     pub nodes: PrimaryMap<OrderNode, OrderNodeData>,
@@ -63,18 +67,25 @@ pub struct OrderGraph {
 }
 
 /// Data at one node in the order graph.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct OrderNodeData {
     /// Constant bound (equal or upper bound), if any.
     pub bound: ConstantBound,
-    /// Variables in the equivalence class represented by this node.
-    pub exprs: Vec<OrderVar>,
 }
 
 /// A constant-valued bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub enum ConstantBound {
     /// No constant bound known.
+    #[default]
     None,
     /// Equal to the given value.
     Eq(u64),
@@ -109,6 +120,10 @@ impl ConstantBound {
 
 /// An ordering edge from one node to another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub struct OrderEdge {
     /// The left-hand-side node in the ordering relation.
     pub lhs: OrderNode,
@@ -166,6 +181,10 @@ impl OrderEdge {
 
 /// An edge kind: equal or less-than-or-equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub enum OrderEdgeKind {
     /// Equal.
     Eq,
@@ -192,7 +211,11 @@ pub enum OrderGraphError {
 pub type OrderResult<T> = std::result::Result<T, OrderGraphError>;
 
 /// Either a node ID or a constant value.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "enable-serde",
+    derive(serde_derive::Serialize, serde_derive::Deserialize)
+)]
 pub enum OrderNodeOrConst {
     /// A symbolic order node.
     Node(OrderNode),
@@ -201,19 +224,15 @@ pub enum OrderNodeOrConst {
 }
 
 impl OrderGraph {
-    /// Allocate a fresh variable and create a new order node for it.
-    pub fn fresh_var(&mut self) -> OrderNode {
-        let index = self.next_var;
-        self.next_var += 1;
-        let var = OrderVar::from_u32(index);
+    /// Allocate a fresh node.
+    pub fn fresh(&mut self) -> OrderNode {
         self.nodes.push(OrderNodeData {
             bound: ConstantBound::None,
-            exprs: vec![var],
         })
     }
 
     /// Mark one node, plus an offset, as equal to the other.
-    pub fn eq(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
+    pub fn add_eq(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
         self.edges.insert(OrderEdge {
             kind: OrderEdgeKind::Eq,
             lhs: a,
@@ -224,7 +243,7 @@ impl OrderGraph {
 
     /// Mark one node, plus an offset, as less than or equal to the
     /// other.
-    pub fn le(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
+    pub fn add_le(&mut self, a: OrderNode, b: OrderNode, offset: u64) {
         self.edges.insert(OrderEdge {
             kind: OrderEdgeKind::Le,
             lhs: a,
@@ -234,7 +253,7 @@ impl OrderGraph {
     }
 
     /// Mark a node as having a fixed constant value.
-    pub fn constant(&mut self, a: OrderNode, value: u64) -> OrderResult<()> {
+    pub fn add_constant(&mut self, a: OrderNode, value: u64) -> OrderResult<()> {
         let new = ConstantBound::merge(self.nodes[a].bound, ConstantBound::Eq(value))
             .ok_or_else(|| OrderGraphError::ConstantConflict(a))?;
         self.nodes[a].bound = new;
@@ -243,7 +262,7 @@ impl OrderGraph {
 
     /// Mark a node as having a fixed upper constant-value bound
     /// (inclusive).
-    pub fn le_constant(&mut self, a: OrderNode, hi: u64) -> OrderResult<()> {
+    pub fn add_le_constant(&mut self, a: OrderNode, hi: u64) -> OrderResult<()> {
         let new = ConstantBound::merge(self.nodes[a].bound, ConstantBound::Le(hi))
             .ok_or_else(|| OrderGraphError::ConstantConflict(a))?;
         self.nodes[a].bound = new;
@@ -274,10 +293,6 @@ impl OrderGraph {
                 let bound = ConstantBound::merge(bound, self.nodes[merged_into].bound)
                     .ok_or_else(|| OrderGraphError::ConstantConflict(merged_into))?;
                 self.nodes[merged_into].bound = bound;
-                let exprs = std::mem::take(&mut self.nodes[merged_node].exprs);
-                self.nodes[merged_into].exprs.extend(exprs.into_iter());
-                self.nodes[merged_into].exprs.sort_unstable();
-                self.nodes[merged_into].exprs.dedup();
             }
         }
         Ok(())
@@ -460,13 +475,13 @@ mod test {
         let mut og = OrderGraph::default();
         let a = og.fresh_var();
         let b = og.fresh_var();
-        og.eq(a, b, 10);
-        og.le(a, b, 8);
+        og.add_eq(a, b, 10);
+        og.add_le(a, b, 8);
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Node(b), 5));
         assert!(og.query(a, OrderNodeOrConst::Node(b), 10));
         assert!(!og.query(a, OrderNodeOrConst::Node(b), 11));
-        og.le(a, b, 11);
+        og.add_le(a, b, 11);
         assert!(og.simplify().is_err());
     }
 
@@ -476,8 +491,8 @@ mod test {
         let a = og.fresh_var();
         let b = og.fresh_var();
         let c = og.fresh_var();
-        og.le(a, b, 10);
-        og.le(b, c, 8);
+        og.add_le(a, b, 10);
+        og.add_le(b, c, 8);
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Node(c), 18));
     }
@@ -488,9 +503,9 @@ mod test {
         let a = og.fresh_var();
         let b = og.fresh_var();
         let c = og.fresh_var();
-        og.le(a, b, 10);
-        og.le(b, c, 8);
-        og.constant(c, 20).unwrap();
+        og.add_le(a, b, 10);
+        og.add_le(b, c, 8);
+        og.add_constant(c, 20).unwrap();
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Const(2), 0));
         assert!(!og.query(a, OrderNodeOrConst::Const(1), 0));
@@ -502,9 +517,9 @@ mod test {
         let a = og.fresh_var();
         let b = og.fresh_var();
         let c = og.fresh_var();
-        og.le(a, b, 10);
-        og.le(b, c, 8);
-        og.le_constant(c, 20).unwrap();
+        og.add_le(a, b, 10);
+        og.add_le(b, c, 8);
+        og.add_le_constant(c, 20).unwrap();
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Const(2), 0));
         assert!(!og.query(a, OrderNodeOrConst::Const(1), 0));
@@ -516,8 +531,8 @@ mod test {
         let a = og.fresh_var();
         let b = og.fresh_var();
         let c = og.fresh_var();
-        og.le(a, c, 10);
-        og.eq(b, c, 0);
+        og.add_le(a, c, 10);
+        og.add_eq(b, c, 0);
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Node(b), 10));
     }
@@ -528,9 +543,9 @@ mod test {
         let a = og.fresh_var();
         let b = og.fresh_var();
         let c = og.fresh_var();
-        og.le(a, b, 10);
-        og.le(b, c, 10);
-        og.le(a, c, 30);
+        og.add_le(a, b, 10);
+        og.add_le(b, c, 10);
+        og.add_le(a, c, 30);
         og.simplify().unwrap();
         assert!(og.query(a, OrderNodeOrConst::Node(c), 25));
     }

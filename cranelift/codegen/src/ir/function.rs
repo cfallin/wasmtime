@@ -7,8 +7,8 @@ use crate::entity::{PrimaryMap, SecondaryMap};
 use crate::ir::{
     self, pcc::Fact, Block, DataFlowGraph, DynamicStackSlot, DynamicStackSlotData,
     DynamicStackSlots, DynamicType, ExtFuncData, FuncRef, GlobalValue, GlobalValueData, Inst,
-    JumpTable, JumpTableData, Layout, MemoryType, MemoryTypeData, Opcode, SigRef, Signature,
-    SourceLocs, StackSlot, StackSlotData, StackSlots, Type,
+    JumpTable, JumpTableData, Layout, MemoryType, MemoryTypeData, Opcode, OrderGraph, SigRef,
+    Signature, SourceLocs, StackSlot, StackSlotData, StackSlots, Type,
 };
 use crate::isa::CallConv;
 use crate::write::write_function;
@@ -183,6 +183,11 @@ pub struct FunctionStencil {
 
     /// Layout of blocks and instructions in the function body.
     pub layout: Layout,
+
+    /// Order-graph: referred to by facts, a function-global view of
+    /// ordering between values used for proof-carrying code
+    /// validation.
+    pub ordergraph: OrderGraph,
 
     /// Source locations.
     ///
