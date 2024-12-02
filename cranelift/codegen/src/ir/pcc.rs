@@ -444,37 +444,10 @@ impl FactBuilder {
             _ => Fact::Conflict,
         }
     }
-}
 
-/// A "context" in which we can evaluate facts. This context carries
-/// environment/global properties, such as the machine pointer
-/// width. Assumes the OrderGraph has been simplified fully.
-pub struct FactQueryContext<'a> {
-    function: &'a ir::Function,
-    pointer_width: u16,
-}
-
-impl<'a> FactQueryContext<'a> {
-    /// Create a new "fact context" in which to evaluate facts.
-    pub fn new(function: &'a ir::Function, pointer_width: u16) -> Self {
-        FactQueryContext {
-            function,
-            pointer_width,
-        }
-    }
-
-    /// Is a fact a constant value of the given bitwidth? Return it as
-    /// a `Some(value)` if so.
-    pub fn as_const(&self, fact: &Fact, bits: u16) -> Option<u64> {
-        match fact {
-            Fact::Range { bit_width, value } if *bit_width == bits => {
-                match self.function.ordergraph.nodes[*value].bound {
-                    ConstantBound::Eq(value) => Some(value),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+    /// Creates a new OrderNode denoting the sum of two OrderNodes. If
+    /// one or both has a known constant value, we use it
+    pub fn add_nodes(&self, lhs: OrderNode, rhs: OrderNode) -> OrderNode {
     }
 
     /// Computes whatever fact can be known about the sum of two
@@ -482,7 +455,7 @@ impl<'a> FactQueryContext<'a> {
     /// bit-width. Note that this is distinct from the machine or
     /// pointer width: e.g., many 64-bit machines can still do 32-bit
     /// adds that wrap at 2^32.
-    pub fn add(&self, lhs: &Fact, rhs: &Fact, add_width: u16) -> Option<Fact> {
+    pub fn add_facts(&self, lhs: &Fact, rhs: &Fact, add_width: u16) -> Option<Fact> {
         let result = match (lhs, rhs) {
             (
                 Fact::Range {
@@ -689,6 +662,38 @@ impl<'a> FactQueryContext<'a> {
 
         trace!("add: {lhs:?} + {rhs:?} -> {result:?}");
         result
+    }
+}
+
+/// A "context" in which we can evaluate facts. This context carries
+/// environment/global properties, such as the machine pointer
+/// width. Assumes the OrderGraph has been simplified fully.
+pub struct FactQueryContext<'a> {
+    function: &'a ir::Function,
+    pointer_width: u16,
+}
+
+impl<'a> FactQueryContext<'a> {
+    /// Create a new "fact context" in which to evaluate facts.
+    pub fn new(function: &'a ir::Function, pointer_width: u16) -> Self {
+        FactQueryContext {
+            function,
+            pointer_width,
+        }
+    }
+
+    /// Is a fact a constant value of the given bitwidth? Return it as
+    /// a `Some(value)` if so.
+    pub fn as_const(&self, fact: &Fact, bits: u16) -> Option<u64> {
+        match fact {
+            Fact::Range { bit_width, value } if *bit_width == bits => {
+                match self.function.ordergraph.nodes[*value].bound {
+                    ConstantBound::Eq(value) => Some(value),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Computes whether `lhs` "subsumes" (implies) `rhs`.
