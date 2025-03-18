@@ -21,7 +21,7 @@ use crate::ir::{
     self,
     condcodes::{FloatCC, IntCC},
     trapcode::TrapCode,
-    types, Block, FuncRef, MemFlags, SigRef, StackSlot, Type, Value,
+    types, Block, ExceptionTables, FuncRef, MemFlags, SigRef, StackSlot, Type, Value,
 };
 
 /// Some instructions use an external list of argument values because there is not enough space in
@@ -305,11 +305,18 @@ impl InstructionData {
     /// Get the destinations of this instruction, if it's a branch.
     ///
     /// `br_table` returns the empty slice.
-    pub fn branch_destination<'a>(&'a self, jump_tables: &'a ir::JumpTables) -> &'a [BlockCall] {
+    pub fn branch_destination<'a>(
+        &'a self,
+        jump_tables: &'a ir::JumpTables,
+        exception_tables: &'a ir::ExceptionTables,
+    ) -> &'a [BlockCall] {
         match self {
             Self::Jump { destination, .. } => std::slice::from_ref(destination),
             Self::Brif { blocks, .. } => blocks.as_slice(),
             Self::BranchTable { table, .. } => jump_tables.get(*table).unwrap().all_branches(),
+            Self::TryCall { exception, .. } | Self::TryCallIndirect { exception, .. } => {
+                &exception_tables.get(*exception).unwrap().targets[..]
+            }
             _ => {
                 debug_assert!(!self.opcode().is_branch());
                 &[]
@@ -323,12 +330,16 @@ impl InstructionData {
     pub fn branch_destination_mut<'a>(
         &'a mut self,
         jump_tables: &'a mut ir::JumpTables,
+        exception_tables: &'a mut ir::ExceptionTables,
     ) -> &'a mut [BlockCall] {
         match self {
             Self::Jump { destination, .. } => std::slice::from_mut(destination),
             Self::Brif { blocks, .. } => blocks.as_mut_slice(),
             Self::BranchTable { table, .. } => {
                 jump_tables.get_mut(*table).unwrap().all_branches_mut()
+            }
+            Self::TryCall { exception, .. } | Self::TryCallIndirect { exception, .. } => {
+                &mut exception_tables.get_mut(*exception).unwrap().targets[..]
             }
             _ => {
                 debug_assert!(!self.opcode().is_branch());
@@ -343,13 +354,14 @@ impl InstructionData {
         &mut self,
         pool: &mut ValueListPool,
         jump_tables: &mut ir::JumpTables,
+        exception_tables: &mut ir::ExceptionTables,
         mut f: impl FnMut(Value) -> Value,
     ) {
         for arg in self.arguments_mut(pool) {
             *arg = f(*arg);
         }
 
-        for block in self.branch_destination_mut(jump_tables) {
+        for block in self.branch_destination_mut(jump_tables, exception_tables) {
             for arg in block.args_slice_mut(pool) {
                 *arg = f(*arg);
             }
@@ -437,7 +449,11 @@ impl InstructionData {
     /// Return information about a call instruction.
     ///
     /// Any instruction that can call another function reveals its call signature here.
-    pub fn analyze_call<'a>(&'a self, pool: &'a ValueListPool) -> CallInfo<'a> {
+    pub fn analyze_call<'a>(
+        &'a self,
+        pool: &'a ValueListPool,
+        exception_tables: &ExceptionTables,
+    ) -> CallInfo<'a> {
         match *self {
             Self::Call {
                 func_ref, ref args, ..
@@ -445,6 +461,23 @@ impl InstructionData {
             Self::CallIndirect {
                 sig_ref, ref args, ..
             } => CallInfo::Indirect(sig_ref, &args.as_slice(pool)[1..]),
+            Self::TryCall {
+                func_ref,
+                ref args,
+                exception,
+                ..
+            } => {
+                let exdata = &exception_tables[exception];
+                CallInfo::DirectWithSig(func_ref, exdata.sig, args.as_slice(pool))
+            }
+            Self::TryCallIndirect {
+                exception,
+                ref args,
+                ..
+            } => {
+                let exdata = &exception_tables[exception];
+                CallInfo::Indirect(exdata.sig, args.as_slice(pool))
+            }
             Self::Ternary {
                 opcode: Opcode::StackSwitch,
                 ..
@@ -508,6 +541,11 @@ pub enum CallInfo<'a> {
 
     /// This is an indirect call with the specified signature. See `DataFlowGraph.signatures`.
     Indirect(SigRef, &'a [Value]),
+
+    /// This is a direct call to an external function declared in the
+    /// preamble, but the signature is also known by other means:
+    /// e.g., from an exception table entry.
+    DirectWithSig(FuncRef, SigRef, &'a [Value]),
 }
 
 /// Value type constraints for a given opcode.

@@ -25,7 +25,7 @@ use cranelift_codegen::ir::{
     SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, UserFuncName, Value,
 };
 use cranelift_codegen::isa::{self, CallConv};
-use cranelift_codegen::packed_option::ReservedValue;
+use cranelift_codegen::packed_option::{PackedOption, ReservedValue};
 use cranelift_codegen::{settings, settings::Configurable, timing};
 use smallvec::SmallVec;
 use std::mem;
@@ -1923,6 +1923,73 @@ impl<'a> Parser<'a> {
             .push(JumpTableData::new(def, &data)))
     }
 
+    // Parse an exception-table decl.
+    //
+    // exception-table ::= * SigRef(sig) "," BlockCall "," "[" (exception-table-entry ( "," exception-table-entry )*)? "]"
+    // exception-table-entry ::= * ExceptionTag(tag) ":" BlockCall
+    //                           * "default" ":" BlockCall
+    fn parse_exception_table(&mut self, ctx: &mut Context) -> ParseResult<ir::ExceptionTable> {
+        let sig = self.match_sig("expected signature of called function")?;
+        self.match_token(Token::Comma, "expected comma after signature argument")?;
+
+        let mut targets = vec![];
+        let mut tags = vec![];
+
+        let block_num = self.match_block("expected branch destination block")?;
+        let args = self.parse_opt_value_list()?;
+        targets.push(ctx.function.dfg.block_call(block_num, &args));
+
+        self.match_token(
+            Token::Comma,
+            "expected comma after normal-return destination",
+        )?;
+
+        match self.token() {
+            Some(Token::LBracket) => {
+                self.consume();
+                loop {
+                    if let Some(Token::RBracket) = self.token() {
+                        break;
+                    }
+
+                    let tag: PackedOption<ir::ExceptionTag> = match self.token() {
+                        Some(Token::ExceptionTag(tag)) => {
+                            self.consume();
+                            Some(ir::ExceptionTag::from_u32(tag)).into()
+                        }
+                        Some(Token::Identifier("default")) => {
+                            self.consume();
+                            None.into()
+                        }
+                        _ => return err!(self.loc, "invalid token"),
+                    };
+                    self.match_token(Token::Colon, "expected ':' after exception tag")?;
+
+                    let block_num = self.match_block("expected branch destination block")?;
+                    let args = self.parse_opt_value_list()?;
+                    let block_call = ctx.function.dfg.block_call(block_num, &args);
+
+                    tags.push(tag);
+                    targets.push(block_call);
+
+                    if let Some(Token::Comma) = self.token() {
+                        self.consume();
+                    } else {
+                        break;
+                    }
+                }
+                self.match_token(Token::RBracket, "expected closing bracket")?;
+            }
+            _ => {}
+        };
+
+        Ok(ctx
+            .function
+            .dfg
+            .exception_tables
+            .push(ir::ExceptionTableData { sig, targets, tags }))
+    }
+
     // Parse a constant decl.
     //
     // constant-decl ::= * Constant(c) "=" ty? "[" literal {"," literal} "]"
@@ -3083,6 +3150,34 @@ impl<'a> Parser<'a> {
                     opcode,
                     sig_ref,
                     args: args.into_value_list(&[callee], &mut ctx.function.dfg.value_lists),
+                }
+            }
+            InstructionFormat::TryCall => {
+                let func_ref = self.match_fn("expected function reference")?;
+                ctx.check_fn(func_ref, self.loc)?;
+                self.match_token(Token::LPar, "expected '(' before arguments")?;
+                let args = self.parse_value_list()?;
+                self.match_token(Token::RPar, "expected ')' after arguments")?;
+                self.match_token(Token::Comma, "expected ',' after argument list")?;
+                let exception = self.parse_exception_table(ctx)?;
+                InstructionData::TryCall {
+                    opcode,
+                    func_ref,
+                    args: args.into_value_list(&[], &mut ctx.function.dfg.value_lists),
+                    exception,
+                }
+            }
+            InstructionFormat::TryCallIndirect => {
+                let callee = self.match_value("expected SSA value callee operand")?;
+                self.match_token(Token::LPar, "expected '(' before arguments")?;
+                let args = self.parse_value_list()?;
+                self.match_token(Token::RPar, "expected ')' after arguments")?;
+                self.match_token(Token::Comma, "expected ',' after argument list")?;
+                let exception = self.parse_exception_table(ctx)?;
+                InstructionData::TryCallIndirect {
+                    opcode,
+                    args: args.into_value_list(&[callee], &mut ctx.function.dfg.value_lists),
+                    exception,
                 }
             }
             InstructionFormat::FuncAddr => {

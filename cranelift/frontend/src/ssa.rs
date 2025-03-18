@@ -542,7 +542,8 @@ impl SSABuilder {
                 let pred = preds.get_mut(idx, &mut self.inst_pool).unwrap();
                 let branch = *pred;
 
-                let dests = dfg.insts[branch].branch_destination_mut(&mut dfg.jump_tables);
+                let dests = dfg.insts[branch]
+                    .branch_destination_mut(&mut dfg.jump_tables, &mut dfg.exception_tables);
                 assert!(
                     !dests.is_empty(),
                     "you have declared a non-branch instruction as a predecessor to a block!"

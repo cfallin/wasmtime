@@ -920,7 +920,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             // the traversal order defined in `visit_block_succs` mirrors the order returned by
             // `branch_destination`. If that assumption is violated, the branch targets returned
             // here will not match the clif.
-            let branches = self.f.dfg.insts[inst].branch_destination(&self.f.dfg.jump_tables);
+            let branches = self.f.dfg.insts[inst]
+                .branch_destination(&self.f.dfg.jump_tables, &self.f.dfg.exception_tables);
             let branch_args = branches[succ_idx].args_slice(&self.f.dfg.value_lists);
 
             let mut branch_arg_vregs: SmallVec<[Reg; 16]> = smallvec![];

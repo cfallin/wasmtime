@@ -307,6 +307,59 @@ fn define_control_flow(
             .with_doc("function to call, declared by `function`")])
         .operands_out(vec![Operand::new("addr", iAddr)]),
     );
+
+    ig.push(
+        Inst::new(
+            "try_call",
+            r#"
+        Call a function and catch any thrown exceptions.
+
+        Call the function pointed to by `callee` with the given arguments. On
+        normal return, branch to the first target, with function returns
+        prepended to the other given block arguments. On exceptional return,
+        look up the thrown exception tag in the provided exception table;
+        if the tag matches one of the targets, branch to the matching
+        target with the exception value prepended to the other given block
+        arguments. If no tag matches, then propagate the exception up the
+        stack.
+        "#,
+            &formats.try_call,
+        )
+        .operands_in(vec![
+            Operand::new("callee", &entities.func_ref)
+                .with_doc("function to call, declared by `function`"),
+            Operand::new("args", &entities.varargs).with_doc("call arguments"),
+            Operand::new("ET", &entities.exception_table).with_doc("exception table"),
+        ])
+        .call()
+        .branches(),
+    );
+
+    ig.push(
+        Inst::new(
+            "try_call_indirect",
+            r#"
+        Call a function and catch any thrown exceptions.
+
+        Call the function pointed to by `callee` with the given arguments. On
+        normal return, branch to the first target, with function returns
+        prepended to the other given block arguments. On exceptional return,
+        look up the thrown exception tag in the provided exception table;
+        if the tag matches one of the targets, branch to the matching
+        target with the exception value prepended to the other given block
+        arguments. If no tag matches, then propagate the exception up the
+        stack.
+        "#,
+            &formats.try_call_indirect,
+        )
+        .operands_in(vec![
+            Operand::new("callee", iAddr).with_doc("address of function to call"),
+            Operand::new("args", &entities.varargs).with_doc("call arguments"),
+            Operand::new("ET", &entities.exception_table).with_doc("exception table"),
+        ])
+        .call()
+        .branches(),
+    );
 }
 
 #[inline(never)]

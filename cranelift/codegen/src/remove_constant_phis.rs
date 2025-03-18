@@ -239,7 +239,7 @@ pub fn do_remove_constant_phis(func: &mut Function, domtree: &mut DominatorTree)
 
         for inst in func.layout.block_insts(b) {
             for (ix, dest) in func.dfg.insts[inst]
-                .branch_destination(&func.dfg.jump_tables)
+                .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables)
                 .iter()
                 .enumerate()
             {
@@ -385,7 +385,8 @@ pub fn do_remove_constant_phis(func: &mut Function, domtree: &mut DominatorTree)
             }
 
             let dfg = &mut func.dfg;
-            let dests = dfg.insts[edge.inst].branch_destination_mut(&mut dfg.jump_tables);
+            let dests = dfg.insts[edge.inst]
+                .branch_destination_mut(&mut dfg.jump_tables, &mut dfg.exception_tables);
             let block = &mut dests[edge.branch_index as usize];
 
             old_actuals.extend(block.args_slice(&dfg.value_lists));
