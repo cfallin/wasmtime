@@ -970,8 +970,8 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             }
         };
 
-        let block_call =
-            self.f.dfg.insts[branch_inst].branch_destination(&self.f.dfg.jump_tables)[succ_idx];
+        let block_call = self.f.dfg.insts[branch_inst]
+            .branch_destination(&self.f.dfg.jump_tables, &self.f.dfg.exception_tables)[succ_idx];
         let args = block_call.args_slice(&self.f.dfg.value_lists);
         for &arg in args {
             debug_assert!(self.f.dfg.value_is_real(arg));

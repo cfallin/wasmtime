@@ -69,7 +69,7 @@ use crate::entity::SparseSet;
 use crate::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use crate::ir::entities::AnyEntity;
 use crate::ir::instructions::{CallInfo, InstructionFormat, ResolvedConstraint};
-use crate::ir::{self, ArgumentExtension};
+use crate::ir::{self, ArgumentExtension, ExceptionTable};
 use crate::ir::{
     types, ArgumentPurpose, Block, Constant, DynamicStackSlot, FuncRef, Function, GlobalValue,
     Inst, JumpTable, MemFlags, MemoryTypeData, Opcode, SigRef, StackSlot, Type, Value, ValueDef,
@@ -594,6 +594,24 @@ impl<'a> Verifier<'a> {
                 self.verify_sig_ref(inst, sig_ref, errors)?;
                 self.verify_value_list(inst, args, errors)?;
             }
+            TryCall {
+                func_ref,
+                ref args,
+                exception,
+                ..
+            } => {
+                self.verify_func_ref(inst, func_ref, errors)?;
+                self.verify_value_list(inst, args, errors)?;
+                self.verify_exception_table(inst, exception, errors)?;
+            }
+            TryCallIndirect {
+                ref args,
+                exception,
+                ..
+            } => {
+                self.verify_value_list(inst, args, errors)?;
+                self.verify_exception_table(inst, exception, errors)?;
+            }
             FuncAddr { func_ref, .. } => {
                 self.verify_func_ref(inst, func_ref, errors)?;
             }
@@ -870,6 +888,35 @@ impl<'a> Verifier<'a> {
             }
             Ok(())
         }
+    }
+
+    fn verify_exception_table(
+        &self,
+        inst: Inst,
+        et: ExceptionTable,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        // Verify that the exception table reference itself is valid.
+        if !self.func.stencil.dfg.exception_tables.is_valid(et) {
+            errors.nonfatal((
+                inst,
+                self.context(inst),
+                format!("invalid exception table reference {et}"),
+            ))?;
+        }
+
+        let pool = &self.func.stencil.dfg.value_lists;
+        let exdata = &self.func.stencil.dfg.exception_tables[et];
+
+        // Verify that the exception table's signature reference
+        // is valid.
+        self.verify_sig_ref(inst, exdata.sig, errors)?;
+
+        // Verify that the exception table's block references are valid.
+        for block in &exdata.targets {
+            self.verify_block(inst, block.block(pool), errors)?;
+        }
+        Ok(())
     }
 
     fn verify_value(
@@ -1328,12 +1375,59 @@ impl<'a> Verifier<'a> {
                     self.typecheck_block_call(inst, block, errors)?;
                 }
             }
+            ir::InstructionData::TryCall { exception, .. }
+            | ir::InstructionData::TryCallIndirect { exception, .. } => {
+                let exdata = &self.func.stencil.dfg.exception_tables[*exception];
+                let sigdata = &self.func.stencil.dfg.signatures[exdata.sig];
+                let pointer_ty = self.pointer_type_or_error(inst, errors)?;
+                self.typecheck_block_call_with_implicit_prefix(
+                    inst,
+                    exdata.normal_return(),
+                    // Function return implicit arguments prefixed to
+                    // BlockCall arguments.
+                    sigdata.returns.iter().map(|ret| ret.value_type),
+                    errors,
+                )?;
+                for (_tag, block) in exdata.catches() {
+                    self.typecheck_block_call_with_implicit_prefix(
+                        inst,
+                        block,
+                        // Exception payload implicit argument
+                        // prefixed to BlockCall arguments.
+                        core::iter::once(pointer_ty),
+                        errors,
+                    )?;
+                }
+            }
             inst => debug_assert!(!inst.opcode().is_branch()),
         }
 
-        match self.func.dfg.insts[inst].analyze_call(&self.func.dfg.value_lists) {
+        match self.func.dfg.insts[inst]
+            .analyze_call(&self.func.dfg.value_lists, &self.func.dfg.exception_tables)
+        {
             CallInfo::Direct(func_ref, args) => {
                 let sig_ref = self.func.dfg.ext_funcs[func_ref].signature;
+                let arg_types = self.func.dfg.signatures[sig_ref]
+                    .params
+                    .iter()
+                    .map(|a| a.value_type);
+                self.typecheck_variable_args_iterator(inst, arg_types, args, errors)?;
+            }
+            CallInfo::DirectWithSig(func_ref, sig_ref, args) => {
+                let expected_sig_ref = self.func.dfg.ext_funcs[func_ref].signature;
+                let sigdata = &self.func.dfg.signatures;
+                // Compare signatures by value, not by ID -- any
+                // equivalent signature ID is acceptable.
+                if sigdata[sig_ref] != sigdata[expected_sig_ref] {
+                    errors.nonfatal((
+                        inst,
+                        self.context(inst),
+                        format!(
+                            "exception table signature {} did not match function {}'s signature {}",
+                            sig_ref, func_ref, expected_sig_ref
+                        ),
+                    ))?;
+                }
                 let arg_types = self.func.dfg.signatures[sig_ref]
                     .params
                     .iter()
@@ -1352,21 +1446,94 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
+    fn pointer_type_or_error(&self, inst: Inst, errors: &mut VerifierErrors) -> Result<Type, ()> {
+        // Ensure we have an ISA so we know what the pointer size is.
+        if let Some(isa) = self.isa {
+            Ok(isa.pointer_type())
+        } else {
+            errors
+                .fatal((
+                    inst,
+                    self.context(inst),
+                    format!("need an ISA to validate correct pointer type"),
+                ))
+                // Will always return an `Err`, but the `Ok` type
+                // doesn't match, so map it.
+                .map(|_| Type::default())
+        }
+    }
+
     fn typecheck_block_call(
         &self,
         inst: Inst,
         block: &ir::BlockCall,
         errors: &mut VerifierErrors,
     ) -> VerifierStepResult {
+        self.typecheck_block_call_with_implicit_prefix(inst, block, core::iter::empty(), errors)
+    }
+
+    fn typecheck_block_call_with_implicit_prefix(
+        &self,
+        inst: Inst,
+        block: &ir::BlockCall,
+        // The prefix contains types of values that are prepended to
+        // the BlockCall's args.
+        prefix: impl ExactSizeIterator<Item = Type>,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
         let pool = &self.func.dfg.value_lists;
-        let iter = self
+        let expected = self
             .func
             .dfg
             .block_params(block.block(pool))
             .iter()
             .map(|&v| self.func.dfg.value_type(v));
+        // Check the prefix against the first part of the expected
+        // types, and the ordinary BlockCall args against the rest of
+        // the expected types.
+        let prefix_len = prefix.len();
+        let expected_prefix = expected.clone().take(prefix_len);
+        let expected_suffix = expected.skip(prefix_len);
+        self.typecheck_implicit_prefix(inst, expected_prefix, prefix, errors)?;
         let args = block.args_slice(pool);
-        self.typecheck_variable_args_iterator(inst, iter, args, errors)
+        self.typecheck_variable_args_iterator(inst, expected_suffix, args, errors)
+    }
+
+    fn typecheck_implicit_prefix<I1: Iterator<Item = Type>, I2: Iterator<Item = Type>>(
+        &self,
+        inst: Inst,
+        mut expected: I1,
+        mut actual: I2,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        loop {
+            match (expected.next(), actual.next()) {
+                (Some(expected), Some(actual)) => {
+                    if expected != actual {
+                        errors.report((
+                            inst,
+                            self.context(inst),
+                            format!(
+                                "implicit arg of type {} does not match expected {}",
+                                actual, expected
+                            ),
+                        ));
+                    }
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    errors.report((
+                        inst,
+                        self.context(inst),
+                        format!("implicit arguments do not match expected argument list",),
+                    ));
+                    break;
+                }
+                (None, None) => {
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn typecheck_variable_args_iterator<I: Iterator<Item = Type>>(
