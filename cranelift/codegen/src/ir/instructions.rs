@@ -113,8 +113,8 @@ impl BlockCall {
     /// Traverse the arguments with a closure that can mutate them.
     pub fn update_args<F: FnMut(BlockArg) -> BlockArg>(
         &mut self,
-        mut f: F,
         pool: &mut ValueListPool,
+        mut f: F,
     ) {
         for raw in self.values.as_mut_slice(pool)[1..].iter_mut() {
             let new = f(BlockArg::decode_from_value(*raw));
@@ -241,6 +241,14 @@ impl BlockArg {
         match *self {
             BlockArg::Value(v) => Some(v),
             _ => None,
+        }
+    }
+
+    /// Update the contained value, if any.
+    pub fn map_value<F: Fn(Value) -> Value>(&self, f: F) -> Self {
+        match *self {
+            BlockArg::Value(v) => BlockArg::Value(f(v)),
+            other => other,
         }
     }
 }
@@ -458,9 +466,7 @@ impl InstructionData {
         }
 
         for block in self.branch_destination_mut(jump_tables, exception_tables) {
-            for arg in block.args_slice_mut(pool) {
-                *arg = f(*arg);
-            }
+            block.update_args(pool, |arg| arg.map_value(|val| f(val)));
         }
     }
 
