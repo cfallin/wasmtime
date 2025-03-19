@@ -922,10 +922,10 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             // here will not match the clif.
             let branches = self.f.dfg.insts[inst]
                 .branch_destination(&self.f.dfg.jump_tables, &self.f.dfg.exception_tables);
-            let branch_args = branches[succ_idx].args_slice(&self.f.dfg.value_lists);
 
             let mut branch_arg_vregs: SmallVec<[Reg; 16]> = smallvec![];
-            for &arg in branch_args {
+            for arg in branches[succ_idx].args(&self.f.dfg.value_lists) {
+                let arg = arg.as_value().unwrap(); // TODO
                 debug_assert!(self.f.dfg.value_is_real(arg));
                 let regs = self.put_value_in_regs(arg);
                 branch_arg_vregs.extend_from_slice(regs.regs());

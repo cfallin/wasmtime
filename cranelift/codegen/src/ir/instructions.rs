@@ -34,6 +34,8 @@ pub type ValueListPool = entity::ListPool<Value>;
 
 /// A pair of a Block and its arguments, stored in a single EntityList internally.
 ///
+/// Block arguments are semantically a `BlockArg`.
+///
 /// NOTE: We don't expose either value_to_block or block_to_value outside of this module because
 /// this operation is not generally safe. However, as the two share the same underlying layout,
 /// they can be stored in the same value pool.
@@ -69,10 +71,14 @@ impl BlockCall {
     }
 
     /// Construct a BlockCall with the given block and arguments.
-    pub fn new(block: Block, args: &[Value], pool: &mut ValueListPool) -> Self {
+    pub fn new(
+        block: Block,
+        args: impl Iterator<Item = BlockArg>,
+        pool: &mut ValueListPool,
+    ) -> Self {
         let mut values = ValueList::default();
         values.push(Self::block_to_value(block), pool);
-        values.extend(args.iter().copied(), pool);
+        values.extend(args.map(|arg| arg.encode_as_value()), pool);
         Self { values }
     }
 
@@ -88,18 +94,32 @@ impl BlockCall {
     }
 
     /// Append an argument to the block args.
-    pub fn append_argument(&mut self, arg: Value, pool: &mut ValueListPool) {
-        self.values.push(arg, pool);
+    pub fn append_argument(&mut self, arg: BlockArg, pool: &mut ValueListPool) {
+        self.values.push(arg.encode_as_value(), pool);
     }
 
-    /// Return a slice for the arguments of this block.
-    pub fn args_slice<'a>(&self, pool: &'a ValueListPool) -> &'a [Value] {
-        &self.values.as_slice(pool)[1..]
+    /// Return the length of the argument list.
+    pub fn len(&self, pool: &ValueListPool) -> usize {
+        self.values.len(pool) - 1
     }
 
-    /// Return a slice for the arguments of this block.
-    pub fn args_slice_mut<'a>(&'a mut self, pool: &'a mut ValueListPool) -> &'a mut [Value] {
-        &mut self.values.as_mut_slice(pool)[1..]
+    /// Return an iterator over the arguments of this block.
+    pub fn args<'a>(&self, pool: &'a ValueListPool) -> impl Iterator<Item = BlockArg> + 'a {
+        self.values.as_slice(pool)[1..]
+            .iter()
+            .map(|value| BlockArg::decode_from_value(*value))
+    }
+
+    /// Traverse the arguments with a closure that can mutate them.
+    pub fn update_args<F: FnMut(BlockArg) -> BlockArg>(
+        &mut self,
+        mut f: F,
+        pool: &mut ValueListPool,
+    ) {
+        for raw in self.values.as_mut_slice(pool)[1..].iter_mut() {
+            let new = f(BlockArg::decode_from_value(*raw));
+            *raw = new.encode_as_value();
+        }
     }
 
     /// Remove the argument at ix from the argument list.
@@ -115,9 +135,12 @@ impl BlockCall {
     /// Appends multiple elements to the arguments.
     pub fn extend<I>(&mut self, elements: I, pool: &mut ValueListPool)
     where
-        I: IntoIterator<Item = Value>,
+        I: IntoIterator<Item = BlockArg>,
     {
-        self.values.extend(elements, pool)
+        self.values.extend(
+            elements.into_iter().map(|elem| elem.encode_as_value()),
+            pool,
+        )
     }
 
     /// Return a value that can display this block call.
@@ -144,10 +167,9 @@ pub struct DisplayBlockCall<'a> {
 impl<'a> Display for DisplayBlockCall<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.block.block(&self.pool))?;
-        let args = self.block.args_slice(&self.pool);
-        if !args.is_empty() {
+        if self.block.len(self.pool) > 0 {
             write!(f, "(")?;
-            for (ix, arg) in args.iter().enumerate() {
+            for (ix, arg) in self.block.args(self.pool).enumerate() {
                 if ix > 0 {
                     write!(f, ", ")?;
                 }
@@ -156,6 +178,80 @@ impl<'a> Display for DisplayBlockCall<'a> {
             write!(f, ")")?;
         }
         Ok(())
+    }
+}
+
+/// A `BlockArg` is a sum type of `Value`, `TryCallRet`, and
+/// `TryCallExn`. The latter two are values that are generated "on the
+/// edge" out of a `try_call` instruction into a successor block. We
+/// use special arguments rather than special values for these because
+/// they are not definable as SSA values at a certain program point --
+/// only when the `BlockCall` is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BlockArg {
+    /// An ordinary value, usable at the branch instruction using this
+    /// `BlockArg`, whose value is passed as an argument.
+    Value(Value),
+
+    /// A return value of a `try_call`'s called function. Signatures
+    /// allow multiple return values, so this carries an index. This
+    /// may be used only on the normal (non-exceptional) `BlockCall`
+    /// out of a `try_call` or `try_call_indirect` instruction.
+    TryCallRet(u32),
+
+    /// An exception payload value of a `try_call`. Some ABIs may
+    /// allow multiple payload values, so this carries an index. Its
+    /// type is defined by the ABI of the called function. This may be
+    /// used only on an exceptional `BlockCall` out of a `try_call` or
+    /// `try_call_indirect` instruction.
+    TryCallExn(u32),
+}
+
+impl BlockArg {
+    /// Encode this block argument as a `Value` for storage in the
+    /// value pool. Internal to `BlockCall`, must not be used
+    /// elsewhere to avoid exposing the raw bit encoding.
+    fn encode_as_value(&self) -> Value {
+        let (tag, payload) = match *self {
+            BlockArg::Value(v) => (0, v.as_bits()),
+            BlockArg::TryCallRet(i) => (1, i),
+            BlockArg::TryCallExn(i) => (2, i),
+        };
+        assert!(payload < (1 << 30));
+        let raw = (tag << 30) | payload;
+        Value::from_bits(raw)
+    }
+
+    /// Decode a raw `Value` encoding of this block argument.
+    fn decode_from_value(v: Value) -> Self {
+        let raw = v.as_u32();
+        let tag = raw >> 30;
+        let payload = raw & ((1 << 30) - 1);
+        match tag {
+            0 => BlockArg::Value(Value::from_bits(payload)),
+            1 => BlockArg::TryCallRet(payload),
+            2 => BlockArg::TryCallExn(payload),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Return this argument as a `Value`, if it is one, or `None`
+    /// otherwise.
+    pub fn as_value(&self) -> Option<Value> {
+        match *self {
+            BlockArg::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+impl Display for BlockArg {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            BlockArg::Value(v) => write!(f, "{v}"),
+            BlockArg::TryCallRet(i) => write!(f, "ret{i}"),
+            BlockArg::TryCallExn(i) => write!(f, "exn{i}"),
+        }
     }
 }
 
