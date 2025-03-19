@@ -8,9 +8,9 @@ use crate::ir::instructions::{CallInfo, InstructionData};
 use crate::ir::pcc::Fact;
 use crate::ir::user_stack_maps::{UserStackMapEntry, UserStackMapEntryVec};
 use crate::ir::{
-    types, Block, BlockCall, ConstantData, ConstantPool, DynamicType, ExceptionTables, ExtFuncData,
-    FuncRef, Immediate, Inst, JumpTables, RelSourceLoc, SigRef, Signature, Type, Value,
-    ValueLabelAssignments, ValueList, ValueListPool,
+    types, Block, BlockArg, BlockCall, ConstantData, ConstantPool, DynamicType, ExceptionTables,
+    ExtFuncData, FuncRef, Immediate, Inst, JumpTables, RelSourceLoc, SigRef, Signature, Type,
+    Value, ValueLabelAssignments, ValueList, ValueListPool,
 };
 use crate::packed_option::ReservedValue;
 use crate::write::write_operands;
@@ -230,7 +230,7 @@ impl DataFlowGraph {
     }
 
     /// Make a BlockCall, bundling together the block and its arguments.
-    pub fn block_call(&mut self, block: Block, args: &[Value]) -> BlockCall {
+    pub fn block_call(&mut self, block: Block, args: impl Iterator<Item = BlockArg>) -> BlockCall {
         BlockCall::new(block, args, &mut self.value_lists)
     }
 
@@ -848,19 +848,17 @@ impl DataFlowGraph {
     }
 
     /// Construct a read-only visitor context for the values of this instruction.
-    pub fn inst_values<'dfg>(
-        &'dfg self,
-        inst: Inst,
-    ) -> impl DoubleEndedIterator<Item = Value> + 'dfg {
-        self.inst_args(inst)
-            .iter()
-            .chain(
-                self.insts[inst]
-                    .branch_destination(&self.jump_tables, &self.exception_tables)
-                    .into_iter()
-                    .flat_map(|branch| branch.args_slice(&self.value_lists).iter()),
-            )
-            .copied()
+    pub fn inst_values<'dfg>(&'dfg self, inst: Inst) -> impl Iterator<Item = Value> + 'dfg {
+        self.inst_args(inst).iter().copied().chain(
+            self.insts[inst]
+                .branch_destination(&self.jump_tables, &self.exception_tables)
+                .into_iter()
+                .flat_map(|branch| {
+                    branch
+                        .args(&self.value_lists)
+                        .filter_map(|arg| arg.as_value())
+                }),
+        )
     }
 
     /// Map a function over the values of the instruction.
