@@ -336,7 +336,7 @@ fn gen_instruction_data_impl(formats: &[Rc<InstructionFormat>], fmt: &mut Format
                             fmtln!(fmt, "::core::hash::Hash::hash(&{len}, state);");
                             fmt.add_block(&format!("for &block in {blocks}"), |fmt| {
                                 fmtln!(fmt, "::core::hash::Hash::hash(&block.block(pool), state);");
-                                fmt.add_block("for &arg in block.args_slice(pool)", |fmt| {
+                                fmt.add_block("for arg in block.args(pool)", |fmt| {
                                     fmtln!(fmt, "::core::hash::Hash::hash(&arg, state);");
                                 });
                             });
@@ -972,7 +972,10 @@ fn gen_inst_builder(inst: &Instruction, format: &InstructionFormat, fmt: &mut Fo
                 op.name, "Destination basic block"
             ));
 
-            args.push(format!("{}_args: {}", op.name, "&[Value]"));
+            args.push(format!(
+                "{}_args: {}",
+                op.name, "impl Iterator<Item = BlockArg>"
+            ));
             args_doc.push(format!("- {}_args: {}", op.name, "Block arguments"));
 
             block_args.push(op);
