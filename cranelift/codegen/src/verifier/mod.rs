@@ -69,7 +69,7 @@ use crate::entity::SparseSet;
 use crate::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use crate::ir::entities::AnyEntity;
 use crate::ir::instructions::{CallInfo, InstructionFormat, ResolvedConstraint};
-use crate::ir::{self, ArgumentExtension, ExceptionTable};
+use crate::ir::{self, ArgumentExtension, BlockArg, ExceptionTable, InstructionData};
 use crate::ir::{
     types, ArgumentPurpose, Block, Constant, DynamicStackSlot, FuncRef, Function, GlobalValue,
     Inst, JumpTable, MemFlags, MemoryTypeData, Opcode, SigRef, StackSlot, Type, Value, ValueDef,
@@ -1469,78 +1469,94 @@ impl<'a> Verifier<'a> {
         block: &ir::BlockCall,
         errors: &mut VerifierErrors,
     ) -> VerifierStepResult {
-        self.typecheck_block_call_with_implicit_prefix(inst, block, core::iter::empty(), errors)
-    }
-
-    fn typecheck_block_call_with_implicit_prefix(
-        &self,
-        inst: Inst,
-        block: &ir::BlockCall,
-        // The prefix contains types of values that are prepended to
-        // the BlockCall's args.
-        prefix: impl ExactSizeIterator<Item = Type>,
-        errors: &mut VerifierErrors,
-    ) -> VerifierStepResult {
         let pool = &self.func.dfg.value_lists;
-        let expected = self
-            .func
-            .dfg
-            .block_params(block.block(pool))
-            .iter()
-            .map(|&v| self.func.dfg.value_type(v));
-        // Check the prefix against the first part of the expected
-        // types, and the ordinary BlockCall args against the rest of
-        // the expected types.
-        let prefix_len = prefix.len();
-        let expected_prefix = expected.clone().take(prefix_len);
-        let expected_suffix = expected.skip(prefix_len);
-        self.typecheck_implicit_prefix(inst, expected_prefix, prefix, errors)?;
-        let args = block.args_slice(pool);
-        self.typecheck_variable_args_iterator(inst, expected_suffix, args, errors)
-    }
-
-    fn typecheck_implicit_prefix<I1: Iterator<Item = Type>, I2: Iterator<Item = Type>>(
-        &self,
-        inst: Inst,
-        mut expected: I1,
-        mut actual: I2,
-        errors: &mut VerifierErrors,
-    ) -> VerifierStepResult {
-        loop {
-            match (expected.next(), actual.next()) {
-                (Some(expected), Some(actual)) => {
-                    if expected != actual {
-                        errors.report((
-                            inst,
-                            self.context(inst),
-                            format!(
-                                "implicit arg of type {} does not match expected {}",
-                                actual, expected
-                            ),
-                        ));
-                    }
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    errors.report((
-                        inst,
-                        self.context(inst),
-                        format!("implicit arguments do not match expected argument list",),
-                    ));
-                    break;
-                }
-                (None, None) => {
-                    break;
-                }
+        let block_params = self.func.dfg.block_params(block.block(pool));
+        let args = block.args(pool);
+        if args.len() != block_params.len() {
+            return errors.nonfatal((
+                inst,
+                self.context(inst),
+                format!(
+                    "mismatched argument count for `{}`: got {}, expected {}",
+                    self.func.dfg.display_inst(inst),
+                    args.len(),
+                    block_params.len(),
+                ),
+            ));
+        }
+        for (arg, param) in args.zip(block_params.iter()) {
+            let arg_ty = self.block_call_arg_ty(arg, inst)?;
+            let param_ty = self.func.dfg.value_type(*param);
+            if arg_ty != param_ty {
+                errors.nonfatal((
+                    inst,
+                    self.context(inst),
+                    format!("arg {} has type {}, expected {}", arg, arg_ty, param_ty),
+                ))?;
             }
         }
         Ok(())
     }
 
-    fn typecheck_variable_args_iterator<I: Iterator<Item = Type>>(
+    fn block_call_arg_ty(
+        &self,
+        arg: BlockArg,
+        inst: Inst,
+        errors: &mut VerifierErrors,
+    ) -> Result<Type, ()> {
+        match arg {
+            BlockArg::Value(v) => Ok(self.func.dfg.value_type(v)),
+            BlockArg::TryCallRet(_) | BlockArg::TryCallExn(_) => {
+                // Get the invoked signature.
+                let et = match self.func.dfg.insts[inst].exception_table() {
+                    Some(et) => et,
+                    None => {
+                        return errors.fatal((
+                            inst,
+                            self.context(inst),
+                            format!(
+                                "`retN` block argument in block-call not on `try_call` instruction"
+                            ),
+                        ));
+                    }
+                };
+                let exdata = &self.func.dfg.exception_tables[et];
+                let sig = &self.func.dfg.signatures[exdata.sig];
+
+                match arg {
+                    BlockArg::TryCallRet(i) if i < sig.returns.len() => {
+                        Ok(sig.returns[i as usize].value_type)
+                    }
+                    BlockArg::TryCallRet(_) => {
+                        return errors.fatal((
+                            inst,
+                            self.context(inst),
+                            format!("out-of-bounds `retN` block argument"),
+                        ))
+                    }
+                    BlockArg::TryCallExn(i) => {
+                        match sig.call_conv.exception_payload_type(
+                            i as usize,
+                            self.pointer_type_or_error(inst, errors)?,
+                        ) {
+                            Some(ty) => Ok(ty),
+                            None => errors.fatal((
+                                inst,
+                                self.context(inst),
+                                format!("out-of-bounds `exnN` block argument"),
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn typecheck_variable_args_iterator(
         &self,
         inst: Inst,
-        iter: I,
-        variable_args: &[Value],
+        iter: impl ExactSizeIterator<Item = Type>,
+        variable_args: impl ExactSizeIterator<Item = BlockArg>,
         errors: &mut VerifierErrors,
     ) -> VerifierStepResult {
         let mut i = 0;

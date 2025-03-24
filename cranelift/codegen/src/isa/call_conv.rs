@@ -1,3 +1,4 @@
+use crate::ir::Type;
 use crate::settings::{self, LibcallCallConv};
 use core::fmt;
 use core::str;
@@ -5,6 +6,8 @@ use target_lexicon::{CallingConvention, Triple};
 
 #[cfg(feature = "enable-serde")]
 use serde_derive::{Deserialize, Serialize};
+
+use super::TargetIsa;
 
 /// Calling convention identifiers.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -67,6 +70,20 @@ impl CallConv {
         match self {
             CallConv::Tail => true,
             _ => false,
+        }
+    }
+
+    /// What type is the exception payload, if any?
+    pub fn exception_payload_type(&self, index: usize, pointer_ty: Type) -> Option<Type> {
+        match self {
+            CallConv::Tail => {
+                if index == 0 {
+                    Some(pointer_ty)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }

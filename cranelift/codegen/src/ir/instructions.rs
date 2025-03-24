@@ -21,7 +21,8 @@ use crate::ir::{
     self,
     condcodes::{FloatCC, IntCC},
     trapcode::TrapCode,
-    types, Block, ExceptionTables, FuncRef, MemFlags, SigRef, StackSlot, Type, Value,
+    types, Block, ExceptionTable, ExceptionTables, FuncRef, MemFlags, SigRef, StackSlot, Type,
+    Value,
 };
 
 /// Some instructions use an external list of argument values because there is not enough space in
@@ -104,7 +105,10 @@ impl BlockCall {
     }
 
     /// Return an iterator over the arguments of this block.
-    pub fn args<'a>(&self, pool: &'a ValueListPool) -> impl Iterator<Item = BlockArg> + 'a {
+    pub fn args<'a>(
+        &self,
+        pool: &'a ValueListPool,
+    ) -> impl ExactSizeIterator<Item = BlockArg> + 'a {
         self.values.as_slice(pool)[1..]
             .iter()
             .map(|value| BlockArg::decode_from_value(*value))
@@ -628,6 +632,16 @@ impl InstructionData {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Get the exception table, if any, associated with this instruction.
+    pub fn exception_table(&self) -> Option<ExceptionTable> {
+        match self {
+            Self::TryCall { exception, .. } | Self::TryCallIndirect { exception, .. } => {
+                Some(*exception)
+            }
+            _ => None,
         }
     }
 }
