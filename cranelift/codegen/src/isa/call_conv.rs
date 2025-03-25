@@ -84,6 +84,14 @@ impl CallConv {
             _ => None,
         }
     }
+
+    /// What types do the exception payload value(s) have?
+    pub fn exception_payload_types(&self, pointer_ty: Type) -> impl Iterator<Item = Type> + '_ {
+        (0..)
+            .map(move |i| self.exception_payload_type(i, pointer_ty))
+            .take_while(|val| val.is_some())
+            .map(|val| val.unwrap())
+    }
 }
 
 impl fmt::Display for CallConv {

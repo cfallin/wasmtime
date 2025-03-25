@@ -9,15 +9,15 @@ use crate::entity::SecondaryMap;
 use crate::inst_predicates::{has_lowering_side_effect, is_constant_64bit};
 use crate::ir::pcc::{Fact, FactContext, PccError, PccResult};
 use crate::ir::{
-    ArgumentPurpose, Block, Constant, ConstantData, DataFlowGraph, ExternalName, Function,
-    GlobalValue, GlobalValueData, Immediate, Inst, InstructionData, MemFlags, RelSourceLoc, Type,
-    Value, ValueDef, ValueLabelAssignments, ValueLabelStart,
+    ArgumentPurpose, Block, BlockArg, Constant, ConstantData, DataFlowGraph, ExternalName,
+    Function, GlobalValue, GlobalValueData, Immediate, Inst, InstructionData, MemFlags,
+    RelSourceLoc, Type, Value, ValueDef, ValueLabelAssignments, ValueLabelStart,
 };
 use crate::machinst::valueregs::InvalidSentinel;
 use crate::machinst::{
-    writable_value_regs, BackwardsInsnIndex, BlockIndex, BlockLoweringOrder, Callee, InsnIndex,
-    LoweredBlock, MachLabel, Reg, SigSet, VCode, VCodeBuilder, VCodeConstant, VCodeConstantData,
-    VCodeConstants, VCodeInst, ValueRegs, Writable,
+    writable_value_regs, ABIMachineSpec, BackwardsInsnIndex, BlockIndex, BlockLoweringOrder,
+    Callee, InsnIndex, LoweredBlock, MachLabel, Reg, SigSet, VCode, VCodeBuilder, VCodeConstant,
+    VCodeConstantData, VCodeConstants, VCodeInst, ValueRegs, Writable,
 };
 use crate::settings::Flags;
 use crate::{trace, CodegenError, CodegenResult};
@@ -223,6 +223,10 @@ pub struct Lower<'func, I: VCodeInst> {
     /// Instructions collected for the CLIF inst in progress, in forward order.
     ir_insts: Vec<I>,
 
+    /// Try-call block arg values, allocated when handling block calls
+    /// and to be defined by the try-call lowering.
+    try_call_defs: FxHashMap<(Inst, BlockArg), ValueRegs<Writable<Reg>>>,
+
     /// The register to use for GetPinnedReg, if any, on this architecture.
     pinned_reg: Option<Reg>,
 
@@ -390,8 +394,10 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         let mut vregs = VRegAllocator::with_capacity(f.dfg.num_values() * 2);
 
         let mut value_regs = SecondaryMap::with_default(ValueRegs::invalid());
+        let mut try_call_defs = FxHashMap::default();
 
-        // Assign a vreg to each block param and each inst result.
+        // Assign a vreg to each block param, each inst result, and
+        // each edge-defined block-call arg.
         for bb in f.layout.blocks() {
             for &param in f.dfg.block_params(bb) {
                 let ty = f.dfg.value_type(param);
@@ -415,6 +421,23 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                             result,
                             regs,
                         );
+                    }
+                }
+
+                if let Some(et) = f.dfg.insts[inst].exception_table() {
+                    let exdata = &f.dfg.exception_tables[et];
+                    let sig = &f.dfg.signatures[exdata.sig];
+                    for (i, ty) in sig.returns.iter().map(|ret| ret.value_type).enumerate() {
+                        try_call_defs
+                            .insert((inst, BlockArg::TryCallRet(i as u32)), vregs.alloc(ty)?);
+                    }
+                    for (i, ty) in sig
+                        .call_conv
+                        .exception_payload_types(I::ABIMachineSpec::word_type())
+                        .enumerate()
+                    {
+                        try_call_defs
+                            .insert((inst, BlockArg::TryCallExn(i as u32)), vregs.alloc(ty)?);
                     }
                 }
             }
@@ -492,6 +515,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             cur_scan_entry_color: None,
             cur_inst: None,
             ir_insts: vec![],
+            try_call_defs: FxHashMap::default(),
             pinned_reg: None,
             flags,
         })
@@ -1488,6 +1512,28 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         self.value_lowered_uses[val] += 1;
 
         regs
+    }
+
+    /// Get the ValueRegs for an edge-defined value for a special
+    /// try-call-return block argument.
+    pub fn try_call_return_def(&mut self, ir_inst: Inst, idx: usize) -> ValueRegs<Writable<Reg>> {
+        self.try_call_defs
+            .get(&(ir_inst, BlockArg::TryCallRet(idx as u32)))
+            .unwrap()
+            .clone()
+    }
+
+    /// Get the ValueRegs for an edge-defined value for a special
+    /// try-call-return exception payload argument.
+    pub fn try_call_exception_def(
+        &mut self,
+        ir_inst: Inst,
+        idx: usize,
+    ) -> ValueRegs<Writable<Reg>> {
+        self.try_call_defs
+            .get(&(ir_inst, BlockArg::TryCallExn(idx as u32)))
+            .unwrap()
+            .clone()
     }
 }
 
