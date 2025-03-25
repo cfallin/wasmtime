@@ -47,6 +47,8 @@ pub enum Token<'a> {
     UserNameRef(u32),       // userextname345
     ExceptionTableRef(u32), // ex123
     ExceptionTag(u32),      // tag123
+    TryCallRet(u32),        // ret123
+    TryCallExn(u32),        // exn123
     Name(&'a str),          // %9arbitrary_alphanum, %x3, %0, %function ...
     String(&'a str),        // "arbitrary quoted string with no escape" ...
     HexSequence(&'a str),   // #89AF
@@ -353,6 +355,8 @@ impl<'a> Lexer<'a> {
             "userextname" => Some(Token::UserNameRef(number)),
             "ex" => Some(Token::ExceptionTableRef(number)),
             "tag" => Some(Token::ExceptionTag(number)),
+            "ret" => Some(Token::TryCallRet(number)),
+            "exp" => Some(Token::TryCallExn(number)),
             _ => None,
         }
     }

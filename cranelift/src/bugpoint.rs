@@ -720,7 +720,9 @@ impl Mutator for MergeBlocks {
             ));
         }
 
-        let branch_args = branch_dests[0].args_slice(&func.dfg.value_lists).to_vec();
+        let branch_args = branch_dests[0]
+            .args(&func.dfg.value_lists)
+            .collect::<Vec<_>>();
 
         // TODO: should we free the entity list associated with the block params?
         let block_params = func
@@ -734,8 +736,10 @@ impl Mutator for MergeBlocks {
         // If there were any block parameters in block, then the last instruction in pred will
         // fill these parameters. Make the block params aliases of the terminator arguments.
         for (block_param, arg) in block_params.into_iter().zip(branch_args) {
-            if block_param != arg {
-                func.dfg.change_to_alias(block_param, arg);
+            if let Some(arg) = arg.as_value() {
+                if block_param != arg {
+                    func.dfg.change_to_alias(block_param, arg);
+                }
             }
         }
 

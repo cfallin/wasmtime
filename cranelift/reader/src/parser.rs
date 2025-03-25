@@ -15,9 +15,9 @@ use cranelift_codegen::ir::immediates::{
 };
 use cranelift_codegen::ir::instructions::{InstructionData, InstructionFormat, VariableArgs};
 use cranelift_codegen::ir::pcc::{BaseExpr, Expr, Fact};
-use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{self, UserExternalNameRef};
+use cranelift_codegen::ir::{types, BlockArg};
 use cranelift_codegen::ir::{
     AbiParam, ArgumentExtension, ArgumentPurpose, Block, Constant, ConstantData, DynamicStackSlot,
     DynamicStackSlotData, DynamicTypeData, ExtFuncData, ExternalName, FuncRef, Function,
@@ -1890,7 +1890,7 @@ impl<'a> Parser<'a> {
         match self.token() {
             Some(Token::Block(dest)) => {
                 self.consume();
-                let args = self.parse_opt_value_list()?;
+                let args = self.parse_opt_block_call_args()?;
                 data.push(ctx.function.dfg.block_call(dest, &args));
 
                 loop {
@@ -1899,7 +1899,7 @@ impl<'a> Parser<'a> {
                             self.consume();
                             if let Some(Token::Block(dest)) = self.token() {
                                 self.consume();
-                                let args = self.parse_opt_value_list()?;
+                                let args = self.parse_opt_block_call_args()?;
                                 data.push(ctx.function.dfg.block_call(dest, &args));
                             } else {
                                 return err!(self.loc, "expected jump_table entry");
@@ -1936,7 +1936,7 @@ impl<'a> Parser<'a> {
         let mut tags = vec![];
 
         let block_num = self.match_block("expected branch destination block")?;
-        let args = self.parse_opt_value_list()?;
+        let args = self.parse_opt_block_call_args()?;
         targets.push(ctx.function.dfg.block_call(block_num, &args));
 
         self.match_token(
@@ -1966,7 +1966,7 @@ impl<'a> Parser<'a> {
                     self.match_token(Token::Colon, "expected ':' after exception tag")?;
 
                     let block_num = self.match_block("expected branch destination block")?;
-                    let args = self.parse_opt_value_list()?;
+                    let args = self.parse_opt_block_call_args()?;
                     let block_call = ctx.function.dfg.block_call(block_num, &args);
 
                     tags.push(tag);
@@ -2730,17 +2730,44 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
-    // Parse an optional value list enclosed in parentheses.
-    fn parse_opt_value_list(&mut self) -> ParseResult<VariableArgs> {
+    /// Parse an optional list of block-call arguments enclosed in
+    /// parentheses.
+    fn parse_opt_block_call_args(&mut self) -> ParseResult<Vec<BlockArg>> {
         if !self.optional(Token::LPar) {
-            return Ok(VariableArgs::new());
+            return Ok(vec![]);
         }
 
-        let args = self.parse_value_list()?;
+        let mut args = vec![];
+        while self.token() != Some(Token::RPar) {
+            args.push(self.parse_block_call_arg()?);
+            if self.token() == Some(Token::Comma) {
+                self.consume();
+            } else {
+                break;
+            }
+        }
 
         self.match_token(Token::RPar, "expected ')' after arguments")?;
 
         Ok(args)
+    }
+
+    fn parse_block_call_arg(&mut self) -> ParseResult<BlockArg> {
+        match self.token() {
+            Some(Token::Value(v)) => {
+                self.consume();
+                Ok(BlockArg::Value(v))
+            }
+            Some(Token::TryCallRet(i)) => {
+                self.consume();
+                Ok(BlockArg::TryCallRet(i))
+            }
+            Some(Token::TryCallExn(i)) => {
+                self.consume();
+                Ok(BlockArg::TryCallExn(i))
+            }
+            _ => Err(self.error("unexpected token")),
+        }
     }
 
     /// Parse a CLIF run command.
@@ -3030,7 +3057,7 @@ impl<'a> Parser<'a> {
             InstructionFormat::Jump => {
                 // Parse the destination block number.
                 let block_num = self.match_block("expected jump destination block")?;
-                let args = self.parse_opt_value_list()?;
+                let args = self.parse_opt_block_call_args()?;
                 let destination = ctx.function.dfg.block_call(block_num, &args);
                 InstructionData::Jump {
                     opcode,
@@ -3042,13 +3069,13 @@ impl<'a> Parser<'a> {
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let block_then = {
                     let block_num = self.match_block("expected branch then block")?;
-                    let args = self.parse_opt_value_list()?;
+                    let args = self.parse_opt_block_call_args()?;
                     ctx.function.dfg.block_call(block_num, &args)
                 };
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let block_else = {
                     let block_num = self.match_block("expected branch else block")?;
-                    let args = self.parse_opt_value_list()?;
+                    let args = self.parse_opt_block_call_args()?;
                     ctx.function.dfg.block_call(block_num, &args)
                 };
                 InstructionData::Brif {
@@ -3061,7 +3088,7 @@ impl<'a> Parser<'a> {
                 let arg = self.match_value("expected SSA value operand")?;
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let block_num = self.match_block("expected branch destination block")?;
-                let args = self.parse_opt_value_list()?;
+                let args = self.parse_opt_block_call_args()?;
                 let destination = ctx.function.dfg.block_call(block_num, &args);
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let table = self.parse_jump_table(ctx, destination)?;
