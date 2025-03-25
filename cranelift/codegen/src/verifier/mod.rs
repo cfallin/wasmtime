@@ -69,7 +69,7 @@ use crate::entity::SparseSet;
 use crate::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use crate::ir::entities::AnyEntity;
 use crate::ir::instructions::{CallInfo, InstructionFormat, ResolvedConstraint};
-use crate::ir::{self, ArgumentExtension, BlockArg, ExceptionTable, InstructionData};
+use crate::ir::{self, ArgumentExtension, BlockArg, ExceptionTable};
 use crate::ir::{
     types, ArgumentPurpose, Block, Constant, DynamicStackSlot, FuncRef, Function, GlobalValue,
     Inst, JumpTable, MemFlags, MemoryTypeData, Opcode, SigRef, StackSlot, Type, Value, ValueDef,
@@ -293,6 +293,13 @@ pub fn verify_context<'a, FOI: Into<FlagsOrIsa<'a>>>(
         verifier.domtree_integrity(domtree, errors)?;
     }
     verifier.run(errors)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BlockCallTargetType {
+    Normal,
+    ExNormalRet,
+    Exception,
 }
 
 struct Verifier<'a> {
@@ -1361,42 +1368,31 @@ impl<'a> Verifier<'a> {
     ) -> VerifierStepResult {
         match &self.func.dfg.insts[inst] {
             ir::InstructionData::Jump { destination, .. } => {
-                self.typecheck_block_call(inst, destination, errors)?;
+                self.typecheck_block_call(inst, destination, BlockCallTargetType::Normal, errors)?;
             }
             ir::InstructionData::Brif {
                 blocks: [block_then, block_else],
                 ..
             } => {
-                self.typecheck_block_call(inst, block_then, errors)?;
-                self.typecheck_block_call(inst, block_else, errors)?;
+                self.typecheck_block_call(inst, block_then, BlockCallTargetType::Normal, errors)?;
+                self.typecheck_block_call(inst, block_else, BlockCallTargetType::Normal, errors)?;
             }
             ir::InstructionData::BranchTable { table, .. } => {
                 for block in self.func.stencil.dfg.jump_tables[*table].all_branches() {
-                    self.typecheck_block_call(inst, block, errors)?;
+                    self.typecheck_block_call(inst, block, BlockCallTargetType::Normal, errors)?;
                 }
             }
             ir::InstructionData::TryCall { exception, .. }
             | ir::InstructionData::TryCallIndirect { exception, .. } => {
-                let exdata = &self.func.stencil.dfg.exception_tables[*exception];
-                let sigdata = &self.func.stencil.dfg.signatures[exdata.sig];
-                let pointer_ty = self.pointer_type_or_error(inst, errors)?;
-                self.typecheck_block_call_with_implicit_prefix(
+                let exdata = &self.func.dfg.exception_tables[*exception];
+                self.typecheck_block_call(
                     inst,
                     exdata.normal_return(),
-                    // Function return implicit arguments prefixed to
-                    // BlockCall arguments.
-                    sigdata.returns.iter().map(|ret| ret.value_type),
+                    BlockCallTargetType::ExNormalRet,
                     errors,
                 )?;
                 for (_tag, block) in exdata.catches() {
-                    self.typecheck_block_call_with_implicit_prefix(
-                        inst,
-                        block,
-                        // Exception payload implicit argument
-                        // prefixed to BlockCall arguments.
-                        core::iter::once(pointer_ty),
-                        errors,
-                    )?;
+                    self.typecheck_block_call(inst, block, BlockCallTargetType::Exception, errors)?;
                 }
             }
             inst => debug_assert!(!inst.opcode().is_branch()),
@@ -1467,6 +1463,7 @@ impl<'a> Verifier<'a> {
         &self,
         inst: Inst,
         block: &ir::BlockCall,
+        target_type: BlockCallTargetType,
         errors: &mut VerifierErrors,
     ) -> VerifierStepResult {
         let pool = &self.func.dfg.value_lists;
@@ -1485,7 +1482,7 @@ impl<'a> Verifier<'a> {
             ));
         }
         for (arg, param) in args.zip(block_params.iter()) {
-            let arg_ty = self.block_call_arg_ty(arg, inst)?;
+            let arg_ty = self.block_call_arg_ty(arg, inst, target_type, errors)?;
             let param_ty = self.func.dfg.value_type(*param);
             if arg_ty != param_ty {
                 errors.nonfatal((
@@ -1502,6 +1499,7 @@ impl<'a> Verifier<'a> {
         &self,
         arg: BlockArg,
         inst: Inst,
+        target_type: BlockCallTargetType,
         errors: &mut VerifierErrors,
     ) -> Result<Type, ()> {
         match arg {
@@ -1511,42 +1509,66 @@ impl<'a> Verifier<'a> {
                 let et = match self.func.dfg.insts[inst].exception_table() {
                     Some(et) => et,
                     None => {
-                        return errors.fatal((
+                        errors.fatal((
                             inst,
                             self.context(inst),
                             format!(
                                 "`retN` block argument in block-call not on `try_call` instruction"
                             ),
-                        ));
+                        ))?;
+                        unreachable!()
                     }
                 };
                 let exdata = &self.func.dfg.exception_tables[et];
                 let sig = &self.func.dfg.signatures[exdata.sig];
 
-                match arg {
-                    BlockArg::TryCallRet(i) if i < sig.returns.len() => {
+                match (arg, target_type) {
+                    (BlockArg::TryCallRet(i), BlockCallTargetType::ExNormalRet)
+                        if (i as usize) < sig.returns.len() =>
+                    {
                         Ok(sig.returns[i as usize].value_type)
                     }
-                    BlockArg::TryCallRet(_) => {
-                        return errors.fatal((
+                    (BlockArg::TryCallRet(_), BlockCallTargetType::ExNormalRet) => {
+                        errors.fatal((
                             inst,
                             self.context(inst),
                             format!("out-of-bounds `retN` block argument"),
-                        ))
+                        ))?;
+                        unreachable!()
                     }
-                    BlockArg::TryCallExn(i) => {
+                    (BlockArg::TryCallRet(_), _) => {
+                        errors.fatal((
+                            inst,
+                            self.context(inst),
+                            format!("`retN` block argument used outside normal-return target of `try_call`"),
+                        ))?;
+                        unreachable!()
+                    }
+                    (BlockArg::TryCallExn(i), BlockCallTargetType::Exception) => {
                         match sig.call_conv.exception_payload_type(
                             i as usize,
                             self.pointer_type_or_error(inst, errors)?,
                         ) {
                             Some(ty) => Ok(ty),
-                            None => errors.fatal((
-                                inst,
-                                self.context(inst),
-                                format!("out-of-bounds `exnN` block argument"),
-                            )),
+                            None => {
+                                errors.fatal((
+                                    inst,
+                                    self.context(inst),
+                                    format!("out-of-bounds `exnN` block argument"),
+                                ))?;
+                                unreachable!()
+                            }
                         }
                     }
+                    (BlockArg::TryCallExn(_), _) => {
+                        errors.fatal((
+                            inst,
+                            self.context(inst),
+                            format!("`exnN` block argument used outside normal-return target of `try_call`"),
+                        ))?;
+                        unreachable!()
+                    }
+                    _ => unreachable!(),
                 }
             }
         }
@@ -1556,7 +1578,7 @@ impl<'a> Verifier<'a> {
         &self,
         inst: Inst,
         iter: impl ExactSizeIterator<Item = Type>,
-        variable_args: impl ExactSizeIterator<Item = BlockArg>,
+        variable_args: &[Value],
         errors: &mut VerifierErrors,
     ) -> VerifierStepResult {
         let mut i = 0;

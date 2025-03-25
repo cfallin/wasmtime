@@ -848,7 +848,10 @@ impl DataFlowGraph {
     }
 
     /// Construct a read-only visitor context for the values of this instruction.
-    pub fn inst_values<'dfg>(&'dfg self, inst: Inst) -> impl Iterator<Item = Value> + 'dfg {
+    pub fn inst_values<'dfg>(
+        &'dfg self,
+        inst: Inst,
+    ) -> impl DoubleEndedIterator<Item = Value> + 'dfg {
         self.inst_args(inst).iter().copied().chain(
             self.insts[inst]
                 .branch_destination(&self.jump_tables, &self.exception_tables)

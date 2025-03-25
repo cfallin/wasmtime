@@ -7,8 +7,6 @@ use target_lexicon::{CallingConvention, Triple};
 #[cfg(feature = "enable-serde")]
 use serde_derive::{Deserialize, Serialize};
 
-use super::TargetIsa;
-
 /// Calling convention identifiers.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]

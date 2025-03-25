@@ -108,7 +108,8 @@ impl BlockCall {
     pub fn args<'a>(
         &self,
         pool: &'a ValueListPool,
-    ) -> impl ExactSizeIterator<Item = BlockArg> + 'a {
+    ) -> impl ExactSizeIterator<Item = BlockArg> + DoubleEndedIterator<Item = BlockArg> + use<'a>
+    {
         self.values.as_slice(pool)[1..]
             .iter()
             .map(|value| BlockArg::decode_from_value(*value))
@@ -249,7 +250,7 @@ impl BlockArg {
     }
 
     /// Update the contained value, if any.
-    pub fn map_value<F: Fn(Value) -> Value>(&self, f: F) -> Self {
+    pub fn map_value<F: FnMut(Value) -> Value>(&self, mut f: F) -> Self {
         match *self {
             BlockArg::Value(v) => BlockArg::Value(f(v)),
             other => other,
@@ -264,6 +265,12 @@ impl Display for BlockArg {
             BlockArg::TryCallRet(i) => write!(f, "ret{i}"),
             BlockArg::TryCallExn(i) => write!(f, "exn{i}"),
         }
+    }
+}
+
+impl From<Value> for BlockArg {
+    fn from(value: Value) -> BlockArg {
+        BlockArg::Value(value)
     }
 }
 
