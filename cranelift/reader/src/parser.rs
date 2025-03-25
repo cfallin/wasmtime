@@ -2766,7 +2766,7 @@ impl<'a> Parser<'a> {
                 self.consume();
                 Ok(BlockArg::TryCallExn(i))
             }
-            _ => Err(self.error("unexpected token")),
+            tok => Err(self.error(&format!("unexpected token: {tok:?}"))),
         }
     }
 

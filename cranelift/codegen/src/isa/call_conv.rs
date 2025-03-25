@@ -74,7 +74,7 @@ impl CallConv {
     /// What type is the exception payload, if any?
     pub fn exception_payload_type(&self, index: usize, pointer_ty: Type) -> Option<Type> {
         match self {
-            CallConv::Tail => {
+            CallConv::Tail | CallConv::SystemV => {
                 if index == 0 {
                     Some(pointer_ty)
                 } else {

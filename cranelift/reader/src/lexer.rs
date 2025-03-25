@@ -356,7 +356,7 @@ impl<'a> Lexer<'a> {
             "ex" => Some(Token::ExceptionTableRef(number)),
             "tag" => Some(Token::ExceptionTag(number)),
             "ret" => Some(Token::TryCallRet(number)),
-            "exp" => Some(Token::TryCallExn(number)),
+            "exn" => Some(Token::TryCallExn(number)),
             _ => None,
         }
     }
