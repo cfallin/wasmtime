@@ -7,7 +7,7 @@ function %f0(i32) -> i32 {
 
     block0(v1: i32):
         v2 = f64const 0x1.0
-        try_call fn0(v1), sig0, block1(ret0, v2), [ tag1: block2(exn0), default: block3(exn0, v2) ]
+        try_call fn0(v1), sig0, block1(ret0, v2), [ tag1: block2(exn0), default: block3(v2, exn0) ]
 
     block1(v3: f32, v4: f64):
         v5 = iconst.i32 1
@@ -17,7 +17,7 @@ function %f0(i32) -> i32 {
         v7 = iconst.i32 2
         return v7
 
-    block3(v8: i64, v9: f64):
+    block3(v8: f64, v9: i64):
         v10 = iconst.i32 3
         return v10
 }
