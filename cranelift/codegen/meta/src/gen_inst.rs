@@ -1059,7 +1059,7 @@ fn gen_inst_builder(inst: &Instruction, format: &InstructionFormat, fmt: &mut Fo
         for op in block_args {
             fmtln!(
                 fmt,
-                "let {0} = self.data_flow_graph_mut().block_call({0}_label, {0}_args.into_iter().copied());",
+                "let {0} = self.data_flow_graph_mut().block_call({0}_label, {0}_args);",
                 op.name
             );
         }

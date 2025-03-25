@@ -230,8 +230,12 @@ impl DataFlowGraph {
     }
 
     /// Make a BlockCall, bundling together the block and its arguments.
-    pub fn block_call(&mut self, block: Block, args: impl Iterator<Item = BlockArg>) -> BlockCall {
-        BlockCall::new(block, args, &mut self.value_lists)
+    pub fn block_call<'a>(
+        &mut self,
+        block: Block,
+        args: impl IntoIterator<Item = &'a BlockArg>,
+    ) -> BlockCall {
+        BlockCall::new(block, args.into_iter().copied(), &mut self.value_lists)
     }
 
     /// Get the total number of values.

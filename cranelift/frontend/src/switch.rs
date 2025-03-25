@@ -216,10 +216,10 @@ impl Switch {
         );
 
         let jt_data = JumpTableData::new(
-            bx.func.dfg.block_call(otherwise, core::iter::empty()),
+            bx.func.dfg.block_call(otherwise, &[]),
             &blocks
                 .iter()
-                .map(|block| bx.func.dfg.block_call(*block, core::iter::empty()))
+                .map(|block| bx.func.dfg.block_call(*block, &[]))
                 .collect::<Vec<_>>(),
         );
         let jump_table = bx.create_jump_table(jt_data);
