@@ -559,7 +559,7 @@ impl SSABuilder {
                 );
                 for block in dests {
                     if block.block(&dfg.value_lists) == dest_block {
-                        block.append_argument(val, &mut dfg.value_lists);
+                        block.append_argument(val.into(), &mut dfg.value_lists);
                     }
                 }
             }

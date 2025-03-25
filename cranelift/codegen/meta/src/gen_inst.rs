@@ -964,6 +964,7 @@ fn gen_inst_builder(inst: &Instruction, format: &InstructionFormat, fmt: &mut Fo
     let mut tmpl_types = Vec::new();
     let mut into_args = Vec::new();
     let mut block_args = Vec::new();
+    let mut lifetime_param = None;
     for op in &inst.operands_in {
         if op.kind.is_block() {
             args.push(format!("{}_label: {}", op.name, "ir::Block"));
@@ -972,9 +973,13 @@ fn gen_inst_builder(inst: &Instruction, format: &InstructionFormat, fmt: &mut Fo
                 op.name, "Destination basic block"
             ));
 
+            let lifetime = *lifetime_param.get_or_insert_with(|| {
+                tmpl_types.insert(0, "'a".to_string());
+                "'a"
+            });
             args.push(format!(
-                "{}_args: {}",
-                op.name, "impl Iterator<Item = BlockArg>"
+                "{}_args: impl IntoIterator<Item = &{} BlockArg>",
+                op.name, lifetime,
             ));
             args_doc.push(format!("- {}_args: {}", op.name, "Block arguments"));
 
@@ -1054,7 +1059,7 @@ fn gen_inst_builder(inst: &Instruction, format: &InstructionFormat, fmt: &mut Fo
         for op in block_args {
             fmtln!(
                 fmt,
-                "let {0} = self.data_flow_graph_mut().block_call({0}_label, {0}_args);",
+                "let {0} = self.data_flow_graph_mut().block_call({0}_label, {0}_args.into_iter().copied());",
                 op.name
             );
         }
