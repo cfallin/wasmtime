@@ -357,6 +357,11 @@ macro_rules! isle_lower_prelude_methods {
         }
 
         #[inline]
+        fn exception_sig(&mut self, et: ExceptionTable) -> SigRef {
+            self.lower_ctx.dfg().exception_tables[et].sig
+        }
+
+        #[inline]
         fn box_external_name(&mut self, extname: ExternalName) -> BoxExternalName {
             Box::new(extname)
         }
@@ -855,6 +860,27 @@ macro_rules! isle_prelude_caller_methods {
             call_site.emit_return_call(self.lower_ctx, args, self.backend);
 
             InstOutput::new()
+        }
+
+        fn gen_try_call(
+            &mut self,
+            sig_ref: SigRef,
+            extname: ExternalName,
+            dist: RelocDistance,
+            et: ExceptionTable,
+            args: ValueSlice,
+        ) -> () {
+            todo!()
+        }
+
+        fn gen_try_call_indirect(
+            &mut self,
+            sig_ref: SigRef,
+            callee: Value,
+            et: ExceptionTable,
+            args: ValueSlice,
+        ) -> () {
+            todo!()
         }
     };
 }
