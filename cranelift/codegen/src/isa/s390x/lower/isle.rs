@@ -997,6 +997,7 @@ impl IsleContext<'_, '_, MInst, S390xBackend> {
             callee_pop_size,
             caller_conv: self.lower_ctx.abi().call_conv(self.lower_ctx.sigs()),
             callee_conv: self.lower_ctx.sigs()[abi].call_conv(),
+            try_call_info: None,
         }
     }
 }
