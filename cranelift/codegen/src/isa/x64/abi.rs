@@ -879,6 +879,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             callee_pop_size,
             callee_conv: call_conv,
             caller_conv: call_conv,
+            try_call_info: None,
         })));
         insts
     }

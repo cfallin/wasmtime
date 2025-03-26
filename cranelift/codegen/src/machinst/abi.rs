@@ -100,12 +100,13 @@
 
 use crate::entity::SecondaryMap;
 use crate::ir::types::*;
-use crate::ir::{ArgumentExtension, ArgumentPurpose, Signature};
+use crate::ir::{ArgumentExtension, ArgumentPurpose, ExceptionTable, Signature};
 use crate::isa::TargetIsa;
 use crate::settings::ProbestackStrategy;
 use crate::CodegenError;
 use crate::{ir, isa};
 use crate::{machinst::*, trace};
+use alloc::boxed::Box;
 use regalloc2::{MachineEnv, PReg, PRegSet};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
@@ -599,6 +600,28 @@ pub struct CallInfo<T> {
     /// caller, if any. (Used for popping stack arguments with the `tail`
     /// calling convention.)
     pub callee_pop_size: u32,
+    /// Information for a try-call, if this is one. We combine
+    /// handling of calls and try-calls as much as possible to share
+    /// argument/return logic; they mostly differ in the metadata that
+    /// they emit, which this information feeds into.
+    pub try_call_info: Option<TryCallInfo>,
+}
+
+/// Out-of-line information present on `try_call` instructions only:
+/// information that is used to generate exception-handling tables and
+/// link up to destination blocks properly.
+#[derive(Clone, Debug)]
+pub struct TryCallInfo {
+    /// The target to jump to on a normal returhn.
+    pub continuation: MachLabel,
+    /// The exception table to be used for handler tags.
+    pub exception_table: ExceptionTable,
+    /// The labels corresponding to the exception tags in the
+    /// exception table above.
+    pub exception_labels: Box<[MachLabel]>,
+    /// The register(s) allocated to contain the exception payload
+    /// arguments, on exceptional return.
+    pub exception_payload_regs: SmallVec<[ValueRegs<Writable<Reg>>; 2]>,
 }
 
 impl<T> CallInfo<T> {
@@ -613,6 +636,7 @@ impl<T> CallInfo<T> {
             caller_conv: call_conv,
             callee_conv: call_conv,
             callee_pop_size: 0,
+            try_call_info: None,
         }
     }
 
@@ -626,6 +650,7 @@ impl<T> CallInfo<T> {
             caller_conv: self.caller_conv,
             callee_conv: self.callee_conv,
             callee_pop_size: self.callee_pop_size,
+            try_call_info: self.try_call_info,
         }
     }
 }
@@ -2365,7 +2390,11 @@ impl<M: ABIMachineSpec> CallSite<M> {
     ///
     /// This function should only be called once, as it is allowed to re-use
     /// parts of the `CallSite` object in emitting instructions.
-    pub fn emit_call(&mut self, ctx: &mut Lower<M::I>) {
+    pub fn emit_call(
+        &mut self,
+        ctx: &mut Lower<M::I>,
+        try_call_info: Option<(ExceptionTable, &[MachLabel])>,
+    ) {
         let word_type = M::word_type();
         if let Some(i) = ctx.sigs()[self.sig].stack_ret_arg {
             let rd = ctx.alloc_tmp(word_type).only_reg().unwrap();
@@ -2409,6 +2438,20 @@ impl<M: ABIMachineSpec> CallSite<M> {
 
         let tmp = ctx.alloc_tmp(word_type).only_reg().unwrap();
 
+        let try_call_info = try_call_info.map(|(et, labels)| {
+            let exception_payload_regs = ctx
+                .try_call_exception_defs(ctx.cur_inst())
+                .iter()
+                .cloned()
+                .collect::<SmallVec<[_; 2]>>();
+            TryCallInfo {
+                continuation: labels[0],
+                exception_table: et,
+                exception_labels: labels[1..].to_vec().into_boxed_slice(),
+                exception_payload_regs,
+            }
+        });
+
         // Any adjustment to SP to account for required outgoing arguments/stack return values must
         // be done inside of the call pseudo-op, to ensure that SP is always in a consistent
         // state for all other instructions. For example, if a tail-call abi function is called
@@ -2429,6 +2472,7 @@ impl<M: ABIMachineSpec> CallSite<M> {
                 callee_conv: call_conv,
                 caller_conv: self.caller_conv,
                 callee_pop_size,
+                try_call_info,
             },
         )
         .into_iter()
