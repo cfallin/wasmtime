@@ -868,9 +868,21 @@ macro_rules! isle_prelude_caller_methods {
             extname: ExternalName,
             dist: RelocDistance,
             et: ExceptionTable,
-            args: ValueSlice,
+            args @ (inputs, off): ValueSlice,
+            targets: &MachLabelSlice,
         ) -> () {
-            todo!()
+            let caller_conv = self.lower_ctx.abi().call_conv(self.lower_ctx.sigs());
+            let call_site = <$abicaller>::from_func(
+                self.lower_ctx.sigs(),
+                sig_ref,
+                &extname,
+                IsTailCall::No,
+                dist,
+                caller_conv,
+                self.backend.flags().clone(),
+            );
+
+            call_site.emit_try_call(self.lower_ctx, et, args, targets, self.backend);
         }
 
         fn gen_try_call_indirect(
@@ -879,6 +891,7 @@ macro_rules! isle_prelude_caller_methods {
             callee: Value,
             et: ExceptionTable,
             args: ValueSlice,
+            targets: &MachLabelSlice,
         ) -> () {
             todo!()
         }
