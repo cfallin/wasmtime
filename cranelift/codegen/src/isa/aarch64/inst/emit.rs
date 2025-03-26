@@ -2951,6 +2951,19 @@ impl MachInstEmit for Inst {
                         inst.emit(sink, emit_info, state);
                     }
                 }
+
+                // If this is a try-call, jump to the continuation
+                // (normal-return) block.
+                if let Some(try_call) = info.try_call_info.as_ref() {
+                    let jmp = Inst::Jump {
+                        dest: BranchTarget::Label(try_call.continuation),
+                    };
+                    jmp.emit(sink, emit_info, state);
+
+                    // For now, assert that there are no exceptional
+                    // edges. TODO: implement exception metadata.
+                    assert!(try_call.exception_labels.is_empty());
+                }
             }
             &Inst::CallInd { ref info } => {
                 let user_stack_map = state.take_stack_map();

@@ -1665,6 +1665,19 @@ pub(crate) fn emit(
                 )
                 .emit(sink, info, state);
             }
+
+            // If this is a try-call, jump to the continuation
+            // (normal-return) block.
+            if let Some(try_call) = call_info.try_call_info.as_ref() {
+                let jmp = Inst::JmpKnown {
+                    dst: try_call.continuation,
+                };
+                jmp.emit(sink, info, state);
+
+                // For now, assert that there are no exceptional
+                // edges. TODO: implement exception metadata.
+                assert!(try_call.exception_labels.is_empty());
+            }
         }
 
         Inst::ReturnCallKnown { info: call_info } => {
