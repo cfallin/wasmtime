@@ -1,3 +1,4 @@
+use crate::ir::types::{I32, I64};
 use crate::ir::Type;
 use crate::settings::{self, LibcallCallConv};
 use core::fmt;
@@ -71,26 +72,16 @@ impl CallConv {
         }
     }
 
-    /// What type is the exception payload, if any?
-    pub fn exception_payload_type(&self, index: usize, pointer_ty: Type) -> Option<Type> {
-        match self {
-            CallConv::Tail | CallConv::SystemV => {
-                if index == 0 {
-                    Some(pointer_ty)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
     /// What types do the exception payload value(s) have?
-    pub fn exception_payload_types(&self, pointer_ty: Type) -> impl Iterator<Item = Type> + '_ {
-        (0..)
-            .map(move |i| self.exception_payload_type(i, pointer_ty))
-            .take_while(|val| val.is_some())
-            .map(|val| val.unwrap())
+    pub fn exception_payload_types(&self, pointer_ty: Type) -> &[Type] {
+        match self {
+            CallConv::Tail | CallConv::SystemV => match pointer_ty {
+                I32 => &[I32, I32],
+                I64 => &[I64, I64],
+                _ => unreachable!(),
+            },
+            _ => &[],
+        }
     }
 }
 

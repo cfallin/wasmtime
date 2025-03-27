@@ -10,13 +10,9 @@ use regalloc2::{Operand, OperandConstraint, OperandKind, OperandPos, PReg, PRegS
 use serde_derive::{Deserialize, Serialize};
 
 /// The first 192 vregs (64 int, 64 float, 64 vec) are "pinned" to
-/// physical registers: this means that they are always constrained to
-/// the corresponding register at all use/mod/def sites.
-///
-/// Arbitrary vregs can also be constrained to physical registers at
-/// particular use/def/mod sites, and this is preferable; but pinned
-/// vregs allow us to migrate code that has been written using
-/// RealRegs directly.
+/// physical registers. These must not be passed into the regalloc,
+/// but they are used to represent physical registers in the same
+/// `Reg` type post-regalloc.
 const PINNED_VREGS: usize = 192;
 
 /// Convert a `VReg` to its pinned `PReg`, if any.
@@ -26,6 +22,11 @@ pub fn pinned_vreg_to_preg(vreg: VReg) -> Option<PReg> {
     } else {
         None
     }
+}
+
+/// Convert a `PReg` to its pinned `VReg`.
+pub const fn preg_to_pinned_vreg(preg: PReg) -> VReg {
+    VReg::new(preg.index(), preg.class())
 }
 
 /// Give the first available vreg for generated code (i.e., after all
@@ -48,6 +49,16 @@ pub fn first_user_vreg_index() -> usize {
 pub struct Reg(VReg);
 
 impl Reg {
+    /// Const constructor: create a new Reg from a regalloc2 VReg.
+    pub const fn from_virtual_reg(vreg: regalloc2::VReg) -> Reg {
+        Reg(vreg)
+    }
+
+    /// Const constructor: create a new Reg from a regalloc2 PReg.
+    pub const fn from_real_reg(preg: regalloc2::PReg) -> Reg {
+        Reg(preg_to_pinned_vreg(preg))
+    }
+
     /// Get the physical register (`RealReg`), if this register is
     /// one.
     pub fn to_real_reg(self) -> Option<RealReg> {

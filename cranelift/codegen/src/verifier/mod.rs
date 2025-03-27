@@ -1545,11 +1545,12 @@ impl<'a> Verifier<'a> {
                         unreachable!()
                     }
                     (BlockArg::TryCallExn(i), BlockCallTargetType::Exception) => {
-                        match sig.call_conv.exception_payload_type(
-                            i as usize,
-                            self.pointer_type_or_error(inst, errors)?,
-                        ) {
-                            Some(ty) => Ok(ty),
+                        match sig
+                            .call_conv
+                            .exception_payload_types(self.pointer_type_or_error(inst, errors)?)
+                            .get(i as usize)
+                        {
+                            Some(ty) => Ok(*ty),
                             None => {
                                 errors.fatal((
                                     inst,

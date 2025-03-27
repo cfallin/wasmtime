@@ -2005,16 +2005,7 @@ fn pretty_print_try_call(info: &TryCallInfo) -> String {
         .map(|(tag, label)| format!("{tag:?}: {label:?}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let payload = info
-        .exception_payload_regs
-        .iter()
-        .map(|regs| pretty_print_reg(regs.only_reg().unwrap().to_reg(), 8))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "; jmp {:?}; catch [{dests}] with payload [{payload}]",
-        info.continuation
-    )
+    format!("; jmp {:?}; catch [{dests}]", info.continuation)
 }
 
 impl fmt::Debug for Inst {
@@ -2488,7 +2479,6 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 defs,
                 clobbers,
                 dest,
-                try_call_info,
                 ..
             } = &mut **info;
             debug_assert_ne!(*dest, ExternalName::LibCall(LibCall::Probestack));
@@ -2499,14 +2489,6 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 collector.reg_fixed_def(vreg, *preg);
             }
             collector.reg_clobbers(*clobbers);
-
-            if let Some(try_call_info) = try_call_info.as_mut() {
-                for regs in &mut try_call_info.exception_payload_regs {
-                    for reg in regs.regs_mut() {
-                        collector.reg_def(reg);
-                    }
-                }
-            }
         }
 
         Inst::CallUnknown { info } => {
@@ -2516,7 +2498,6 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 clobbers,
                 callee_conv,
                 dest,
-                try_call_info,
                 ..
             } = &mut **info;
             match dest {
@@ -2535,14 +2516,6 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 collector.reg_fixed_def(vreg, *preg);
             }
             collector.reg_clobbers(*clobbers);
-
-            if let Some(try_call_info) = try_call_info.as_mut() {
-                for regs in &mut try_call_info.exception_payload_regs {
-                    for reg in regs.regs_mut() {
-                        collector.reg_def(reg);
-                    }
-                }
-            }
         }
         Inst::StackSwitchBasic {
             store_context_ptr,
@@ -2757,7 +2730,8 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             // pseudoinstruction (and relocation that it emits) is specific to
             // ELF systems; other x86-64 targets with other conventions (i.e.,
             // Windows) use different TLS strategies.
-            let mut clobbers = X64ABIMachineSpec::get_regs_clobbered_by_call(CallConv::SystemV);
+            let mut clobbers =
+                X64ABIMachineSpec::get_regs_clobbered_by_call(CallConv::SystemV, false);
             clobbers.remove(regs::gpr_preg(regs::ENC_RAX));
             collector.reg_clobbers(clobbers);
         }

@@ -532,7 +532,8 @@ where
         MACHINE_ENV.get_or_init(create_reg_environment)
     }
 
-    fn get_regs_clobbered_by_call(_call_conv_of_callee: isa::CallConv) -> PRegSet {
+    fn get_regs_clobbered_by_call(_call_conv_of_callee: isa::CallConv, is_exception: bool) -> PRegSet {
+        assert!(!is_exception);
         DEFAULT_CLOBBERS
     }
 

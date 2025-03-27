@@ -226,8 +226,10 @@ pub struct Lower<'func, I: VCodeInst> {
     /// Try-call block arg normal-return values, indexed by instruction.
     try_call_rets: FxHashMap<Inst, SmallVec<[ValueRegs<Writable<Reg>>; 2]>>,
 
-    /// Try-call block arg exceptional-return payloads, indexed by instruction.
-    try_call_payloads: FxHashMap<Inst, SmallVec<[ValueRegs<Writable<Reg>>; 2]>>,
+    /// Try-call block arg exceptional-return payloads, indexed by
+    /// instruction. Payloads are carried in registers per the ABI and
+    /// can only be one register each.
+    try_call_payloads: FxHashMap<Inst, SmallVec<[Writable<Reg>; 2]>>,
 
     /// The register to use for GetPinnedReg, if any, on this architecture.
     pinned_reg: Option<Reg>,
@@ -438,11 +440,11 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
                     try_call_rets.insert(inst, rets);
 
                     let mut payloads = smallvec![];
-                    for ty in sig
+                    for &ty in sig
                         .call_conv
                         .exception_payload_types(I::ABIMachineSpec::word_type())
                     {
-                        payloads.push(vregs.alloc(ty)?.map(|r| Writable::from_reg(r)));
+                        payloads.push(Writable::from_reg(vregs.alloc(ty)?.only_reg().unwrap()));
                     }
                     try_call_payloads.insert(inst, payloads);
                 }
@@ -1531,9 +1533,9 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
         &self.try_call_rets.get(&ir_inst).unwrap()[..]
     }
 
-    /// Get the ValueRegs for the edge-defined values for special
+    /// Get the Regs for the edge-defined values for special
     /// try-call-return exception payload arguments.
-    pub fn try_call_exception_defs(&mut self, ir_inst: Inst) -> &[ValueRegs<Writable<Reg>>] {
+    pub fn try_call_exception_defs(&mut self, ir_inst: Inst) -> &[Writable<Reg>] {
         &self.try_call_payloads.get(&ir_inst).unwrap()[..]
     }
 }

@@ -926,7 +926,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         Inst::MachOTlsGetAddr { rd, .. } => {
             collector.reg_fixed_def(rd, regs::xreg(0));
             let mut clobbers =
-                AArch64MachineDeps::get_regs_clobbered_by_call(CallConv::AppleAarch64);
+                AArch64MachineDeps::get_regs_clobbered_by_call(CallConv::AppleAarch64, false);
             clobbers.remove(regs::xreg_preg(0));
             collector.reg_clobbers(clobbers);
         }
@@ -989,8 +989,8 @@ impl MachInst for Inst {
         //
         // See the note in [crate::isa::aarch64::abi::is_caller_save_reg] for
         // more information on this ABI-implementation hack.
-        let caller_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(caller);
-        let callee_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(callee);
+        let caller_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(caller, false);
+        let callee_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(callee, false);
 
         let mut all_clobbers = caller_clobbers;
         all_clobbers.union_from(callee_clobbers);

@@ -569,7 +569,10 @@ pub trait ABIMachineSpec {
 
     /// Get all caller-save registers, that is, registers that we expect
     /// not to be saved across a call to a callee with the given ABI.
-    fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> PRegSet;
+    fn get_regs_clobbered_by_call(
+        call_conv_of_callee: isa::CallConv,
+        is_exception: bool,
+    ) -> PRegSet;
 
     /// Get the needed extension mode, given the mode attached to the argument
     /// in the signature and the calling convention. The input (the attribute in
@@ -580,6 +583,12 @@ pub trait ABIMachineSpec {
         call_conv: isa::CallConv,
         specified: ir::ArgumentExtension,
     ) -> ir::ArgumentExtension;
+
+    /// Get the exception payload registers, if any, for a calling
+    /// convention.
+    fn exception_payload_regs(_call_conv: isa::CallConv) -> &'static [Reg] {
+        &[]
+    }
 }
 
 /// Out-of-line data for calls, to keep the size of `Inst` down.
@@ -617,9 +626,6 @@ pub struct TryCallInfo {
     pub continuation: MachLabel,
     /// Exception tags to catch and corresponding destination labels.
     pub exception_dests: Box<[(PackedOption<ExceptionTag>, MachLabel)]>,
-    /// The register(s) allocated to contain the exception payload
-    /// arguments, on exceptional return.
-    pub exception_payload_regs: SmallVec<[ValueRegs<Writable<Reg>>; 2]>,
 }
 
 impl<T> CallInfo<T> {
@@ -2405,19 +2411,7 @@ impl<M: ABIMachineSpec> CallSite<M> {
         }
 
         let uses = mem::take(&mut self.uses);
-        let defs = mem::take(&mut self.defs);
-        let clobbers = {
-            // Get clobbers: all caller-saves. These may include return value
-            // regs, which we will remove from the clobber set below.
-            let mut clobbers = <M>::get_regs_clobbered_by_call(ctx.sigs()[self.sig].call_conv);
-
-            // Remove retval regs from clobbers.
-            for def in &defs {
-                clobbers.remove(PReg::from(def.preg.to_real_reg().unwrap()));
-            }
-
-            clobbers
-        };
+        let mut defs = mem::take(&mut self.defs);
 
         let sig = &ctx.sigs()[self.sig];
         let callee_pop_size = if sig.call_conv() == isa::CallConv::Tail {
@@ -2437,11 +2431,6 @@ impl<M: ABIMachineSpec> CallSite<M> {
         let tmp = ctx.alloc_tmp(word_type).only_reg().unwrap();
 
         let try_call_info = try_call_info.map(|(et, labels)| {
-            let exception_payload_regs = ctx
-                .try_call_exception_defs(ctx.cur_inst())
-                .iter()
-                .cloned()
-                .collect::<SmallVec<[_; 2]>>();
             let exception_dests = ctx.dfg().exception_tables[et]
                 .tags
                 .iter()
@@ -2449,12 +2438,60 @@ impl<M: ABIMachineSpec> CallSite<M> {
                 .zip(labels.iter().skip(1).cloned())
                 .collect::<Vec<_>>()
                 .into_boxed_slice();
+
+            // We need to update `defs` to contain the exception
+            // payload regs as well. We have two sources of info that
+            // we join:
+            //
+            // - The machine-specific ABI implementation `M`, which
+            //   tells us the particular registers that payload values
+            //   must be in
+            // - The passed-in lowering context, which gives us the
+            //   vregs we must define.
+            //
+            // Note that payload values may need to end up in the same
+            // physical registers as ordinary return values; this is
+            // not a conflict, because we either get one or the
+            // other. For regalloc's purposes, we define both starting
+            // here at the callsite, but we can share one def in the
+            // `defs` list and alias one vreg to another. Thus we
+            // handle the two cases below for each payload register:
+            // overlaps a return value (and we alias to it) or not
+            // (and we add a def).
+            let pregs = M::exception_payload_regs(call_conv);
+            for (i, &preg) in pregs.iter().enumerate() {
+                let vreg = ctx.try_call_exception_defs(ctx.cur_inst())[i];
+                if let Some(existing) = defs.iter().find(|def| def.preg == preg) {
+                    ctx.vregs_mut()
+                        .set_vreg_alias(vreg.to_reg(), existing.vreg.to_reg());
+                } else {
+                    defs.push(CallRetPair { vreg, preg });
+                }
+            }
+
             TryCallInfo {
                 continuation: labels[0],
                 exception_dests,
-                exception_payload_regs,
             }
         });
+
+        let clobbers = {
+            // Get clobbers: all caller-saves. These may include
+            // return value regs and exception payload regs, which we
+            // will remove from the clobber set below.
+            let mut clobbers = <M>::get_regs_clobbered_by_call(
+                ctx.sigs()[self.sig].call_conv,
+                try_call_info.is_some(),
+            );
+
+            // Remove retval regs / exception payload regs from
+            // clobbers.
+            for def in &defs {
+                clobbers.remove(PReg::from(def.preg.to_real_reg().unwrap()));
+            }
+
+            clobbers
+        };
 
         // Any adjustment to SP to account for required outgoing arguments/stack return values must
         // be done inside of the call pseudo-op, to ensure that SP is always in a consistent

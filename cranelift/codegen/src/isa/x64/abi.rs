@@ -875,7 +875,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 },
             ],
             defs: smallvec![],
-            clobbers: Self::get_regs_clobbered_by_call(call_conv),
+            clobbers: Self::get_regs_clobbered_by_call(call_conv, false),
             callee_pop_size,
             callee_conv: call_conv,
             caller_conv: call_conv,
@@ -907,10 +907,14 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         }
     }
 
-    fn get_regs_clobbered_by_call(call_conv_of_callee: isa::CallConv) -> PRegSet {
+    fn get_regs_clobbered_by_call(
+        call_conv_of_callee: isa::CallConv,
+        is_exception: bool,
+    ) -> PRegSet {
         match call_conv_of_callee {
             CallConv::Winch => ALL_CLOBBERS,
             CallConv::WindowsFastcall => WINDOWS_CLOBBERS,
+            _ if is_exception => ALL_CLOBBERS,
             _ => SYSV_CLOBBERS,
         }
     }
@@ -971,6 +975,14 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             fixed_frame_storage_size,
             outgoing_args_size,
             clobbered_callee_saves: regs,
+        }
+    }
+
+    fn exception_payload_regs(call_conv: isa::CallConv) -> &'static [Reg] {
+        const PAYLOAD_REGS: &'static [Reg] = &[regs::rax(), regs::rdx()];
+        match call_conv {
+            isa::CallConv::SystemV | isa::CallConv::Tail => PAYLOAD_REGS,
+            _ => &[],
         }
     }
 }
