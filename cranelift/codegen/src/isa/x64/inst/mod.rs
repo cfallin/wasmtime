@@ -11,6 +11,7 @@ use crate::isa::{CallConv, FunctionAlignment};
 use crate::{machinst::*, trace};
 use crate::{settings, CodegenError, CodegenResult};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use smallvec::{smallvec, SmallVec};
 use std::fmt::{self, Write};
 use std::string::{String, ToString};
@@ -1660,13 +1661,23 @@ impl PrettyPrint for Inst {
 
             Inst::CallKnown { info } => {
                 let op = ljustify("call".to_string());
-                format!("{op} {:?}", info.dest)
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("{op} {:?} {try_call}", info.dest)
             }
 
             Inst::CallUnknown { info } => {
                 let dest = info.dest.pretty_print(8);
                 let op = ljustify("call".to_string());
-                format!("{op} *{dest}")
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("{op} *{dest} {try_call}")
             }
 
             Inst::ReturnCallKnown { info } => {
@@ -1985,6 +1996,25 @@ impl PrettyPrint for Inst {
             }
         }
     }
+}
+
+fn pretty_print_try_call(info: &TryCallInfo) -> String {
+    let dests = info
+        .exception_dests
+        .iter()
+        .map(|(tag, label)| format!("{tag:?}: {label:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let payload = info
+        .exception_payload_regs
+        .iter()
+        .map(|regs| pretty_print_reg(regs.only_reg().unwrap().to_reg(), 8))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "; jmp {:?}; catch [{dests}] with payload [{payload}]",
+        info.continuation
+    )
 }
 
 impl fmt::Debug for Inst {
@@ -2458,6 +2488,7 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 defs,
                 clobbers,
                 dest,
+                try_call_info,
                 ..
             } = &mut **info;
             debug_assert_ne!(*dest, ExternalName::LibCall(LibCall::Probestack));
@@ -2468,6 +2499,14 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 collector.reg_fixed_def(vreg, *preg);
             }
             collector.reg_clobbers(*clobbers);
+
+            if let Some(try_call_info) = try_call_info.as_mut() {
+                for regs in &mut try_call_info.exception_payload_regs {
+                    for reg in regs.regs_mut() {
+                        collector.reg_def(reg);
+                    }
+                }
+            }
         }
 
         Inst::CallUnknown { info } => {
@@ -2477,6 +2516,7 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 clobbers,
                 callee_conv,
                 dest,
+                try_call_info,
                 ..
             } = &mut **info;
             match dest {
@@ -2484,7 +2524,7 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                     // TODO(https://github.com/bytecodealliance/regalloc2/issues/145):
                     // This shouldn't be a fixed register constraint. r10 is caller-saved, so this
                     // should be safe to use.
-                    collector.reg_fixed_use(reg, regs::r10())
+                    collector.reg_fixed_use(reg, regs::r10());
                 }
                 _ => dest.get_operands(collector),
             }
@@ -2495,6 +2535,14 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
                 collector.reg_fixed_def(vreg, *preg);
             }
             collector.reg_clobbers(*clobbers);
+
+            if let Some(try_call_info) = try_call_info.as_mut() {
+                for regs in &mut try_call_info.exception_payload_regs {
+                    for reg in regs.regs_mut() {
+                        collector.reg_def(reg);
+                    }
+                }
+            }
         }
         Inst::StackSwitchBasic {
             store_context_ptr,
@@ -2812,6 +2860,12 @@ impl MachInst for Inst {
             &Self::JmpCond { .. } => MachTerminator::Cond,
             &Self::JmpCondOr { .. } => MachTerminator::Cond,
             &Self::JmpTableSeq { .. } => MachTerminator::Indirect,
+            &Self::CallKnown { ref info } if info.try_call_info.is_some() => {
+                MachTerminator::Indirect
+            }
+            &Self::CallUnknown { ref info } if info.try_call_info.is_some() => {
+                MachTerminator::Indirect
+            }
             // All other cases are boring.
             _ => MachTerminator::None,
         }

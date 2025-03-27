@@ -14,4 +14,36 @@ function %f0(i32) -> i32 {
         return v5
 }
 
-; test
+; VCode:
+;   pushq   %rbp
+;   movq    %rsp, %rbp
+;   subq    %rsp, $16, %rsp
+;   movq    %r14, 0(%rsp)
+; block0:
+;   load_ext_name %g+0, %r9
+;   call    *%r9 ; jmp MachLabel(1); catch [] with payload [%r14]
+; block1:
+;   movl    $1, %eax
+;   movq    0(%rsp), %r14
+;   addq    %rsp, $16, %rsp
+;   movq    %rbp, %rsp
+;   popq    %rbp
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %r14, (%rsp)
+; block1: ; offset 0xc
+;   movabsq $0, %r9 ; reloc_external Abs8 %g 0
+;   callq *%r9
+; block2: ; offset 0x19
+;   movl $1, %eax
+;   movq (%rsp), %r14
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

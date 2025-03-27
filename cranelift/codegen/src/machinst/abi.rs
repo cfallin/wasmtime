@@ -100,13 +100,14 @@
 
 use crate::entity::SecondaryMap;
 use crate::ir::types::*;
-use crate::ir::{ArgumentExtension, ArgumentPurpose, ExceptionTable, Signature};
+use crate::ir::{ArgumentExtension, ArgumentPurpose, ExceptionTable, ExceptionTag, Signature};
 use crate::isa::TargetIsa;
 use crate::settings::ProbestackStrategy;
 use crate::CodegenError;
 use crate::{ir, isa};
 use crate::{machinst::*, trace};
 use alloc::boxed::Box;
+use cranelift_entity::packed_option::PackedOption;
 use regalloc2::{MachineEnv, PReg, PRegSet};
 use rustc_hash::FxHashMap;
 use smallvec::smallvec;
@@ -614,11 +615,8 @@ pub struct CallInfo<T> {
 pub struct TryCallInfo {
     /// The target to jump to on a normal returhn.
     pub continuation: MachLabel,
-    /// The exception table to be used for handler tags.
-    pub exception_table: ExceptionTable,
-    /// The labels corresponding to the exception tags in the
-    /// exception table above.
-    pub exception_labels: Box<[MachLabel]>,
+    /// Exception tags to catch and corresponding destination labels.
+    pub exception_dests: Box<[(PackedOption<ExceptionTag>, MachLabel)]>,
     /// The register(s) allocated to contain the exception payload
     /// arguments, on exceptional return.
     pub exception_payload_regs: SmallVec<[ValueRegs<Writable<Reg>>; 2]>,
@@ -2444,10 +2442,16 @@ impl<M: ABIMachineSpec> CallSite<M> {
                 .iter()
                 .cloned()
                 .collect::<SmallVec<[_; 2]>>();
+            let exception_dests = ctx.dfg().exception_tables[et]
+                .tags
+                .iter()
+                .cloned()
+                .zip(labels.iter().skip(1).cloned())
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
             TryCallInfo {
                 continuation: labels[0],
-                exception_table: et,
-                exception_labels: labels[1..].to_vec().into_boxed_slice(),
+                exception_dests,
                 exception_payload_regs,
             }
         });
