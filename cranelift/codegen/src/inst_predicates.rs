@@ -154,6 +154,29 @@ pub fn has_memory_fence_semantics(op: Opcode) -> bool {
     }
 }
 
+/// Returned information from `requires_branch_edge_block`: indicates
+/// whether a branch requires a special block to insert edge-specific
+/// actions on any edge.
+#[derive(Clone, Copy, Debug)]
+pub enum BranchEdgeBlockRequirement {
+    /// No edge block required -- just do normal critical-edge
+    /// splitting for regalloc.
+    None,
+    /// An edge block is required on the given edge, indicated by
+    /// index in the successors array.
+    One(usize),
+}
+
+/// Does this terminator opcode require an edge block on any edge?
+pub fn requires_branch_edge_block(op: Opcode) -> BranchEdgeBlockRequirement {
+    match op {
+        // `try_call`s: the normal-return edge needs a block to
+        // contain retval instructions.
+        Opcode::TryCall | Opcode::TryCallIndirect => BranchEdgeBlockRequirement::One(0),
+        _ => BranchEdgeBlockRequirement::None,
+    }
+}
+
 /// Visit all successors of a block with a given visitor closure. The closure
 /// arguments are the branch instruction that is used to reach the successor,
 /// the successor block itself, and a flag indicating whether the block is
