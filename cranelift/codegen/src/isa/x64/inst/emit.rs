@@ -1666,6 +1666,14 @@ pub(crate) fn emit(
                 .emit(sink, info, state);
             }
 
+            // Add exception info, if any, at this point (which will
+            // be the return address on stack).
+            if let Some(try_call) = call_info.try_call_info.as_ref() {
+                for &(tag, label) in &try_call.exception_dests {
+                    sink.add_exception_handler(tag, label);
+                }
+            }
+
             // If this is a try-call, jump to the continuation
             // (normal-return) block.
             if let Some(try_call) = call_info.try_call_info.as_ref() {
