@@ -1962,13 +1962,23 @@ pub struct CallArgPair {
 }
 
 /// An output return value from a call instruction: the vreg that is
-/// defined, and the preg it is constrained to (per the ABI).
+/// defined, and the preg or stack location it is constrained to (per
+/// the ABI).
 #[derive(Clone, Debug)]
 pub struct CallRetPair {
     /// The virtual register to define from this return value.
     pub vreg: Writable<Reg>,
     /// The real register from which the return value is read.
-    pub preg: Reg,
+    pub location: RetLocation,
+}
+
+/// A location to load a return-value from after a call completes.
+#[derive(Clone, Debug)]
+pub enum RetLocation {
+    /// A physical register.
+    Reg(Reg),
+    /// A stack location, identified by a `StackAMode`.
+    Stack(StackAMode, Type),
 }
 
 pub type CallArgList = SmallVec<[CallArgPair; 8]>;
@@ -2297,12 +2307,7 @@ impl<M: ABIMachineSpec> CallSite<M> {
     }
 
     /// Define a return value after the call returns.
-    pub fn gen_retval(
-        &mut self,
-        ctx: &mut Lower<M::I>,
-        idx: usize,
-    ) -> (SmallInstVec<M::I>, ValueRegs<Reg>) {
-        let mut insts = smallvec![];
+    pub fn gen_retval(&mut self, ctx: &mut Lower<M::I>, idx: usize) -> ValueRegs<Reg> {
         let mut into_regs: SmallVec<[Reg; 2]> = smallvec![];
         let ret = ctx.sigs().rets(self.sig)[idx].clone();
         match ret {
@@ -2315,7 +2320,7 @@ impl<M: ABIMachineSpec> CallSite<M> {
                             let into_reg = ctx.alloc_tmp(ty).only_reg().unwrap();
                             self.defs.push(CallRetPair {
                                 vreg: into_reg,
-                                preg: reg.into(),
+                                location: RetLocation::Reg(reg.into()),
                             });
                             into_regs.push(into_reg.to_reg());
                         }
@@ -2326,11 +2331,11 @@ impl<M: ABIMachineSpec> CallSite<M> {
                             // ensuring that the return values will be in a consistent place after
                             // any call.
                             let ret_area_base = sig_data.sized_stack_arg_space();
-                            insts.push(M::gen_load_stack(
-                                StackAMode::OutgoingArg(offset + ret_area_base),
-                                into_reg,
-                                ty,
-                            ));
+                            let amode = StackAMode::OutgoingArg(offset + ret_area_base);
+                            self.defs.push(CallRetPair {
+                                vreg: into_reg,
+                                location: RetLocation::Stack(amode, ty),
+                            });
                             into_regs.push(into_reg.to_reg());
                         }
                     }
@@ -2349,7 +2354,7 @@ impl<M: ABIMachineSpec> CallSite<M> {
             [a, b] => ValueRegs::two(a, b),
             _ => panic!("Expected to see one or two slots only from {ret:?}"),
         };
-        (insts, value_regs)
+        value_regs
     }
 
     /// Emit the call itself.
@@ -2386,7 +2391,9 @@ impl<M: ABIMachineSpec> CallSite<M> {
 
             // Remove retval regs from clobbers.
             for def in &defs {
-                clobbers.remove(PReg::from(def.preg.to_real_reg().unwrap()));
+                if let RetLocation::Reg(preg) = def.location {
+                    clobbers.remove(PReg::from(preg.to_real_reg().unwrap()));
+                }
             }
 
             clobbers

@@ -169,8 +169,11 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.reg_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
         }
@@ -179,8 +182,11 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.reg_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
         }
@@ -190,8 +196,11 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.reg_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
         }

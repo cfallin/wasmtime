@@ -2951,6 +2951,14 @@ impl MachInstEmit for Inst {
                         inst.emit(sink, emit_info, state);
                     }
                 }
+
+                // Load any stack-carried return values.
+                for CallRetPair { vreg, location } in &info.defs {
+                    if let RetLocation::Stack(amode, ty) = location {
+                        let inst = AArch64MachineDeps::gen_load_stack(*amode, *vreg, *ty);
+                        inst.emit(sink, emit_info, state);
+                    }
+                }
             }
             &Inst::CallInd { ref info } => {
                 let user_stack_map = state.take_stack_map();
@@ -2967,6 +2975,14 @@ impl MachInstEmit for Inst {
                     let callee_pop_size =
                         i32::try_from(info.callee_pop_size).expect("callee popped more than 2GB");
                     for inst in AArch64MachineDeps::gen_sp_reg_adjust(-callee_pop_size) {
+                        inst.emit(sink, emit_info, state);
+                    }
+                }
+
+                // Load any stack-carried return values.
+                for CallRetPair { vreg, location } in &info.defs {
+                    if let RetLocation::Stack(amode, ty) = location {
+                        let inst = AArch64MachineDeps::gen_load_stack(*amode, *vreg, *ty);
                         inst.emit(sink, emit_info, state);
                     }
                 }

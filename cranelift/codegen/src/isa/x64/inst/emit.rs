@@ -1665,6 +1665,14 @@ pub(crate) fn emit(
                 )
                 .emit(sink, info, state);
             }
+
+            // Load any stack-carried return values.
+            for CallRetPair { vreg, location } in &call_info.defs {
+                if let RetLocation::Stack(amode, ty) = location {
+                    let inst = X64ABIMachineSpec::gen_load_stack(*amode, *vreg, *ty);
+                    inst.emit(sink, info, state);
+                }
+            }
         }
 
         Inst::ReturnCallKnown { info: call_info } => {
@@ -1746,6 +1754,14 @@ pub(crate) fn emit(
                     Writable::from_reg(regs::rsp()),
                 )
                 .emit(sink, info, state);
+            }
+
+            // Load any stack-carried return values.
+            for CallRetPair { vreg, location } in &call_info.defs {
+                if let RetLocation::Stack(amode, ty) = location {
+                    let inst = X64ABIMachineSpec::gen_load_stack(*amode, *vreg, *ty);
+                    inst.emit(sink, info, state);
+                }
             }
         }
 

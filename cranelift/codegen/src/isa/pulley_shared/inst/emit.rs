@@ -188,6 +188,14 @@ fn pulley_emit<P>(
             for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
                 <InstAndKind<P>>::from(i).emit(sink, emit_info, state);
             }
+
+            // Load any stack-carried return values.
+            for CallRetPair { vreg, location } in &info.defs {
+                if let RetLocation::Stack(amode, ty) = location {
+                    let inst = PulleyMachineDeps::<P>::gen_load_stack(*amode, *vreg, *ty);
+                    inst.emit(sink, emit_info, state);
+                }
+            }
         }
 
         Inst::IndirectCall { info } => {
@@ -203,6 +211,14 @@ fn pulley_emit<P>(
             let adjust = -i32::try_from(info.callee_pop_size).unwrap();
             for i in PulleyMachineDeps::<P>::gen_sp_reg_adjust(adjust) {
                 <InstAndKind<P>>::from(i).emit(sink, emit_info, state);
+            }
+
+            // Load any stack-carried return values.
+            for CallRetPair { vreg, location } in &info.defs {
+                if let RetLocation::Stack(amode, ty) = location {
+                    let inst = PulleyMachineDeps::<P>::gen_load_stack(*amode, *vreg, *ty);
+                    inst.emit(sink, emit_info, state);
+                }
             }
         }
 
