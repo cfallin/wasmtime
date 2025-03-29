@@ -1009,11 +1009,24 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
         let block_call = self.f.dfg.insts[branch_inst]
             .branch_destination(&self.f.dfg.jump_tables, &self.f.dfg.exception_tables)[succ_idx];
-        let args = block_call.args_slice(&self.f.dfg.value_lists);
-        for &arg in args {
-            debug_assert!(self.f.dfg.value_is_real(arg));
-            let regs = self.put_value_in_regs(arg);
-            buffer.extend_from_slice(regs.regs());
+        for arg in block_call.args(&self.f.dfg.value_lists) {
+            match arg {
+                BlockArg::Value(arg) => {
+                    debug_assert!(self.f.dfg.value_is_real(arg));
+                    let regs = self.put_value_in_regs(arg);
+                    buffer.extend_from_slice(regs.regs());
+                }
+                BlockArg::TryCallRet(i) => {
+                    let regs = self.try_call_rets.get(&branch_inst).unwrap()[i as usize]
+                        .map(|r| r.to_reg());
+                    buffer.extend_from_slice(regs.regs());
+                }
+                BlockArg::TryCallExn(i) => {
+                    let reg =
+                        self.try_call_payloads.get(&branch_inst).unwrap()[i as usize].to_reg();
+                    buffer.push(reg);
+                }
+            }
         }
         (succ, &buffer[..])
     }
