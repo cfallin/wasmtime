@@ -1,4 +1,4 @@
-//! Generation of the throw-stub.
+//! Throw action computation (handler search).
 //!
 //! In order to throw exceptions from within Cranelift-compiled code,
 //! we provide a runtime function helper meant to be called by host

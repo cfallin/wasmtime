@@ -82,7 +82,7 @@ use crate::translate::translation_utils::{
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::{
-    self, AtomicRmwOp, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel,
+    self, AtomicRmwOp, ExceptionTag, InstBuilder, JumpTableData, MemFlags, Value, ValueLabel,
 };
 use cranelift_codegen::ir::{BlockArg, types::*};
 use cranelift_codegen::packed_option::ReservedValue;
@@ -454,6 +454,8 @@ pub fn translate_operator(
                 builder.seal_block(header)
             }
 
+            frame.restore_catch_handlers(&mut state.handlers);
+
             frame.truncate_value_stack_to_original_size(&mut state.stack);
             state
                 .stack
@@ -599,18 +601,43 @@ pub fn translate_operator(
             state.popn(return_count);
             state.reachable = false;
         }
-        /********************************** Exception handing **********************************/
-        Operator::Try { .. }
-        | Operator::Catch { .. }
-        | Operator::Throw { .. }
+        /********************************** Exception handling **********************************/
+        Operator::Catch { .. }
         | Operator::Rethrow { .. }
         | Operator::Delegate { .. }
         | Operator::CatchAll => {
             return Err(wasm_unsupported!(
-                "proposed exception handling operator {:?}",
-                op
+                "legacy exception handling proposal is not supported"
             ));
         }
+
+        Operator::TryTable { try_table } => {
+            // First, create a block on the control stack. This also
+            // updates the handler state that is attached to all calls
+            // made within this block.
+            let (params, results) = blocktype_params_results(validator, try_table.ty)?;
+            let next = block_with_params(builder, results.clone(), environ)?;
+            state.push_try_table_block(next, params.len(), results.len());
+
+            // Then, for each catch clause, create a block with the
+            // equivalent of `br` to the target (unboxing the exnref
+            // into stack values or pushing it directly, depending on
+            // the kind of clause).
+            for catch in &try_table.catches {
+                // This will register the block in `state.handlers`
+                // under the appropriate tag.
+                create_catch_block(builder, state, catch, environ, try_table.ty)?;
+            }
+        }
+
+        Operator::Throw { tag_index: _ } => {
+            todo!()
+        }
+
+        Operator::ThrowRef => {
+            todo!()
+        }
+
         /************************************ Calls ****************************************
          * The call instructions pop off their arguments from the stack and append their
          * return values to it. `call_indirect` needs environment support because there is an
@@ -2603,12 +2630,6 @@ pub fn translate_operator(
             state.push1(val);
         }
 
-        Operator::TryTable { .. } | Operator::ThrowRef => {
-            return Err(wasm_unsupported!(
-                "exception operators are not yet implemented"
-            ));
-        }
-
         Operator::ArrayNew { array_type_index } => {
             let array_type_index = TypeIndex::from_u32(*array_type_index);
             let (elem, len) = state.pop2();
@@ -3116,6 +3137,8 @@ fn translate_unreachable_operator(
             let stack = &mut state.stack;
             let control_stack = &mut state.control_stack;
             let frame = control_stack.pop().unwrap();
+
+            frame.restore_catch_handlers(&mut state.handlers);
 
             // Pop unused parameters from stack.
             frame.truncate_value_stack_to_original_size(stack);
@@ -4140,4 +4163,55 @@ fn bitcast_wasm_params(
         flags.set_endianness(ir::Endianness::Little);
         *arg = builder.ins().bitcast(t, flags, *arg);
     }
+}
+
+fn create_catch_block(
+    builder: &mut FunctionBuilder,
+    state: &mut FuncTranslationState,
+    catch: &wasmparser::Catch,
+    environ: &mut FuncEnvironment<'_>,
+    ty: wasmparser::BlockType,
+) -> WasmResult<()> {
+    let (is_ref, tag, label) = match catch {
+        wasmparser::Catch::One { tag, label } => (false, Some(*tag), *label),
+        wasmparser::Catch::OneRef { tag, label } => (true, Some(*tag), *label),
+        wasmparser::Catch::All { label } => (false, None, *label),
+        wasmparser::Catch::AllRef { label } => (true, None, *label),
+    };
+
+    // We always create a handler block with one blockparam for the
+    // one exception payload value that we use (`exn0` block-call
+    // argument). This one payload value is the `exnref`. We then
+    // generate the args for the actual branch to the handler block:
+    // we add unboxing code to load each value in the exception
+    // signature if a specific tag is expected (hence signature is
+    // known), and then append the `exnref` itself if we are compiling
+    // a `*Ref` variant.
+
+    let block = block_with_params(builder, [wasmparser::ValType::EXNREF], environ)?;
+    // Note: we can seal the block now because it will not have any
+    // preds with ordinary block-call args; only `exn0`; so SSA
+    // construction has all that it needs now.
+    builder.seal_block(block);
+    state
+        .handlers
+        .add_handler(tag.map(|t| ExceptionTag::from_u32(t)), block);
+    let exn_ref = builder.func.dfg.block_params(block)[0];
+
+    let mut params = vec![];
+
+    if let Some(tag) = tag {
+        // Get the specific struct type.
+    }
+    if is_ref {
+        params.push(exn_ref);
+    }
+
+    // Generate the branch itself.
+    let i = state.control_stack.len() - 1 - (label as usize);
+    let frame = &mut state.control_stack[i];
+    frame.set_branched_to_exit();
+    canonicalise_then_jump(builder, frame.br_destination(), &params);
+
+    Ok(())
 }
