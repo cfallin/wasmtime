@@ -28,7 +28,7 @@ impl GcTypeLayouts for NullTypeLayouts {
         common_struct_layout(ty, HEADER_SIZE, HEADER_ALIGN)
     }
 
-    fn exn_layout(&self, ty: &WasmExnType) -> GcExceptionLayout {
+    fn exn_layout(&self, ty: &WasmFuncType) -> GcExceptionLayout {
         common_exn_layout(ty, HEADER_SIZE, HEADER_ALIGN)
     }
 }

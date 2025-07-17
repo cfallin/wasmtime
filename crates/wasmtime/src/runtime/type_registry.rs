@@ -429,8 +429,9 @@ impl RegisteredType {
 
     /// Get this registered type's GC layout, if any.
     ///
-    /// Only struct and array types have GC layouts; function types do not have
-    /// layouts.
+    /// Struct and array types have GC layouts that store their
+    /// contents; function types have layouts corresponding to
+    /// exceptions associated with the given signature.
     #[cfg(feature = "gc")]
     pub fn layout(&self) -> Option<&GcLayout> {
         self.layout.as_ref()
@@ -932,13 +933,6 @@ impl TypeRegistryInner {
                     .expect("must have a GC runtime to register struct types")
                     .layouts()
                     .struct_layout(s)
-                    .into(),
-            ),
-            wasmtime_environ::WasmCompositeInnerType::Exn(e) => Some(
-                gc_runtime
-                    .expect("must have a GC runtime to register exception types")
-                    .layouts()
-                    .exn_layout(e)
                     .into(),
             ),
             wasmtime_environ::WasmCompositeInnerType::Cont(_) => None, // FIXME: #10248 stack switching support.

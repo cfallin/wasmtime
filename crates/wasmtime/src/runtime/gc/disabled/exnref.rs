@@ -1,7 +1,7 @@
 //! `exnref` implementation stubs when GC is disabled.
 
 use crate::{
-    AsContext, AsContextMut, ExnType, GcRefImpl, HeapType, Result, Rooted, Tag, Val,
+    AsContext, AsContextMut, GcRefImpl, HeapType, Result, Rooted, Tag, Val,
     store::{AutoAssertNoGc, StoreContextMut, StoreOpaque},
 };
 
@@ -32,11 +32,11 @@ impl ExnRef {
         Ok(0)
     }
 
-    pub fn ty(&self, _store: impl AsContext) -> Result<ExnType> {
+    pub fn ty(&self, _store: impl AsContext) -> Result<TagType> {
         match *self {}
     }
 
-    pub(crate) fn _ty(&self, _store: &StoreOpaque) -> Result<ExnType> {
+    pub(crate) fn _ty(&self, _store: &StoreOpaque) -> Result<TagType> {
         match *self {}
     }
 

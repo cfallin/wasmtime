@@ -15,11 +15,11 @@ pub mod drc;
 #[cfg(feature = "gc-null")]
 pub mod null;
 
+use crate::prelude::*;
 use crate::{
-    WasmArrayType, WasmCompositeInnerType, WasmCompositeType, WasmStorageType, WasmStructType,
-    WasmValType,
+    WasmArrayType, WasmCompositeInnerType, WasmCompositeType, WasmFieldType, WasmFuncType,
+    WasmStorageType, WasmStructType, WasmValType,
 };
-use crate::{WasmExnType, prelude::*};
 use core::alloc::Layout;
 
 /// Discriminant to check whether GC reference is an `i31ref` or not.
@@ -124,7 +124,7 @@ fn common_array_layout(
 /// exceptions). Returns `(size, align, fields)`.
 #[cfg(any(feature = "gc-null", feature = "gc-drc"))]
 fn common_struct_or_exn_layout(
-    fields: &[crate::WasmFieldType],
+    fields: impl Iterator<Item = WasmFieldType>,
     header_size: u32,
     header_align: u32,
 ) -> (u32, u32, Vec<GcStructLayoutField>) {
@@ -141,7 +141,6 @@ fn common_struct_or_exn_layout(
     let mut align = header_align;
 
     let fields = fields
-        .iter()
         .map(|f| {
             let field_size = byte_size_of_wasm_ty_in_gc_heap(&f.element_type);
             let offset = field(&mut size, &mut align, field_size);
@@ -169,7 +168,8 @@ fn common_struct_layout(
     assert!(header_size >= crate::VM_GC_HEADER_SIZE);
     assert!(header_align >= crate::VM_GC_HEADER_ALIGN);
 
-    let (size, align, fields) = common_struct_or_exn_layout(&ty.fields, header_size, header_align);
+    let (size, align, fields) =
+        common_struct_or_exn_layout(ty.fields.iter().cloned(), header_size, header_align);
 
     GcStructLayout {
         size,
@@ -182,7 +182,7 @@ fn common_struct_layout(
 /// size and alignment of the collector's GC header and its expected
 /// offset of the array length field.
 #[cfg(any(feature = "gc-null", feature = "gc-drc"))]
-fn common_exn_layout(ty: &WasmExnType, header_size: u32, header_align: u32) -> GcExceptionLayout {
+fn common_exn_layout(ty: &WasmFuncType, header_size: u32, header_align: u32) -> GcExceptionLayout {
     assert!(header_size >= crate::VM_GC_HEADER_SIZE);
     assert!(header_align >= crate::VM_GC_HEADER_ALIGN);
 
@@ -192,7 +192,14 @@ fn common_exn_layout(ty: &WasmExnType, header_size: u32, header_align: u32) -> G
     assert!(header_align >= 8);
     let header_size = header_size + 2 * u32::try_from(core::mem::size_of::<u32>()).unwrap();
 
-    let (size, align, fields) = common_struct_or_exn_layout(&ty.fields, header_size, header_align);
+    let (size, align, fields) = common_struct_or_exn_layout(
+        ty.params().iter().map(|valtype| WasmFieldType {
+            element_type: WasmStorageType::Val(*valtype),
+            mutable: false,
+        }),
+        header_size,
+        header_align,
+    );
 
     GcExceptionLayout {
         size,
@@ -224,7 +231,6 @@ pub trait GcTypeLayouts {
             WasmCompositeInnerType::Cont(_) => {
                 unimplemented!("Stack switching feature not compatbile with GC, yet")
             }
-            WasmCompositeInnerType::Exn(ty) => Some(self.exn_layout(ty).into()),
         }
     }
 
@@ -235,7 +241,7 @@ pub trait GcTypeLayouts {
     fn struct_layout(&self, ty: &WasmStructType) -> GcStructLayout;
 
     /// Get this collector's layout for the given exception type.
-    fn exn_layout(&self, ty: &WasmExnType) -> GcExceptionLayout;
+    fn exn_layout(&self, ty: &WasmFuncType) -> GcExceptionLayout;
 }
 
 /// The layout of a GC-managed object.

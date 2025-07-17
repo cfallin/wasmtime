@@ -176,8 +176,7 @@ impl Global {
                         | HeapType::ConcreteStruct(_)
                         | HeapType::Array
                         | HeapType::ConcreteArray(_)
-                        | HeapType::Exn
-                        | HeapType::ConcreteExn(_) => definition
+                        | HeapType::Exn => definition
                             .as_gc_ref()
                             .map(|r| {
                                 let r = store.unwrap_gc_store_mut().clone_gc_ref(r);

@@ -861,79 +861,6 @@ impl TypeTrace for WasmContType {
     }
 }
 
-/// WebAssembly exception type.
-///
-/// This "exception type" is not a Wasm language-level
-/// concept. Instead, it denotes an *exception object signature* --
-/// the types of the payload values.
-///
-/// In contrast, at the Wasm language level, exception objects are
-/// associated with specific tags, and these tags refer to their
-/// signatures (function types). However, tags are *nominal*: like
-/// memories and tables, a separate instance of a tag exists for every
-/// instance of the defining module, and these tag instances can be
-/// imported and exported. At runtime we handle tags like we do
-/// memories and tables, but these runtime instances do not exist in
-/// the type system here.
-///
-/// Because the Wasm type system does not have concrete `exn` types
-/// (i.e., the heap-type lattice has only top `exn` and bottom
-/// `noexn`), we are free to decide what we mean by "concrete type"
-/// here. Thus, we define an "exception type" to refer to the
-/// type-level *signature*. When a particular *exception object* is
-/// created in a store, it can be associated with a particular *tag
-/// instance* also in that store, and the compatibility is checked
-/// (the tag's function type must match the function type in the
-/// associated WasmExnType).
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct WasmExnType {
-    /// The function type from which we get our signature. We hold
-    /// this directly so that we can efficiently derive a FuncType
-    /// without re-interning the field types.
-    pub func_ty: EngineOrModuleTypeIndex,
-    /// The fields (payload values) that make up this exception type.
-    ///
-    /// While we could obtain these by looking up the `func_ty` above,
-    /// we also need to be able to derive a GC object layout from this
-    /// type descriptor without referencing other type descriptors; so
-    /// we directly inline the information here.
-    pub fields: Box<[WasmFieldType]>,
-}
-
-impl fmt::Display for WasmExnType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(exn ({})", self.func_ty)?;
-        for ty in self.fields.iter() {
-            write!(f, " {ty}")?;
-        }
-        write!(f, ")")
-    }
-}
-
-impl TypeTrace for WasmExnType {
-    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
-    where
-        F: FnMut(EngineOrModuleTypeIndex) -> Result<(), E>,
-    {
-        func(self.func_ty)?;
-        for f in self.fields.iter() {
-            f.trace(func)?;
-        }
-        Ok(())
-    }
-
-    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
-    where
-        F: FnMut(&mut EngineOrModuleTypeIndex) -> Result<(), E>,
-    {
-        func(&mut self.func_ty)?;
-        for f in self.fields.iter_mut() {
-            f.trace_mut(func)?;
-        }
-        Ok(())
-    }
-}
-
 /// Represents storage types introduced in the GC spec for array and struct fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum WasmStorageType {
@@ -1123,7 +1050,6 @@ pub enum WasmCompositeInnerType {
     Func(WasmFuncType),
     Struct(WasmStructType),
     Cont(WasmContType),
-    Exn(WasmExnType),
 }
 
 impl fmt::Display for WasmCompositeInnerType {
@@ -1133,7 +1059,6 @@ impl fmt::Display for WasmCompositeInnerType {
             Self::Func(ty) => fmt::Display::fmt(ty, f),
             Self::Struct(ty) => fmt::Display::fmt(ty, f),
             Self::Cont(ty) => fmt::Display::fmt(ty, f),
-            Self::Exn(ty) => fmt::Display::fmt(ty, f),
         }
     }
 }
@@ -1211,24 +1136,6 @@ impl WasmCompositeInnerType {
     pub fn unwrap_cont(&self) -> &WasmContType {
         self.as_cont().unwrap()
     }
-
-    #[inline]
-    pub fn is_exn(&self) -> bool {
-        matches!(self, Self::Exn(_))
-    }
-
-    #[inline]
-    pub fn as_exn(&self) -> Option<&WasmExnType> {
-        match self {
-            Self::Exn(f) => Some(f),
-            _ => None,
-        }
-    }
-
-    #[inline]
-    pub fn unwrap_exn(&self) -> &WasmExnType {
-        self.as_exn().unwrap()
-    }
 }
 
 impl TypeTrace for WasmCompositeType {
@@ -1241,7 +1148,6 @@ impl TypeTrace for WasmCompositeType {
             WasmCompositeInnerType::Func(f) => f.trace(func),
             WasmCompositeInnerType::Struct(a) => a.trace(func),
             WasmCompositeInnerType::Cont(c) => c.trace(func),
-            WasmCompositeInnerType::Exn(e) => e.trace(func),
         }
     }
 
@@ -1254,7 +1160,6 @@ impl TypeTrace for WasmCompositeType {
             WasmCompositeInnerType::Func(f) => f.trace_mut(func),
             WasmCompositeInnerType::Struct(a) => a.trace_mut(func),
             WasmCompositeInnerType::Cont(c) => c.trace_mut(func),
-            WasmCompositeInnerType::Exn(e) => e.trace_mut(func),
         }
     }
 }
@@ -1373,26 +1278,6 @@ impl WasmSubType {
     pub fn unwrap_cont(&self) -> &WasmContType {
         assert!(!self.composite_type.shared);
         self.composite_type.inner.unwrap_cont()
-    }
-
-    #[inline]
-    pub fn is_exn(&self) -> bool {
-        self.composite_type.inner.is_exn() && !self.composite_type.shared
-    }
-
-    #[inline]
-    pub fn as_exn(&self) -> Option<&WasmExnType> {
-        if self.composite_type.shared {
-            None
-        } else {
-            self.composite_type.inner.as_exn()
-        }
-    }
-
-    #[inline]
-    pub fn unwrap_exn(&self) -> &WasmExnType {
-        assert!(!self.composite_type.shared);
-        self.composite_type.inner.unwrap_exn()
     }
 }
 

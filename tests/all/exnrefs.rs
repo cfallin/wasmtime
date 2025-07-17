@@ -21,7 +21,7 @@ fn tag_objects() -> Result<()> {
 }
 
 #[test]
-fn exn_types() -> Result<()> {
+fn tag_types() -> Result<()> {
     let mut store = gc_store()?;
     let engine = store.engine();
 
@@ -36,25 +36,23 @@ fn exn_types() -> Result<()> {
 
     assert!(!Tag::eq(&tag, &tag2, &store));
 
-    let exntype = ExnType::from_tag_type(&tag_ty).unwrap();
-    let exntype2 = ExnType::new(store.engine(), [ValType::I32, ValType::I64]).unwrap();
-
-    assert!(exntype.matches(&exntype2));
-    assert!(exntype.tag_type().ty().matches(&tag_ty.ty()));
-
     Ok(())
 }
 
 #[test]
 fn exn_objects() -> Result<()> {
     let mut store = gc_store()?;
-    let exntype = ExnType::new(store.engine(), [ValType::I32, ValType::I64]).unwrap();
+    let tag_type = TagType::new(FuncType::new(
+        store.engine(),
+        [ValType::I32, ValType::I64],
+        [],
+    ));
 
     // Create a tag instance to associate with our exception objects.
-    let tag = Tag::new(&mut store, &exntype.tag_type()).unwrap();
+    let tag = Tag::new(&mut store, &tag_type).unwrap();
 
     // Create an allocator for the exn type.
-    let allocator = ExnRefPre::new(&mut store, exntype);
+    let allocator = ExnRefPre::new(&mut store, &tag_type);
 
     {
         let mut scope = RootScope::new(&mut store);
