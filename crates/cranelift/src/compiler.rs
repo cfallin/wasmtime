@@ -34,10 +34,11 @@ use wasmparser::{FuncValidatorAllocations, FunctionBody};
 use wasmtime_environ::obj::{ELF_WASMTIME_EXCEPTIONS, ELF_WASMTIME_FRAMES};
 use wasmtime_environ::{
     Abi, AddressMapSection, BuiltinFunctionIndex, CacheStore, CompileError, CompiledFunctionBody,
-    DefinedFuncIndex, FlagValue, FrameInstPos, FrameStackShape, FrameTableBuilder, FuncKey,
-    FunctionBodyData, FunctionLoc, HostCall, InliningCompiler, ModuleTranslation,
-    ModuleTypesBuilder, PtrSize, StackMapSection, StaticModuleIndex, TrapEncodingBuilder,
-    TrapSentinel, TripleExt, Tunables, VMOffsets, WasmFuncType, WasmValType,
+    DefinedFuncIndex, FlagValue, FrameInstPos, FrameStackShape, FrameStateSlotBuilder,
+    FrameTableBuilder, FrameTableDescriptorIndex, FuncKey, FunctionBodyData, FunctionLoc, HostCall,
+    InliningCompiler, ModuleTranslation, ModuleTypesBuilder, PtrSize, StackMapSection,
+    StaticModuleIndex, TrapEncodingBuilder, TrapSentinel, TripleExt, Tunables, VMOffsets,
+    WasmFuncType, WasmValType,
 };
 use wasmtime_unwinder::ExceptionTableBuilder;
 
@@ -56,7 +57,7 @@ struct CompilerContext {
     codegen_context: Context,
     incremental_cache_ctx: Option<IncrementalCacheContext>,
     validator_allocations: FuncValidatorAllocations,
-    debug_slot_descriptors: HashMap<FuncKey, Vec<u8>>,
+    debug_slot_descriptor: Option<FrameStateSlotBuilder>,
     abi: Option<Abi>,
 }
 
@@ -67,8 +68,8 @@ impl Default for CompilerContext {
             codegen_context: Context::new(),
             incremental_cache_ctx: None,
             validator_allocations: Default::default(),
+            debug_slot_descriptor: None,
             abi: None,
-            debug_slot_descriptors: HashMap::new(),
         }
     }
 }
@@ -331,11 +332,10 @@ impl wasmtime_environ::Compiler for Compiler {
                 .map_err(|e| CompileError::Codegen(e.to_string()))?;
         }
 
-        if let Some((_, slot_builder)) = &func_env.state_slot {
-            compiler
-                .cx
-                .debug_slot_descriptors
-                .insert(key, slot_builder.serialize());
+        let needs_gc_heap = func_env.needs_gc_heap();
+
+        if let Some((_, slot_builder)) = func_env.state_slot {
+            compiler.cx.debug_slot_descriptor = Some(slot_builder);
         }
 
         let timing = cranelift_codegen::timing::take_current();
@@ -344,7 +344,7 @@ impl wasmtime_environ::Compiler for Compiler {
 
         Ok(CompiledFunctionBody {
             code: box_dyn_any_compiler_context(Some(compiler.cx)),
-            needs_gc_heap: func_env.needs_gc_heap(),
+            needs_gc_heap,
         })
     }
 
@@ -570,12 +570,12 @@ impl wasmtime_environ::Compiler for Compiler {
     fn append_code(
         &self,
         obj: &mut Object<'static>,
-        funcs: &[(String, Box<dyn Any + Send + Sync>)],
+        funcs: &[(String, FuncKey, Box<dyn Any + Send + Sync>)],
         resolve_reloc: &dyn Fn(usize, FuncKey) -> usize,
     ) -> Result<Vec<(SymbolId, FunctionLoc)>> {
         log::trace!(
             "appending functions to object file: {:#?}",
-            funcs.iter().map(|(sym, _)| sym).collect::<Vec<_>>()
+            funcs.iter().map(|(sym, _, _)| sym).collect::<Vec<_>>()
         );
 
         let mut builder =
@@ -589,8 +589,19 @@ impl wasmtime_environ::Compiler for Compiler {
         let mut exception_tables = ExceptionTableBuilder::default();
         let mut frame_tables = FrameTableBuilder::default();
 
+        let mut frame_descriptors = HashMap::new();
+        if self.tunables.debug_instrumentation {
+            for (_, key, func) in &funcs {
+                let slot_to_fp_offset =
+                    frame_layout.frame_to_fp_offset - frame_layout.stackslots[slot].offset;
+                let descriptor = frame_layout.stackslots[slot].descriptor.clone();
+                builder.add_frame_descriptor(slot_to_fp_offset, descriptor);
+            }
+            todo!()
+        }
+
         let mut ret = Vec::with_capacity(funcs.len());
-        for (i, (sym, func)) in funcs.iter().enumerate() {
+        for (i, (sym, _key, func)) in funcs.iter().enumerate() {
             debug_assert!(!func.is::<Option<CompilerContext>>());
             debug_assert!(func.is::<CompiledFunction>());
             let func = func.downcast_ref::<CompiledFunction>().unwrap();
@@ -623,6 +634,7 @@ impl wasmtime_environ::Compiler for Compiler {
                     range.clone(),
                     func.buffer.debug_tags(),
                     frame_layout,
+                    &frame_descriptors,
                 )?;
             }
             builder.append_padding(self.linkopts.padding_between_functions);
@@ -1414,8 +1426,8 @@ impl FunctionCompiler<'_> {
             }
         }
 
-        for (key, data) in self.cx.debug_slot_descriptors.drain() {
-            compiled_function.add_debug_slot_descriptor(key, data);
+        if let Some(builder) = self.cx.debug_slot_descriptor.take() {
+            compiled_function.debug_slot_descriptor = Some(builder);
         }
 
         if body_and_tunables
@@ -1490,8 +1502,8 @@ fn clif_to_env_frame_tables<'a>(
     range: Range<u64>,
     tag_sites: impl Iterator<Item = MachBufferDebugTagList<'a>>,
     frame_layout: &MachBufferFrameLayout,
+    frame_descriptors: &HashMap<FuncKey, FrameTableDescriptorIndex>,
 ) -> anyhow::Result<()> {
-    let mut frame_descriptors = HashMap::new();
     for tag_site in tag_sites {
         // Split into frames; each has three debug tags.
         let mut frames = vec![];
@@ -1505,12 +1517,10 @@ fn clif_to_env_frame_tables<'a>(
                 panic!("Invalid tags");
             };
 
-            let frame_descriptor = *frame_descriptors.entry(slot).or_insert_with(|| {
-                let slot_to_fp_offset =
-                    frame_layout.frame_to_fp_offset - frame_layout.stackslots[slot].offset;
-                let descriptor = frame_layout.stackslots[slot].descriptor.clone();
-                builder.add_frame_descriptor(slot_to_fp_offset, descriptor)
-            });
+            let func_key = frame_layout.stackslots[slot].key;
+            let frame_descriptor = frame_descriptors
+                .get(&func_key)
+                .expect("frame descriptor not present for FuncKey ");
 
             frames.push((
                 wasm_pc,

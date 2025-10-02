@@ -1286,22 +1286,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
         }
     }
 
-    fn set_debug_tags(
-        &self,
-        builder: &mut FunctionBuilder,
-        stack: &FuncTranslationStacks,
-        srcloc: ir::SourceLoc,
-    ) {
-        if self.state_slot.is_some() {
-            let tags = self.debug_tags(stack, srcloc);
-            builder.set_debug_tags(tags);
-        }
-    }
-
     fn finish_debug_metadata(&self, builder: &mut FunctionBuilder) {
         if let Some((slot, b)) = &self.state_slot {
-            todo!("cfallin")
-            builder.func.sized_stack_slots[*slot].descriptor = b.serialize();
             builder.func.sized_stack_slots[*slot].size = b.size();
         }
     }
@@ -1330,12 +1316,12 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
     /// operator.
     pub(crate) fn debug_instrumentation_before_op(
         &mut self,
-        builder: &mut FunctionBuilder,
+        _builder: &mut FunctionBuilder,
         stack: &mut FuncTranslationStacks,
-        srcloc: ir::SourceLoc,
+        _srcloc: ir::SourceLoc,
     ) -> WasmResult<()> {
         if stack.reachable() {
-            self.set_debug_tags(builder, stack, srcloc);
+            todo!("sequence point");
         }
         Ok(())
     }

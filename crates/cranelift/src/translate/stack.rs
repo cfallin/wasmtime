@@ -7,7 +7,7 @@
 use cranelift_codegen::ir::{self, Block, ExceptionTag, Inst, Value};
 use cranelift_frontend::FunctionBuilder;
 use std::vec::Vec;
-use wasmtime_environ::{FrameStackShape, FrameStateSlotBuilder};
+use wasmtime_environ::FrameStackShape;
 
 /// Information about the presence of an associated `else` for an `if`, or the
 /// lack thereof.

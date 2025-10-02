@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use crate::{Relocation, mach_reloc_to_reloc, mach_trap_to_trap};
 use cranelift_codegen::{
     Final, MachBufferFinalized, MachBufferFrameLayout, MachSrcLoc, ValueLabelsRanges, ir,
     isa::unwind::CfaUnwindInfo, isa::unwind::UnwindInfo,
 };
 use wasmtime_environ::{
-    FilePos, FrameStateSlotBuilder, FuncKey, InstructionAddressMap, PrimaryMap, TrapInformation,
+    FilePos, FrameStateSlotBuilder, InstructionAddressMap, PrimaryMap, TrapInformation,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -65,10 +63,8 @@ pub struct CompiledFunction {
     /// The metadata for the compiled function, including unwind information
     /// the function address map.
     metadata: CompiledFunctionMetadata,
-    /// Debug metadata for each stackslot corresponding to a
-    /// source-level function (named by `FuncKey`) contained/inlined
-    /// into this compiled function.
-    debug_slot_descriptors: HashMap<FuncKey, Vec<u8>>,
+    /// Debug metadata for the top-level function's state slot.
+    pub debug_slot_descriptor: Option<FrameStateSlotBuilder>,
 }
 
 impl CompiledFunction {
@@ -85,7 +81,7 @@ impl CompiledFunction {
             name_map,
             alignment,
             metadata: Default::default(),
-            debug_slot_descriptors: HashMap::new(),
+            debug_slot_descriptor: None,
         }
     }
 
@@ -160,26 +156,6 @@ impl CompiledFunction {
     /// Set the CFA-based unwind info in the function's metadata.
     pub fn set_cfa_unwind_info(&mut self, unwind: CfaUnwindInfo) {
         self.metadata.cfa_unwind_info = Some(unwind);
-    }
-
-    /// Add a debug slot descriptor for a given original FuncKey
-    /// contained in this compiled function.
-    pub fn add_debug_slot_descriptor(&mut self, key: FuncKey, data: Vec<u8>) {
-        self.debug_slot_descriptors.insert(key, data);
-    }
-
-    /// Get all debug slot descriptors carried with this compiled
-    /// function.
-    pub fn debug_slot_descriptors(&self) -> impl Iterator<Item = (FuncKey, &'_ [u8])> + '_ {
-        self.debug_slot_descriptors
-            .iter()
-            .map(|(k, v)| (*k, &v[..]))
-    }
-
-    /// Get the debug slot descriptor for a particular original
-    /// function.
-    pub fn debug_slot_descriptor(&self, key: FuncKey) -> Option<&[u8]> {
-        self.debug_slot_descriptors.get(&key).map(|v| &v[..])
     }
 
     /// Returns the frame-layout metadata for this function.
