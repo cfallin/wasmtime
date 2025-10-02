@@ -56,6 +56,7 @@ struct CompilerContext {
     codegen_context: Context,
     incremental_cache_ctx: Option<IncrementalCacheContext>,
     validator_allocations: FuncValidatorAllocations,
+    debug_slot_descriptors: HashMap<FuncKey, Vec<u8>>,
     abi: Option<Abi>,
 }
 
@@ -67,6 +68,7 @@ impl Default for CompilerContext {
             incremental_cache_ctx: None,
             validator_allocations: Default::default(),
             abi: None,
+            debug_slot_descriptors: HashMap::new(),
         }
     }
 }
@@ -327,6 +329,13 @@ impl wasmtime_environ::Compiler for Compiler {
                 .codegen_context
                 .legalize(isa)
                 .map_err(|e| CompileError::Codegen(e.to_string()))?;
+        }
+
+        if let Some((_, slot_builder)) = &func_env.state_slot {
+            compiler
+                .cx
+                .debug_slot_descriptors
+                .insert(key, slot_builder.serialize());
         }
 
         let timing = cranelift_codegen::timing::take_current();
@@ -1403,6 +1412,10 @@ impl FunctionCompiler<'_> {
             if let Some(unwind_info) = unwind {
                 compiled_function.set_unwind_info(unwind_info);
             }
+        }
+
+        for (key, data) in self.cx.debug_slot_descriptors.drain() {
+            compiled_function.add_debug_slot_descriptor(key, data);
         }
 
         if body_and_tunables

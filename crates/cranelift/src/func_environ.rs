@@ -1201,7 +1201,6 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
                 ir::StackSlotKind::ExplicitSlot,
                 0,
                 0,
-                vec![],
             ));
 
             self.state_slot = Some((slot, frame_builder));
@@ -1301,6 +1300,7 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
 
     fn finish_debug_metadata(&self, builder: &mut FunctionBuilder) {
         if let Some((slot, b)) = &self.state_slot {
+            todo!("cfallin")
             builder.func.sized_stack_slots[*slot].descriptor = b.serialize();
             builder.func.sized_stack_slots[*slot].size = b.size();
         }
