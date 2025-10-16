@@ -1,6 +1,9 @@
 //! Tests for instrumentation-based debugging.
 
-use wasmtime::{AsContextMut, Caller, Config, Engine, Extern, Func, Instance, Module, Store};
+use wasmtime::{
+    AsContextMut, Caller, Config, DebugStepResult, Engine, Extern, Func, Instance, Module, Store,
+    Val,
+};
 
 fn get_module_and_store<C: Fn(&mut Config)>(
     c: C,
@@ -185,4 +188,118 @@ fn gc_access_during_call() -> anyhow::Result<()> {
             assert!(stack.done());
         },
     )
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn catch_host_error() -> anyhow::Result<()> {
+    let (module, mut store) = get_module_and_store(
+        |config| {
+            config.async_support(true);
+        },
+        r#"
+    (module
+      (import "" "hostcall" (func))
+      (func (export "main") (param i32 i32)
+        call 0))
+    "#,
+    )?;
+    let host_func = Func::wrap(&mut store, || -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("custom error"))
+    });
+    let instance = Instance::new_async(&mut store, &module, &[Extern::Func(host_func)]).await?;
+    let func = instance.get_func(&mut store, "main").unwrap();
+
+    let mut session = store
+        .with_debugger(|mut store| async move {
+            let mut results = [];
+            func.call_async(
+                store.as_context_mut(),
+                &[Val::I32(1), Val::I32(2)],
+                &mut results[..],
+            )
+            .await
+        })
+        .expect("debugging session not supported");
+
+    assert!(matches!(
+        session.next().await,
+        Some(DebugStepResult::HostcallError)
+    ));
+
+    {
+        let mut stack = session.debug_frames().expect("stack view is available");
+        assert!(!stack.done());
+        assert_eq!(stack.wasm_function_index_and_pc().unwrap().0.as_u32(), 0);
+        assert_eq!(stack.wasm_function_index_and_pc().unwrap().1, 53);
+        assert_eq!(stack.num_locals(), 2);
+        assert_eq!(stack.local(0).unwrap_i32(), 1);
+        assert_eq!(stack.local(1).unwrap_i32(), 2);
+        stack.move_to_parent();
+        assert!(stack.done());
+    }
+
+    assert!(matches!(
+        session.next().await,
+        Some(DebugStepResult::Error(_))
+    ));
+    assert!(session.next().await.is_none());
+    assert!(session.next().await.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn catch_exception() -> anyhow::Result<()> {
+    let (module, mut store) = get_module_and_store(
+        |config| {
+            config.async_support(true);
+        },
+        r#"
+    (module
+      (tag $t (param i32))
+      (func (export "main") (param i32)
+        (throw $t (i32.add (i32.const 1) (local.get 0)))))
+    "#,
+    )?;
+    let instance = Instance::new_async(&mut store, &module, &[]).await?;
+    let func = instance.get_func(&mut store, "main").unwrap();
+    let mut session = store
+        .with_debugger(|mut store| async move {
+            let mut results = [];
+            func.call_async(&mut store, &[Val::I32(100)], &mut results[..])
+                .await
+        })
+        .expect("debug session not supported");
+
+    let next = session.next().await.expect("there should be a next event");
+    match next {
+        DebugStepResult::UncaughtException(e) => {
+            assert_eq!(e.field(&mut session, 0).unwrap().unwrap_i32(), 101);
+        }
+        _ => panic!("unexpected step result {next:?}"),
+    }
+
+    {
+        let mut stack = session.debug_frames().expect("stack view is available");
+        assert!(!stack.done());
+        assert_eq!(stack.wasm_function_index_and_pc().unwrap().0.as_u32(), 0);
+        assert_eq!(stack.wasm_function_index_and_pc().unwrap().1, 44);
+        assert_eq!(stack.num_locals(), 1);
+        assert_eq!(stack.local(0).unwrap_i32(), 100);
+        assert_eq!(stack.num_stacks(), 1);
+        assert_eq!(stack.stack(0).unwrap_i32(), 101);
+        stack.move_to_parent();
+        assert!(stack.done());
+    }
+
+    assert!(matches!(
+        session.next().await,
+        Some(DebugStepResult::Error(_))
+    ));
+    assert!(session.next().await.is_none());
+    assert!(session.next().await.is_none());
+
+    Ok(())
 }

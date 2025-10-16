@@ -649,6 +649,13 @@ impl PriorFiberResumeState {
         let mut executor = self.executor;
         store.swap_executor(&mut executor);
 
+        // If a debug yield is causing our suspend, accumulate
+        // activations so that the stacks can be observed.
+        #[cfg(feature = "debug")]
+        {
+            store.debugging_state.push_activations(&tls);
+        }
+
         FiberResumeState {
             tls,
             mpk,

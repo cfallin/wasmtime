@@ -1266,7 +1266,7 @@ impl Default for VMStoreContext {
             last_wasm_entry_trap_handler: UnsafeCell::new(0),
             stack_chain: UnsafeCell::new(VMStackChain::Absent),
             async_guard_range: ptr::null_mut()..ptr::null_mut(),
-        }
+         }
     }
 }
 

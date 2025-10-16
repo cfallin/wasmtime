@@ -198,6 +198,12 @@ impl<T> StoreContextMut<'_, T> {
         &mut self,
         func: impl FnOnce(&mut StoreContextMut<'_, T>) -> R + Send + Sync,
     ) -> Result<R> {
+        #[cfg(feature = "debug")]
+        assert!(
+            self.0.debugging_state.debug_yield.is_none(),
+            "cannot start a new async call when we are unwinding fibers for a debug-yield"
+        );
+
         fiber::on_fiber(self.0, |me| func(&mut StoreContextMut(me))).await
     }
 }

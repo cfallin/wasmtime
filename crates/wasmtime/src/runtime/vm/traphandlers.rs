@@ -30,7 +30,7 @@ use wasmtime_unwinder::Handler;
 
 pub use self::backtrace::Backtrace;
 #[cfg(feature = "debug")]
-pub(crate) use self::backtrace::CurrentActivationBacktrace;
+pub(crate) use self::backtrace::{Activation, ActivationsBacktrace, FrameOrHost};
 #[cfg(feature = "gc")]
 pub use wasmtime_unwinder::Frame;
 
@@ -580,7 +580,7 @@ mod call_thread_state {
                 #[cfg(feature = "coredump")]
                 capture_coredump: store.engine().config().coredump_on_trap,
                 vm_store_context: store.vm_store_context_ptr(),
-                prev: Cell::new(ptr::null()),
+                prev: Cell::new(ptr::null_mut()),
                 old_state,
             }
         }
@@ -630,9 +630,10 @@ mod call_thread_state {
         /// Panics if this activation is already in a linked list (e.g.
         /// `self.prev` is set).
         #[inline]
-        pub(crate) unsafe fn push(&self) {
+        pub(crate) unsafe fn push(&mut self) {
             assert!(self.prev.get().is_null());
-            self.prev.set(tls::raw::replace(self));
+            let old = tls::raw::replace(self);
+            self.prev.set(old);
         }
 
         /// Pops this `CallThreadState` from the linked list stored in TLS.
@@ -645,7 +646,7 @@ mod call_thread_state {
         /// Panics if this activation isn't the head of the list.
         #[inline]
         pub(crate) unsafe fn pop(&self) {
-            let prev = self.prev.replace(ptr::null());
+            let prev = self.prev.replace(ptr::null_mut());
             let head = tls::raw::replace(prev);
             assert!(core::ptr::eq(head, self));
         }
@@ -661,7 +662,7 @@ mod call_thread_state {
         /// a store to just before this activation was called but saves off the
         /// fields of this activation to get restored/resumed at a later time.
         #[cfg(feature = "async")]
-        pub(super) unsafe fn swap(&self) {
+        pub(super) unsafe fn swap(&mut self) {
             unsafe fn swap<T>(a: &core::cell::UnsafeCell<T>, b: &mut T) {
                 unsafe { core::mem::swap(&mut *a.get(), b) }
             }
@@ -803,6 +804,26 @@ impl CallThreadState {
                 }
             }
         };
+
+        // If we are in a debug session and are about to unwind due to
+        // a trap, suspend our fiber first to produce a debug-step
+        // result.
+        #[cfg(feature = "debug")]
+        if store.debugging_state.active
+            && let UnwindState::UnwindToHost {
+                reason: UnwindReason::Trap(trap),
+                ..
+            } = &state
+        {
+            let yield_ = match trap {
+                TrapReason::User(_) => crate::DebugYield::TrapHostError,
+                TrapReason::Jit { trap, .. } | TrapReason::Wasm(trap) => {
+                    crate::DebugYield::TrapHost(*trap)
+                }
+                TrapReason::Exception => crate::DebugYield::TrapHostException,
+            };
+            store.debug_yield(yield_);
+        }
 
         // Avoid unused-variable warning in non-exceptions/GC build.
         let _ = store;
@@ -1091,7 +1112,7 @@ pub(crate) mod tls {
     pub(super) mod raw {
         use super::CallThreadState;
 
-        pub type Ptr = *const CallThreadState;
+        pub type Ptr = *mut CallThreadState;
 
         const _: () = {
             assert!(core::mem::align_of::<CallThreadState>() > 1);
@@ -1108,7 +1129,7 @@ pub(crate) mod tls {
 
         fn tls_set(ptr: Ptr, initialized: bool) {
             let encoded = ptr.map_addr(|a| a | usize::from(initialized));
-            crate::runtime::vm::sys::tls_set(encoded.cast_mut().cast::<u8>());
+            crate::runtime::vm::sys::tls_set(encoded.cast::<u8>());
         }
 
         #[cfg_attr(feature = "async", inline(never))] // see module docs
@@ -1162,7 +1183,7 @@ pub(crate) mod tls {
         //
         // If this pointer is null then that means that the fiber this state is
         // associated with has no activations.
-        state: raw::Ptr,
+        pub(crate) state: raw::Ptr,
     }
 
     // SAFETY: This is a relatively unsafe unsafe block and not really all that
@@ -1218,7 +1239,7 @@ pub(crate) mod tls {
             // current state then describes the youngest activation which is
             // restored via the loop below.
             unsafe {
-                if let Some(state) = self.state.as_ref() {
+                if let Some(state) = self.state.as_mut() {
                     state.swap();
                 }
             }
@@ -1228,7 +1249,7 @@ pub(crate) mod tls {
             // list as stored in the state of this current thread.
             let mut ptr = self.state;
             unsafe {
-                while let Some(state) = ptr.as_ref() {
+                while let Some(state) = ptr.as_mut() {
                     ptr = state.prev.replace(core::ptr::null_mut());
                     state.push();
                 }
@@ -1306,7 +1327,7 @@ pub(crate) mod tls {
                 let ptr = raw::get();
                 if ptr == thread_head {
                     unsafe {
-                        if let Some(state) = ret.state.as_ref() {
+                        if let Some(state) = ret.state.as_mut() {
                             state.swap();
                         }
                     }
@@ -1322,7 +1343,7 @@ pub(crate) mod tls {
                 // order.
                 unsafe {
                     (*ptr).pop();
-                    if let Some(state) = ret.state.as_ref() {
+                    if let Some(state) = ret.state.as_mut() {
                         (*ptr).prev.set(state);
                     }
                 }

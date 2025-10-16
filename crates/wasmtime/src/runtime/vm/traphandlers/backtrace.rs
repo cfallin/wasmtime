@@ -330,14 +330,41 @@ impl Backtrace {
 
 /// An iterator over one Wasm activation.
 #[cfg(feature = "debug")]
-pub(crate) struct CurrentActivationBacktrace<'a, T: 'static> {
+pub(crate) struct ActivationsBacktrace<'a, T: 'static> {
     pub(crate) store: StoreContextMut<'a, T>,
-    inner: Box<dyn Iterator<Item = Frame>>,
+    inner: Option<Box<dyn Iterator<Item = Frame>>>,
+    activations: Vec<Activation>,
+}
+
+/// Raw data for one Wasm activation on a stack, used for backtraces.
+#[derive(Clone, Debug)]
+pub(crate) struct Activation {
+    pub(crate) entry_fp: usize,
+    pub(crate) exit_fp: usize,
+    pub(crate) exit_pc: usize,
+}
+
+impl Activation {
+    unsafe fn to_iter(self, unwind: &'static dyn Unwind) -> Box<dyn Iterator<Item = Frame>> {
+        unsafe {
+            Box::new(wasmtime_unwinder::frame_iterator(
+                unwind,
+                self.exit_pc,
+                self.exit_fp,
+                self.entry_fp,
+            ))
+        }
+    }
 }
 
 #[cfg(feature = "debug")]
-impl<'a, T: 'static> CurrentActivationBacktrace<'a, T> {
-    /// Return an iterator over the most recent Wasm activation.
+impl<'a, T: 'static> ActivationsBacktrace<'a, T> {
+    /// Return an iterator over several Wasm activations that
+    /// currently exist on stack(s).
+    ///
+    /// Activations are provided in `activations` in
+    /// youngest-to-oldest order, and frames are walked in
+    /// youngest-to-oldest order within each activation.
     ///
     /// The iterator captures the store with a mutable borrow, and
     /// then yields it back at each frame. This ensures that the stack
@@ -360,26 +387,51 @@ impl<'a, T: 'static> CurrentActivationBacktrace<'a, T> {
     /// while within host code called from that activation (which will
     /// ordinarily be ensured if the `store`'s lifetime came from the
     /// host entry point) then everything will be sound.
-    pub(crate) unsafe fn new(store: StoreContextMut<'a, T>) -> CurrentActivationBacktrace<'a, T> {
-        // Get the initial exit FP, exit PC, and entry FP.
-        let vm_store_context = store.0.vm_store_context();
-        let exit_pc = unsafe { *(*vm_store_context).last_wasm_exit_pc.get() };
-        let exit_fp = unsafe { (*vm_store_context).last_wasm_exit_fp() };
-        let trampoline_fp = unsafe { *(*vm_store_context).last_wasm_entry_fp.get() };
-        let unwind = store.0.unwinder();
-        // Establish the iterator.
-        let inner = Box::new(unsafe {
-            wasmtime_unwinder::frame_iterator(unwind, exit_pc, exit_fp, trampoline_fp)
-        });
-
-        CurrentActivationBacktrace { store, inner }
+    pub(crate) unsafe fn new(
+        mut store: StoreContextMut<'a, T>,
+        mut activations: Vec<Activation>,
+    ) -> ActivationsBacktrace<'a, T> {
+        // Put activations in oldest-to-newest order so we can pop off the back.
+        use crate::AsContextMut;
+        activations.reverse();
+        let unwind = store.as_context_mut().0.unwinder();
+        let inner = activations.pop().map(|act| unsafe { act.to_iter(unwind) });
+        ActivationsBacktrace {
+            store,
+            inner,
+            activations,
+        }
     }
 }
 
+/// Either a Wasm frame or a placeholder for (an arbitrary number of
+/// frames of) host code. Provided as a result during walks over
+/// multiple activations, with host code separating each activation.
+pub(crate) enum FrameOrHost {
+    Frame(Frame),
+    Host,
+}
+
 #[cfg(feature = "debug")]
-impl<'a, T: 'static> Iterator for CurrentActivationBacktrace<'a, T> {
-    type Item = Frame;
+impl<'a, T: 'static> Iterator for ActivationsBacktrace<'a, T> {
+    type Item = FrameOrHost;
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        match self.inner.as_mut().and_then(|iter| iter.next()) {
+            Some(frame) => Some(FrameOrHost::Frame(frame)),
+            None => {
+                let unwind = self.store.0.unwinder();
+                self.inner = self
+                    .activations
+                    .pop()
+                    .map(|act| unsafe { act.to_iter(unwind) });
+                if self.inner.is_some() {
+                    // `Host` between activations, but if we're out of
+                    // activations, then the iterator is done.
+                    Some(FrameOrHost::Host)
+                } else {
+                    None
+                }
+            }
+        }
     }
 }

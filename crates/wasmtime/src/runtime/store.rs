@@ -76,7 +76,8 @@
 //! contents of `StoreOpaque`. This is an invariant that we, as the authors of
 //! `wasmtime`, must uphold for the public interface to be safe.
 
-use crate::RootSet;
+#[cfg(feature = "debug")]
+use crate::DebuggingStoreState;
 #[cfg(feature = "gc")]
 use crate::ThrownException;
 #[cfg(feature = "component-model-async")]
@@ -98,6 +99,7 @@ use crate::runtime::vm::{
     SignalHandler, StoreBox, Unwind, VMContext, VMFuncRef, VMGcRef, VMStore, VMStoreContext,
 };
 use crate::trampoline::VMHostGlobalContext;
+use crate::{DebugSession, RootSet, StoreWithDebugSession};
 use crate::{Engine, Module, Val, ValRaw, module::ModuleRegistry};
 #[cfg(feature = "gc")]
 use crate::{ExnRef, Rooted};
@@ -488,6 +490,13 @@ pub struct StoreOpaque {
     /// For example if Pulley is enabled and configured then this will store a
     /// Pulley interpreter.
     executor: Executor,
+
+    /// Whether a debugging session is currently active for this
+    /// store. This state is set while in host code and applies to
+    /// direct Wasm activations (but not re-entrant activations if
+    /// that Wasm calls back into the host).
+    #[cfg(feature = "debug")]
+    pub(crate) debugging_state: DebuggingStoreState,
 }
 
 /// Self-pointer to `StoreInner<T>` from within a `StoreOpaque` which is chiefly
@@ -696,6 +705,8 @@ impl<T> Store<T> {
             executor: Executor::new(engine),
             #[cfg(feature = "component-model")]
             concurrent_state: Default::default(),
+            #[cfg(feature = "debug")]
+            debugging_state: DebuggingStoreState::default(),
         };
         let mut inner = Box::new(StoreInner {
             inner,
@@ -1186,6 +1197,21 @@ impl<T> Store<T> {
     #[cfg(feature = "debug")]
     pub fn debug_frames(&mut self) -> Option<crate::DebugFrameCursor<'_, T>> {
         self.as_context_mut().debug_frames()
+    }
+
+    /// Start a "debug session".
+    ///
+    /// Runs an async body on a store within a debugger context,
+    /// providing intermediate debug-step results when execution
+    /// yields for any debug-related event.
+    ///
+    /// Returns `None` if debug instrumentation is not enabled for the
+    /// engine containing this store.
+    pub fn with_debugger<'a, F: Future<Output = anyhow::Result<()>> + 'a>(
+        &'a mut self,
+        body: impl FnOnce(StoreWithDebugSession<'a, T>) -> F,
+    ) -> Option<DebugSession<'a, T>> {
+        self.as_context_mut().with_debugger(body)
     }
 }
 
@@ -2491,10 +2517,19 @@ at https://bytecodealliance.org/security.
     }
 
     #[cfg(feature = "gc")]
-    fn take_pending_exception_rooted(&mut self) -> Option<Rooted<ExnRef>> {
+    pub(crate) fn take_pending_exception_rooted(&mut self) -> Option<Rooted<ExnRef>> {
         let vmexnref = self.take_pending_exception()?;
         let mut nogc = AutoAssertNoGc::new(self);
         Some(Rooted::new(&mut nogc, vmexnref.into()))
+    }
+
+    #[cfg(feature = "debug")]
+    pub(crate) fn take_pending_exception_owned_rooted(
+        &mut self,
+    ) -> Option<crate::OwnedRooted<ExnRef>> {
+        let vmexnref = self.take_pending_exception()?;
+        let mut nogc = AutoAssertNoGc::new(self);
+        Some(crate::OwnedRooted::new(&mut nogc, vmexnref.into()))
     }
 
     #[cfg(feature = "gc")]
