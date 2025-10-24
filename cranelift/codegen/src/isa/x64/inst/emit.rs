@@ -1817,6 +1817,33 @@ pub(crate) fn emit(
             // Nothing.
         }
 
+        Inst::SoftwareBreakpoint {
+            symbol,
+            arg,
+            offset,
+        } => {
+            // cmpb $0, offset(%r13)
+            // jz around
+            // call symbol
+            // around:
+
+            let addr = asm::GprMem::Mem(asm::Amode::ImmReg {
+                base: *arg,
+                simm32: asm::AmodeOffsetPlusKnownOffset {
+                    simm32: asm::AmodeOffset::new(*offset),
+                    offset: None,
+                },
+                trap: None,
+            });
+            asm::inst::cmpb_mi::new(addr, 0).emit(sink, info, state);
+            asm::inst::je_d8::new(5).emit(sink, info, state);
+            let end_of_jump = sink.cur_offset();
+            asm::inst::callq_d::new(0).emit(sink, info, state);
+            let end_of_call = sink.cur_offset();
+            assert_eq!(end_of_jump + 5, end_of_call);
+            sink.add_reloc_at_offset(end_of_call - 4, Reloc::X86CallPCRel4, symbol, -4);
+        }
+
         Inst::External { inst } => {
             let frame = state.frame_layout();
             emit_maybe_shrink(

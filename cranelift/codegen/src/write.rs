@@ -545,6 +545,12 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
         Trap { code, .. } => write!(w, " {code}"),
         CondTrap { arg, code, .. } => write!(w, " {arg}, {code}"),
         ExceptionHandlerAddress { block, imm, .. } => write!(w, " {block}, {imm}"),
+        SoftwareBreakpoint {
+            func_ref,
+            arg,
+            offset,
+            ..
+        } => write!(w, "{func_ref}, {arg}+{offset}"),
     }?;
 
     let mut sep = "  ; ";

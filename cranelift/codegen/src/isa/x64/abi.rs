@@ -102,6 +102,27 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         let is_fastcall = call_conv == CallConv::WindowsFastcall;
         let is_tail = call_conv == CallConv::Tail;
 
+        if call_conv == CallConv::Breakpoint {
+            return match args_or_rets {
+                ArgsOrRets::Args => {
+                    assert_eq!(params.len(), 1);
+                    args.push(ABIArg::Slots {
+                        slots: smallvec![ABIArgSlot::Reg {
+                            reg: regs::r13().to_real_reg().unwrap(),
+                            ty: ir::types::I64,
+                            extension: ir::ArgumentExtension::None,
+                        }],
+                        purpose: ir::ArgumentPurpose::Normal,
+                    });
+                    Ok((0, None))
+                }
+                ArgsOrRets::Rets => {
+                    assert_eq!(params.len(), 0);
+                    Ok((0, None))
+                }
+            };
+        }
+
         let mut next_gpr = 0;
         let mut next_vreg = 0;
         let mut next_stack: u32 = 0;
@@ -888,6 +909,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     ) -> PRegSet {
         match (call_conv_of_callee, is_exception) {
             (isa::CallConv::Tail, true) => ALL_CLOBBERS,
+            (isa::CallConv::Breakpoint, _) => BREAKPOINT_CLOBBERS,
             (isa::CallConv::Winch, _) => ALL_CLOBBERS,
             (isa::CallConv::SystemV, _) => SYSV_CLOBBERS,
             (isa::CallConv::WindowsFastcall, false) => WINDOWS_CLOBBERS,
@@ -931,6 +953,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 .cloned()
                 .filter(|r| is_callee_save_fastcall(r.to_reg(), flags.enable_pinned_reg()))
                 .collect(),
+            CallConv::Breakpoint => regs.iter().cloned().collect(),
             CallConv::Probestack => todo!("probestack?"),
             CallConv::AppleAarch64 => unreachable!(),
         };
@@ -1087,6 +1110,7 @@ fn get_intreg_for_retval(
         CallConv::Winch => is_last.then(|| regs::rax()),
         CallConv::Probestack => todo!(),
         CallConv::AppleAarch64 => unreachable!(),
+        CallConv::Breakpoint => panic!("Breakpoint does not support return values"),
     }
 }
 
@@ -1115,6 +1139,7 @@ fn get_fltreg_for_retval(call_conv: CallConv, fltreg_idx: usize, is_last: bool) 
         CallConv::Winch => is_last.then(|| regs::xmm0()),
         CallConv::Probestack => todo!(),
         CallConv::AppleAarch64 => unreachable!(),
+        CallConv::Breakpoint => panic!("Breakpoint does not support return values"),
     }
 }
 
@@ -1174,6 +1199,7 @@ fn compute_clobber_size(clobbers: &[Writable<RealReg>]) -> u32 {
 const WINDOWS_CLOBBERS: PRegSet = windows_clobbers();
 const SYSV_CLOBBERS: PRegSet = sysv_clobbers();
 pub(crate) const ALL_CLOBBERS: PRegSet = all_clobbers();
+const BREAKPOINT_CLOBBERS: PRegSet = breakpoint_clobbers();
 
 const fn windows_clobbers() -> PRegSet {
     use asm::gpr::enc::*;
@@ -1263,6 +1289,10 @@ const fn all_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM13))
         .with(regs::fpr_preg(XMM14))
         .with(regs::fpr_preg(XMM15))
+}
+
+const fn breakpoint_clobbers() -> PRegSet {
+    PRegSet::empty()
 }
 
 fn create_reg_env_systemv(enable_pinned_reg: bool) -> MachineEnv {

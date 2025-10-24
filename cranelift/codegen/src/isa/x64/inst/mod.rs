@@ -107,7 +107,8 @@ impl Inst {
             | Inst::Unwind { .. }
             | Inst::DummyUse { .. }
             | Inst::LabelAddress { .. }
-            | Inst::SequencePoint => true,
+            | Inst::SequencePoint
+            | Inst::SoftwareBreakpoint { .. } => true,
 
             Inst::Atomic128RmwSeq { .. } | Inst::Atomic128XchgSeq { .. } => emit_info.cmpxchg16b(),
 
@@ -833,6 +834,15 @@ impl PrettyPrint for Inst {
                 format!("sequence_point")
             }
 
+            Inst::SoftwareBreakpoint {
+                symbol,
+                arg,
+                offset,
+            } => {
+                let arg = pretty_print_reg(arg.to_reg(), 8);
+                format!("software_breakpoint {symbol:?} {arg}+{offset}")
+            }
+
             Inst::External { inst } => {
                 format!("{inst}")
             }
@@ -1199,6 +1209,10 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         }
 
         Inst::SequencePoint { .. } => {}
+
+        Inst::SoftwareBreakpoint { arg, .. } => {
+            collector.reg_fixed_use(arg, regs::r13());
+        }
 
         Inst::External { inst } => {
             inst.visit(&mut external::RegallocVisitor { collector });

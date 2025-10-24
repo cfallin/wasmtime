@@ -132,7 +132,7 @@ pub struct ArgPair {
 /// pseudoinst. The pseudoinst holds a vec of `RetPair` structs.
 #[derive(Clone, Debug)]
 pub struct RetPair {
-    /// The vreg that is returned by this pseudionst.
+    /// The vreg that is returned by this pseudoinst.
     pub vreg: Reg,
     /// The preg that the arg is returned through; this constrains the vreg's
     /// placement at the pseudoinst.
@@ -1222,7 +1222,8 @@ impl<M: ABIMachineSpec> Callee<M> {
                 || call_conv == isa::CallConv::Cold
                 || call_conv == isa::CallConv::WindowsFastcall
                 || call_conv == isa::CallConv::AppleAarch64
-                || call_conv == isa::CallConv::Winch,
+                || call_conv == isa::CallConv::Winch
+                || call_conv == isa::CallConv::Breakpoint,
             "Unsupported calling convention: {call_conv:?}"
         );
 

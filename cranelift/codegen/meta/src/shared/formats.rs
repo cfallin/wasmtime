@@ -43,6 +43,7 @@ pub(crate) struct Formats {
     pub(crate) unary_ieee64: Rc<InstructionFormat>,
     pub(crate) unary_imm: Rc<InstructionFormat>,
     pub(crate) exception_handler_address: Rc<InstructionFormat>,
+    pub(crate) software_breakpoint: Rc<InstructionFormat>,
 }
 
 impl Formats {
@@ -224,6 +225,12 @@ impl Formats {
             exception_handler_address: Builder::new("ExceptionHandlerAddress")
                 .raw_block()
                 .imm(&imm.imm64)
+                .build(),
+
+            software_breakpoint: Builder::new("SoftwareBreakpoint")
+                .value()
+                .imm(&entities.func_ref)
+                .imm(&imm.offset32)
                 .build(),
         }
     }

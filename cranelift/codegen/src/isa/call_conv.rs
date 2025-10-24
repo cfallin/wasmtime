@@ -45,6 +45,18 @@ pub enum CallConv {
     /// defines no callee-save registers, and restricts the number of return
     /// registers to one integer, and one floating point.
     Winch,
+    /// The breakpoint-function calling convention.
+    ///
+    /// The distinguishing feature of this calling convention is that
+    /// all registers are callee-saved except for one fixed argument,
+    /// and that fixed argument is chosen to live in a register that
+    /// is callee-saved in Tail. This allows software breakpoints to
+    /// not cause spills or moves in the usual case, and allows the
+    /// breakpoint context arg (which is used to load breakpoint flags
+    /// and is passed into the breakpoint function) to live in a
+    /// register that does not have to be moved or spilled over other
+    /// callsites.
+    Breakpoint,
 }
 
 impl CallConv {
@@ -123,6 +135,7 @@ impl fmt::Display for CallConv {
             Self::AppleAarch64 => "apple_aarch64",
             Self::Probestack => "probestack",
             Self::Winch => "winch",
+            Self::Breakpoint => "breakpoint",
         })
     }
 }
@@ -139,6 +152,7 @@ impl str::FromStr for CallConv {
             "apple_aarch64" => Ok(Self::AppleAarch64),
             "probestack" => Ok(Self::Probestack),
             "winch" => Ok(Self::Winch),
+            "breakpoint" => Ok(Self::Breakpoint),
             _ => Err(()),
         }
     }

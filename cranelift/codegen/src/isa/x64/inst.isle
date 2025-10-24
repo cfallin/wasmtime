@@ -323,6 +323,11 @@
        ;; A pseudoinstruction that serves as a sequence point.
        (SequencePoint)
 
+       ;; A pseudoinstruction for software breakpoint checks.
+       (SoftwareBreakpoint (symbol ExternalName)
+                           (arg Gpr)
+                           (offset i32))
+
        ;; An instruction assembled outside of cranelift-codegen.
        (External (inst AssemblerInst))))
 
@@ -4105,3 +4110,8 @@
 (decl x64_sequence_point () SideEffectNoResult)
 (rule (x64_sequence_point)
       (SideEffectNoResult.Inst (MInst.SequencePoint)))
+
+;; Helper for creating a `SoftwareBreakpoint` instruction.
+(decl x64_software_breakpoint (ExternalName Gpr Offset32) SideEffectNoResult)
+(rule (x64_software_breakpoint name arg offset)
+      (SideEffectNoResult.Inst (MInst.SoftwareBreakpoint name arg offset)))

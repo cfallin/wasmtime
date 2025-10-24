@@ -76,7 +76,7 @@ use crate::ir::{
     JumpTable, MemFlags, MemoryTypeData, Opcode, SigRef, StackSlot, Type, Value, ValueDef,
     ValueList, types,
 };
-use crate::isa::TargetIsa;
+use crate::isa::{self, TargetIsa};
 use crate::print_errors::pretty_verifier_error;
 use crate::settings::FlagsOrIsa;
 use crate::timing;
@@ -732,6 +732,12 @@ impl<'a> Verifier<'a> {
             ExceptionHandlerAddress { block, imm, .. } => {
                 self.verify_block(inst, block, errors)?;
                 self.verify_try_call_handler_index(inst, block, imm.into(), errors)?;
+            }
+
+            SoftwareBreakpoint { func_ref, arg, .. } => {
+                self.verify_func_ref(inst, func_ref, errors)?;
+                self.verify_breakpoint_signature(inst, func_ref, errors)?;
+                self.verify_value(inst, arg, errors)?;
             }
 
             // Exhaustive list so we can't forget to add new formats
@@ -2028,13 +2034,44 @@ impl<'a> Verifier<'a> {
     pub fn debug_tags(&self, inst: Inst, errors: &mut VerifierErrors) -> VerifierStepResult {
         // Tags can only be present on calls and sequence points.
         let op = self.func.dfg.insts[inst].opcode();
-        let tags_allowed = op.is_call() || op == Opcode::SequencePoint;
+        let tags_allowed =
+            op.is_call() || op == Opcode::SequencePoint || op == Opcode::SoftwareBreakpoint;
         let has_tags = self.func.debug_tags.has(inst);
         if has_tags && !tags_allowed {
             return errors.fatal((
                 inst,
                 "debug tags present on non-call, non-sequence point instruction".to_string(),
             ));
+        }
+
+        Ok(())
+    }
+
+    fn verify_breakpoint_signature(
+        &self,
+        inst: Inst,
+        func_ref: FuncRef,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        // Ensure that the signature has only one argument, of the
+        // native pointer type, and no return value; that it is
+        // `colocated`; and that it is of the `breakpoint` calling
+        // convention.
+        if !self.func.dfg.ext_funcs[func_ref].colocated {
+            return errors.fatal((inst, "breakpoint function is not colocated"));
+        }
+        let sig = self.func.dfg.ext_funcs[func_ref].signature;
+        let sig_data = &self.func.dfg.signatures[sig];
+        if sig_data.call_conv != isa::CallConv::Breakpoint {
+            return errors.fatal((inst, "invalid calling conventionfor breakpoint function"));
+        }
+        if sig_data.params.len() != 1 || sig_data.returns.len() != 0 {
+            return errors.fatal((inst, "invalid signature for breakpoint function"));
+        }
+        if let Some(isa) = self.isa
+            && sig_data.params[0].value_type != isa.pointer_type()
+        {
+            return errors.fatal((inst, "invalid signature for breakpoint function"));
         }
 
         Ok(())

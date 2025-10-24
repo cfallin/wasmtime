@@ -3418,6 +3418,18 @@ impl<'a> Parser<'a> {
                 let imm = self.match_imm64("expected immediate handler index")?;
                 InstructionData::ExceptionHandlerAddress { opcode, block, imm }
             }
+            InstructionFormat::SoftwareBreakpoint => {
+                let func_ref = self.match_fn("expected function reference")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let arg = self.match_value("expected SSA value address")?;
+                let offset = self.optional_offset32()?;
+                InstructionData::SoftwareBreakpoint {
+                    opcode,
+                    func_ref,
+                    arg,
+                    offset,
+                }
+            }
         };
         Ok(idata)
     }

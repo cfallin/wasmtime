@@ -3918,4 +3918,37 @@ pub(crate) fn define(
         )
         .other_side_effects(),
     );
+
+    ig.push(
+        Inst::new(
+            "software_breakpoint",
+            r#"
+            An operator that compiles to an efficient, hand-optimized sequence
+            that loads a byte flag from an offset in an array of breakpoint flags,
+            and if nonzero, performs a call with the array address as an
+            argument and the `breakpoint` calling convention to the specified
+            function.
+
+            The intended use is to have an array with fixed indices per static
+            program point, and with any other context needed by the breakpoint
+            routine below that array. This permits the instruction to have only
+            one argument rather than two (flag array, and context arg) and
+            thus reduces register pressure when breakpoints are inserted
+            throughout the code: only one register will be needed for the
+            ubiquitous "breakpoint context".
+
+            This is a single operator to allow for a tight encoding (three
+            instructions on x86-64 and aarch64, for example) and to ensure
+            that compile time does not blow up when a breakpoint location
+            exists for every original source location.
+            "#,
+            &formats.software_breakpoint,
+        )
+        .operands_in(vec![
+            Operand::new("FN", &entities.func_ref).with_doc("breakpoint function to call"),
+            Operand::new("p", iAddr).with_doc("Address of flag array and breakpoint context"),
+            Operand::new("Offset", &imm.offset32).with_doc("Offset of breakpoint flag to load"),
+        ])
+        .other_side_effects(),
+    );
 }

@@ -5065,3 +5065,9 @@
 (rule (lower (sequence_point))
       (side_effect
        (x64_sequence_point)))
+
+;; Rules for `software_breakpoint` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (software_breakpoint (func_ref_data _ name _) arg (offset32 offset)))
+      (side_effect
+       (x64_software_breakpoint name arg offset)))
