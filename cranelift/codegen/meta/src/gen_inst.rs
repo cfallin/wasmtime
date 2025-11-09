@@ -61,7 +61,7 @@ fn gen_formats(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter) {
 /// 16 bytes on 64-bit architectures. If more space is needed to represent an instruction, use a
 /// `ValueList` to store the additional information out of line.
 fn gen_instruction_data(formats: &[Rc<InstructionFormat>], fmt: &mut Formatter) {
-    fmt.line("#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]");
+    fmt.line("#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]");
     fmt.line(r#"#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]"#);
     fmt.line("#[allow(missing_docs, reason = \"generated code\")]");
     fmt.add_block("pub enum InstructionData", |fmt| {
@@ -600,7 +600,7 @@ fn gen_opcodes(all_inst: &AllInstructions, fmt: &mut Formatter) {
     "#,
     );
     fmt.line("#[repr(u8)]");
-    fmt.line("#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]");
+    fmt.line("#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]");
     fmt.line(
         r#"#[cfg_attr(
             feature = "enable-serde",

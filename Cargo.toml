@@ -425,6 +425,7 @@ tokio-util = "0.7.16"
 arbtest = "0.3.2"
 rayon = "1.5.3"
 regex = "1.9.1"
+egg = "0.10.0"
 
 # =============================================================================
 #
@@ -548,6 +549,7 @@ gc-null = ["gc", "wasmtime/gc-null", "wasmtime-cli-flags/gc-null"]
 pulley = ["wasmtime-cli-flags/pulley"]
 stack-switching = ["wasmtime/stack-switching", "wasmtime-cli-flags/stack-switching"]
 debug = ["wasmtime-cli-flags/debug", "wasmtime/debug"]
+full-egraph = ["wasmtime/full-egraph"]
 
 # CLI subcommands for the `wasmtime` executable. See `wasmtime $cmd --help`
 # for more information on each subcommand.
