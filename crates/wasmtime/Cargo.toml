@@ -425,3 +425,5 @@ debug = [
 
 # Enables support for defining compile-time builtins.
 compile-time-builtins = ['dep:wasm-compose', 'dep:tempfile']
+
+full-egraph = ["wasmtime-cranelift?/full-egraph"]

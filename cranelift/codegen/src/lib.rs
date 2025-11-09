@@ -79,6 +79,8 @@ mod constant_hash;
 mod context;
 mod ctxhash;
 mod egraph;
+#[cfg(feature = "full-egraph")]
+mod full_egraph;
 mod inst_predicates;
 mod isle_prelude;
 mod legalizer;

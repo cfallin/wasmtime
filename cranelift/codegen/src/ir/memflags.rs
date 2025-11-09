@@ -59,7 +59,7 @@ impl AliasRegion {
 /// any memory access uses the native endianness determined by the target ISA.  This can
 /// be overridden for individual accesses by explicitly specifying little- or big-endian
 /// semantics via the flags.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct MemFlags {
     // Initialized to all zeros to have all flags have their default value.

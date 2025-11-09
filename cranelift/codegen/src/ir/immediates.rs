@@ -54,7 +54,7 @@ impl IntoBytes for Vec<u8> {
 ///
 /// An `Imm64` operand can also be used to represent immediate values of smaller integer types by
 /// sign-extending to `i64`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Imm64(i64);
 
@@ -325,7 +325,7 @@ pub type Uimm8 = u8;
 /// A 32-bit unsigned integer immediate operand.
 ///
 /// This is used to represent sizes of memory objects.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Uimm32(u32);
 
@@ -381,7 +381,7 @@ impl FromStr for Uimm32 {
 /// A 128-bit immediate operand.
 ///
 /// This is used as an immediate value in SIMD instructions.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct V128Imm(pub [u8; 16]);
 
@@ -421,7 +421,7 @@ impl From<u128> for V128Imm {
 ///
 /// This is used to encode an immediate offset for load/store instructions. All supported ISAs have
 /// a maximum load/store offset that fits in an `i32`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct Offset32(i32);
 
@@ -536,7 +536,7 @@ macro_rules! ieee_float {
         /// [PartialOrd] respects IEEE754 semantics.
         ///
         /// All bit patterns are allowed.
-        #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+        #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, Hash)]
         #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
         #[repr(C)]
         pub struct $name {
