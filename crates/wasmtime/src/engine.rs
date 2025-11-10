@@ -463,6 +463,10 @@ information about this check\
             | "tls_model" // wasmtime doesn't use tls right now
             | "opt_level" // opt level doesn't change semantics
             | "enable_alias_analysis" // alias analysis-based opts don't change semantics
+            | "aegraph_passes"
+            | "aegraph_simple_rewrite"
+            | "aegraph_enable_subsume"
+            | "aegraph_enable_remat"
             | "probestack_size_log2" // probestack above asserted disabled
             | "regalloc" // shouldn't change semantics
             | "enable_incremental_compilation_cache_checks" // shouldn't change semantics

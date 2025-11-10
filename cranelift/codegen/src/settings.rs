@@ -489,6 +489,7 @@ mod tests {
         let expected = r#"[shared]
 regalloc_algorithm = "backtracking"
 opt_level = "none"
+aegraph_passes = 1
 tls_model = "none"
 stack_switch_model = "none"
 libcall_call_conv = "isa_default"
@@ -498,6 +499,9 @@ bb_padding_log2_minus_one = 0
 log2_min_function_alignment = 0
 regalloc_checker = false
 regalloc_verbose_logs = false
+aegraph_simple_rewrite = false
+aegraph_enable_subsume = true
+aegraph_enable_remat = true
 enable_alias_analysis = true
 enable_verifier = true
 enable_pcc = false
