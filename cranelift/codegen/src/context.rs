@@ -183,7 +183,9 @@ impl Context {
         self.func.dfg.resolve_all_aliases();
 
         if opt_level != OptLevel::None {
-            self.egraph_pass(isa, ctrl_plane)?;
+            for _ in 0..isa.flags().aegraph_passes() {
+                self.egraph_pass(isa, ctrl_plane)?;
+            }
         }
 
         Ok(())

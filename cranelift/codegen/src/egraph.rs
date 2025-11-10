@@ -4,6 +4,7 @@ use crate::alias_analysis::{AliasAnalysis, LastStores};
 use crate::ctxhash::{CtxEq, CtxHash, NullCtx};
 use crate::cursor::{Cursor, CursorPosition, FuncCursor};
 use crate::dominator_tree::DominatorTree;
+use crate::egraph::cost::Cost;
 use crate::egraph::elaborate::Elaborator;
 use crate::inst_predicates::{is_mergeable_for_egraph, is_pure_for_egraph};
 use crate::ir::pcc::Fact;
@@ -295,6 +296,9 @@ where
     /// of this expression into an eclass and returning the `Value`
     /// that represents that eclass.
     fn optimize_pure_enode(&mut self, inst: Inst) -> Value {
+        let enable_subsume = self.flags.aegraph_enable_subsume();
+        let enable_simple_rewrite = self.flags.aegraph_simple_rewrite();
+
         // A pure node always has exactly one result.
         let orig_value = self.func.dfg.first_result(inst);
 
@@ -348,6 +352,40 @@ where
         optimized_values.sort_unstable();
         optimized_values.dedup();
 
+        // If subsumes are enabled, pick a value to subsume the
+        // original. Otherwise if simple-rewrite mode is enabled, pick
+        // just one value from the rewrites (if any). If neither is
+        // true, we'll generate a union tree of all rewrite results.
+        let single_rewrite_value = if enable_subsume
+            && let Some(&subsuming_value) = optimized_values
+                .iter()
+                .find(|&value| ctx.subsume_values.contains(value))
+        {
+            Some(subsuming_value)
+        } else if enable_simple_rewrite && optimized_values.len() > 0 {
+            let cost_func = |val: Value| -> Cost {
+                match ctx.func.dfg.value_def(val) {
+                    ValueDef::Result(inst, _) => {
+                        let inst_data = &ctx.func.dfg.insts[inst];
+                        Cost::of_pure_op(
+                            inst_data.opcode(),
+                            // Take the best according to raw opcode
+                            // cost, not args.
+                            core::iter::empty(),
+                        )
+                    }
+                    _ => Cost::zero(),
+                }
+            };
+            optimized_values
+                .iter()
+                .map(|&val| (cost_func(val), val))
+                .max_by_key(|(cost, _)| *cost)
+                .map(|(_, val)| val)
+        } else {
+            None
+        };
+
         trace!("  -> returned from ISLE: {orig_value} -> {optimized_values:?}");
 
         // Construct a union-node tree representing the new eclass
@@ -355,13 +393,10 @@ where
         // marked "subsume", take only that value. Otherwise,
         // sequentially build the chain over the original value and
         // all returned values.
-        let result_value = if let Some(&subsuming_value) = optimized_values
-            .iter()
-            .find(|&value| ctx.subsume_values.contains(value))
-        {
+        let result_value = if let Some(single_value) = single_rewrite_value {
             optimized_values.clear();
             ctx.stats.pure_inst_subsume += 1;
-            subsuming_value
+            single_value
         } else {
             let mut union_value = orig_value;
             let mut eclass_size = ctx.eclass_size[orig_value] + 1;
@@ -1020,6 +1055,7 @@ impl<'a> EgraphPass<'a> {
             self.loop_analysis,
             &self.remat_values,
             &mut self.stats,
+            &self.flags,
             self.ctrl_plane,
         );
         elaborator.elaborate();

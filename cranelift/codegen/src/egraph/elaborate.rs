@@ -10,6 +10,7 @@ use crate::inst_predicates::is_pure_for_egraph;
 use crate::ir::{Block, Function, Inst, Value, ValueDef};
 use crate::loop_analysis::{Loop, LoopAnalysis};
 use crate::scoped_hash_map::ScopedHashMap;
+use crate::settings::Flags;
 use crate::trace;
 use alloc::vec::Vec;
 use cranelift_control::ControlPlane;
@@ -66,6 +67,8 @@ pub(crate) struct Elaborator<'a> {
     /// Stats for various events during egraph processing, to help
     /// with optimization of this infrastructure.
     stats: &'a mut Stats,
+    /// Cranelift flags/settings.
+    flags: &'a Flags,
     /// Chaos-mode control-plane so we can test that we still get
     /// correct results when our heuristics make bad decisions.
     ctrl_plane: &'a mut ControlPlane,
@@ -144,6 +147,7 @@ impl<'a> Elaborator<'a> {
         loop_analysis: &'a LoopAnalysis,
         remat_values: &'a FxHashSet<Value>,
         stats: &'a mut Stats,
+        flags: &'a Flags,
         ctrl_plane: &'a mut ControlPlane,
     ) -> Self {
         let num_values = func.dfg.num_values();
@@ -164,6 +168,7 @@ impl<'a> Elaborator<'a> {
             block_stack: vec![],
             remat_copies: FxHashMap::default(),
             stats,
+            flags,
             ctrl_plane,
         }
     }
@@ -419,6 +424,7 @@ impl<'a> Elaborator<'a> {
         insert_block: Block,
         before: Inst,
         arg: &mut ElaboratedValue,
+        flags: &Flags,
         stats: &mut Stats,
     ) -> bool {
         // TODO (#7313): we may want to consider recursive
@@ -427,7 +433,10 @@ impl<'a> Elaborator<'a> {
         // would affect, e.g., adds-with-one-constant-arg, which are
         // currently rematerialized. Right now we don't do this, to
         // avoid the need for another fixpoint loop here.
-        if arg.in_block != insert_block && remat_values.contains(&arg.value) {
+        if flags.aegraph_enable_remat()
+            && arg.in_block != insert_block
+            && remat_values.contains(&arg.value)
+        {
             let new_value = match remat_copies.entry((insert_block, arg.value)) {
                 HashEntry::Occupied(o) => *o.get(),
                 HashEntry::Vacant(v) => {
@@ -641,6 +650,7 @@ impl<'a> Elaborator<'a> {
                             insert_block,
                             before,
                             arg_value,
+                            &self.flags,
                             &mut self.stats,
                         ) {
                             remat_arg = true;
@@ -788,6 +798,7 @@ impl<'a> Elaborator<'a> {
                     block,
                     inst,
                     &mut new_arg,
+                    &self.flags,
                     &mut self.stats,
                 );
                 trace!("   -> rewrote arg to {:?}", new_arg);

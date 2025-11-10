@@ -57,6 +57,82 @@ pub(crate) fn define() -> SettingGroup {
         vec!["none", "speed", "speed_and_size"],
     );
 
+    settings.add_num(
+        "aegraph_passes",
+        "Number of times to run the aegraph optimizer.",
+        r#"
+            Number of times to run the aegraph optimizer.
+
+            Running more than once may enable the optimizer to capture
+            some additional benefit that the lack of full equality saturation
+            misses in one pass.
+
+            The default value is `1`.
+        "#,
+        1,
+    );
+
+    settings.add_bool(
+        "aegraph_simple_rewrite",
+        "Enable a simple-rewrite mode in aegraph pass that avoids unions.",
+        r#"
+            Enables a single-rewrite mode in the aegraph pass.
+
+            By default, the aegraph pass can take multiple rewrite possibilities
+            from the set of rewrite rules and represent all options, and
+            cascade this into multiple possible representations seen by
+            later rewrite rules, etc. The "best" option is chosen only at
+            the end, during extraction/elaboration.
+
+            This option instead makes the aegraph pass more like a conventional
+            rewriter: the single best rewrite, if any, is taken from the rewrite
+            rules, and the SSA value is destructively replaced in the IR during
+            the optimization pass.
+
+            The default value is `false`.
+        "#,
+        false,
+    );
+
+    settings.add_bool(
+        "aegraph_enable_subsume",
+        "Enable the `subsume` feature in aegraph rewriting.",
+        r#"
+            Enables the `subsume` functionality in the aegraph optimizer.
+
+            When enabled, certain optimization rules specify that they subsume
+            the existing value(s) in the eclass as the best representation,
+            and no further optimization effort is necessary. For example,
+            a constant value is better than any runtime computation.
+
+            This is an optimization to avoid some egraph blowup and computation
+            time during compilation, and is not strictly necessary. Turning this
+            feature flag off causes the rewriter to ignore `subsume` hints.
+
+            The default value is `true`.
+        "#,
+        true,
+    );
+
+    settings.add_bool(
+        "aegraph_enable_remat",
+        "Enable rematerialization in aegraph framework.",
+        r#"
+            Enables the `remat` functionality in the aegraph optimizer.
+
+            When enabled, certain optimization rules specify that their
+            result should be rematerialized once per basic block. For example,
+            constants are better rematerialized than saved in a register.
+
+            When disabled, all values are treated equivalently and generated
+            only once, letting regalloc hold the value in a register (possibly
+            spilling and reloading) to flow to all uses.
+
+            The default value is `true`.
+        "#,
+        true,
+    );
+
     settings.add_bool(
         "enable_alias_analysis",
         "Do redundant-load optimizations with alias analysis.",
