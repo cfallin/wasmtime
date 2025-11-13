@@ -2,7 +2,6 @@
 
 mod div_const;
 
-use crate::egraph::{NewOrExistingInst, OptimizeCtx};
 pub use crate::ir::condcodes::{FloatCC, IntCC};
 use crate::ir::dfg::ValueDef;
 pub use crate::ir::immediates::{Ieee16, Ieee32, Ieee64, Ieee128, Imm64, Offset32, Uimm8, V128Imm};
@@ -39,87 +38,104 @@ impl<T: smallvec::Array> generated_code::Length for SmallVec<T> {
 pub(crate) mod generated_code;
 use generated_code::{ContextIter, IntoContextIter};
 
-pub(crate) struct IsleContext<'a, 'b, 'c> {
-    pub(crate) ctx: &'a mut OptimizeCtx<'b, 'c>,
-}
-
-impl IsleContext<'_, '_, '_> {
-    #[allow(dead_code, reason = "dead code, only on nightly rust at this time")]
-    pub(crate) fn dfg(&self) -> &crate::ir::DataFlowGraph {
-        &self.ctx.func.dfg
+pub(crate) trait EgraphImpl {
+    fn insert_node(&mut self, op: InstructionData, ty: Type) -> Value;
+    fn func(&mut self) -> &mut Function;
+    fn remat(&mut self, value: Value) -> Value;
+    fn subsume(&mut self, value: Value) -> Value;
+    fn eclass_members_direct() -> bool {
+        false
+    }
+    fn eclass_members(&self, _value: Value) -> SmallVec<[Value; 8]> {
+        smallvec![]
     }
 }
 
-pub(crate) struct InstDataEtorIter<'a, 'b, 'c> {
-    stack: SmallVec<[Value; 8]>,
-    _phantom1: PhantomData<&'a ()>,
-    _phantom2: PhantomData<&'b ()>,
-    _phantom3: PhantomData<&'c ()>,
+pub(crate) struct IsleContext<'a, E: EgraphImpl + 'a> {
+    pub(crate) ctx: &'a mut E,
 }
 
-impl Default for InstDataEtorIter<'_, '_, '_> {
+impl<'a, E: EgraphImpl + 'a> IsleContext<'a, E> {
+    fn dfg(&mut self) -> &mut DataFlowGraph {
+        &mut self.ctx.func().dfg
+    }
+}
+
+pub(crate) struct InstDataEtorIter<'a, E: EgraphImpl + 'a> {
+    stack: SmallVec<[Value; 8]>,
+    _phantom: PhantomData<&'a E>,
+}
+
+impl<'a, E: EgraphImpl + 'a> Default for InstDataEtorIter<'a, E> {
     fn default() -> Self {
         InstDataEtorIter {
             stack: SmallVec::default(),
-            _phantom1: PhantomData,
-            _phantom2: PhantomData,
-            _phantom3: PhantomData,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<'a, 'b, 'c> InstDataEtorIter<'a, 'b, 'c> {
-    fn new(root: Value) -> Self {
+impl<'a, E: EgraphImpl + 'a> InstDataEtorIter<'a, E> {
+    fn new(egraph: &E, root: Value) -> Self {
         debug_assert_ne!(root, Value::reserved_value());
         trace!("new iter from root {root}");
-        Self {
-            stack: smallvec![root],
-            _phantom1: PhantomData,
-            _phantom2: PhantomData,
-            _phantom3: PhantomData,
-        }
-    }
-}
-
-impl<'a, 'b, 'c> ContextIter for InstDataEtorIter<'a, 'b, 'c>
-where
-    'b: 'a,
-    'c: 'b,
-{
-    type Context = IsleContext<'a, 'b, 'c>;
-    type Output = (Type, InstructionData);
-
-    fn next(&mut self, ctx: &mut IsleContext<'a, 'b, 'c>) -> Option<Self::Output> {
-        while let Some(value) = self.stack.pop() {
-            debug_assert!(ctx.ctx.func.dfg.value_is_real(value));
-            trace!("iter: value {:?}", value);
-            match ctx.ctx.func.dfg.value_def(value) {
-                ValueDef::Union(x, y) => {
-                    debug_assert_ne!(x, Value::reserved_value());
-                    debug_assert_ne!(y, Value::reserved_value());
-                    trace!(" -> {}, {}", x, y);
-                    self.stack.push(x);
-                    self.stack.push(y);
-                    continue;
-                }
-                ValueDef::Result(inst, _) if ctx.ctx.func.dfg.inst_results(inst).len() == 1 => {
-                    let ty = ctx.ctx.func.dfg.value_type(value);
-                    trace!(" -> value of type {}", ty);
-                    return Some((ty, ctx.ctx.func.dfg.insts[inst]));
-                }
-                _ => {}
+        if E::eclass_members_direct() {
+            Self {
+                stack: egraph.eclass_members(root),
+                _phantom: PhantomData,
+            }
+        } else {
+            Self {
+                stack: smallvec![root],
+                _phantom: PhantomData,
             }
         }
-        None
     }
 }
 
-impl<'a, 'b, 'c> IntoContextIter for InstDataEtorIter<'a, 'b, 'c>
-where
-    'b: 'a,
-    'c: 'b,
-{
-    type Context = IsleContext<'a, 'b, 'c>;
+impl<'a, E: EgraphImpl + 'a> ContextIter for InstDataEtorIter<'a, E> {
+    type Context = IsleContext<'a, E>;
+    type Output = (Type, InstructionData);
+
+    fn next(&mut self, ctx: &mut IsleContext<'a, E>) -> Option<Self::Output> {
+        if E::eclass_members_direct() {
+            let dfg = &ctx.ctx.func().dfg;
+            self.stack.pop().and_then(|val| match dfg.value_def(val) {
+                ValueDef::Result(inst, _) => {
+                    let ty = dfg.value_type(val);
+                    Some((ty, dfg.insts[inst]))
+                }
+                _ => None,
+            })
+        } else {
+            while let Some(value) = self.stack.pop() {
+                let dfg = &ctx.ctx.func().dfg;
+                debug_assert!(dfg.value_is_real(value));
+                trace!("iter: value {:?}", value);
+                match dfg.value_def(value) {
+                    ValueDef::Union(x, y) => {
+                        debug_assert_ne!(x, Value::reserved_value());
+                        debug_assert_ne!(y, Value::reserved_value());
+                        trace!(" -> {}, {}", x, y);
+                        self.stack.push(x);
+                        self.stack.push(y);
+                        continue;
+                    }
+                    ValueDef::Result(inst, _) if dfg.inst_results(inst).len() == 1 => {
+                        let ty = dfg.value_type(value);
+                        trace!(" -> value of type {}", ty);
+                        return Some((ty, dfg.insts[inst]));
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+    }
+}
+
+impl<'a, E: EgraphImpl + 'a> IntoContextIter for InstDataEtorIter<'a, E> {
+    type Context = IsleContext<'a, E>;
     type Output = (Type, InstructionData);
     type IntoIter = Self;
 
@@ -128,33 +144,38 @@ where
     }
 }
 
-#[derive(Default)]
-pub(crate) struct MaybeUnaryEtorIter<'a, 'b, 'c> {
+pub(crate) struct MaybeUnaryEtorIter<'a, E: EgraphImpl + 'a> {
     opcode: Option<Opcode>,
-    inner: InstDataEtorIter<'a, 'b, 'c>,
+    inner: InstDataEtorIter<'a, E>,
     fallback: Option<Value>,
 }
 
-impl MaybeUnaryEtorIter<'_, '_, '_> {
-    fn new(opcode: Opcode, value: Value) -> Self {
+impl<'a, E: EgraphImpl + 'a> Default for MaybeUnaryEtorIter<'a, E> {
+    fn default() -> Self {
+        Self {
+            opcode: None,
+            inner: Default::default(),
+            fallback: None,
+        }
+    }
+}
+
+impl<'a, E: EgraphImpl + 'a> MaybeUnaryEtorIter<'a, E> {
+    fn new(egraph: &E, opcode: Opcode, value: Value) -> Self {
         debug_assert_eq!(opcode.format(), InstructionFormat::Unary);
         Self {
             opcode: Some(opcode),
-            inner: InstDataEtorIter::new(value),
+            inner: InstDataEtorIter::new(egraph, value),
             fallback: Some(value),
         }
     }
 }
 
-impl<'a, 'b, 'c> ContextIter for MaybeUnaryEtorIter<'a, 'b, 'c>
-where
-    'b: 'a,
-    'c: 'b,
-{
-    type Context = IsleContext<'a, 'b, 'c>;
+impl<'a, E: EgraphImpl + 'a> ContextIter for MaybeUnaryEtorIter<'a, E> {
+    type Context = IsleContext<'a, E>;
     type Output = (Type, Value);
 
-    fn next(&mut self, ctx: &mut IsleContext<'a, 'b, 'c>) -> Option<Self::Output> {
+    fn next(&mut self, ctx: &mut IsleContext<'a, E>) -> Option<Self::Output> {
         debug_assert_ne!(self.opcode, None);
         while let Some((ty, inst_def)) = self.inner.next(ctx) {
             let InstructionData::Unary { opcode, arg } = inst_def else {
@@ -173,12 +194,8 @@ where
     }
 }
 
-impl<'a, 'b, 'c> IntoContextIter for MaybeUnaryEtorIter<'a, 'b, 'c>
-where
-    'b: 'a,
-    'c: 'b,
-{
-    type Context = IsleContext<'a, 'b, 'c>;
+impl<'a, E: EgraphImpl + 'a> IntoContextIter for MaybeUnaryEtorIter<'a, E> {
+    type Context = IsleContext<'a, E>;
     type Output = (Type, Value);
     type IntoIter = Self;
 
@@ -187,21 +204,21 @@ where
     }
 }
 
-impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
+impl<'a, E: EgraphImpl + 'a> generated_code::Context for IsleContext<'a, E> {
     isle_common_prelude_methods!();
 
-    type inst_data_value_etor_returns = InstDataEtorIter<'a, 'b, 'c>;
+    type inst_data_value_etor_returns = InstDataEtorIter<'a, E>;
 
-    fn inst_data_value_etor(&mut self, eclass: Value, returns: &mut InstDataEtorIter<'a, 'b, 'c>) {
-        *returns = InstDataEtorIter::new(eclass);
+    fn inst_data_value_etor(&mut self, eclass: Value, returns: &mut InstDataEtorIter<'a, E>) {
+        *returns = InstDataEtorIter::new(self.ctx, eclass);
     }
 
-    type inst_data_value_tupled_etor_returns = InstDataEtorIter<'a, 'b, 'c>;
+    type inst_data_value_tupled_etor_returns = InstDataEtorIter<'a, E>;
 
     fn inst_data_value_tupled_etor(
         &mut self,
         eclass: Value,
-        returns: &mut InstDataEtorIter<'a, 'b, 'c>,
+        returns: &mut InstDataEtorIter<'a, E>,
     ) {
         // Literally identical to `inst_data_value_etor`, just a different nominal type in ISLE
         self.inst_data_value_etor(eclass, returns);
@@ -209,22 +226,22 @@ impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
 
     fn make_inst_ctor(&mut self, ty: Type, op: &InstructionData) -> Value {
         trace!("make_inst_ctor: creating {:?}", op);
-        let value = self.ctx.insert_pure_enode(NewOrExistingInst::New(*op, ty));
+        let value = self.ctx.insert_node(*op, ty);
         trace!("make_inst_ctor: {:?} -> {}", op, value);
         value
     }
 
     fn make_skeleton_inst_ctor(&mut self, data: &InstructionData) -> Inst {
-        let inst = self.ctx.func.dfg.make_inst(*data);
+        let inst = self.ctx.func().dfg.make_inst(*data);
         self.ctx
-            .func
+            .func()
             .dfg
             .make_inst_results(inst, Default::default());
         inst
     }
 
     fn inst_data_etor(&mut self, inst: Inst) -> Option<InstructionData> {
-        Some(self.ctx.func.dfg.insts[inst])
+        Some(self.ctx.func().dfg.insts[inst])
     }
 
     fn value_array_2_ctor(&mut self, arg0: Value, arg1: Value) -> ValueArray2 {
@@ -237,7 +254,7 @@ impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
 
     #[inline]
     fn value_type(&mut self, val: Value) -> Type {
-        self.ctx.func.dfg.value_type(val)
+        self.ctx.func().dfg.value_type(val)
     }
 
     fn iconst_sextend_etor(
@@ -257,33 +274,29 @@ impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
 
     fn remat(&mut self, value: Value) -> Value {
         trace!("remat: {}", value);
-        self.ctx.remat_values.insert(value);
-        self.ctx.stats.remat += 1;
-        value
+        self.ctx.remat(value)
     }
 
     fn subsume(&mut self, value: Value) -> Value {
         trace!("subsume: {}", value);
-        self.ctx.subsume_values.insert(value);
-        self.ctx.stats.subsume += 1;
-        value
+        self.ctx.subsume(value)
     }
 
     fn splat64(&mut self, val: u64) -> Constant {
         let val = u128::from(val);
         let val = val | (val << 64);
         let imm = V128Imm(val.to_le_bytes());
-        self.ctx.func.dfg.constants.insert(imm.into())
+        self.ctx.func().dfg.constants.insert(imm.into())
     }
 
-    type sextend_maybe_etor_returns = MaybeUnaryEtorIter<'a, 'b, 'c>;
+    type sextend_maybe_etor_returns = MaybeUnaryEtorIter<'a, E>;
     fn sextend_maybe_etor(&mut self, value: Value, returns: &mut Self::sextend_maybe_etor_returns) {
-        *returns = MaybeUnaryEtorIter::new(Opcode::Sextend, value);
+        *returns = MaybeUnaryEtorIter::new(self.ctx, Opcode::Sextend, value);
     }
 
-    type uextend_maybe_etor_returns = MaybeUnaryEtorIter<'a, 'b, 'c>;
+    type uextend_maybe_etor_returns = MaybeUnaryEtorIter<'a, E>;
     fn uextend_maybe_etor(&mut self, value: Value, returns: &mut Self::uextend_maybe_etor_returns) {
-        *returns = MaybeUnaryEtorIter::new(Opcode::Uextend, value);
+        *returns = MaybeUnaryEtorIter::new(self.ctx, Opcode::Uextend, value);
     }
 
     // NB: Cranelift's defined semantics for `fcvt_from_{s,u}int` match Rust's
@@ -318,11 +331,11 @@ impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
     }
 
     fn ieee128_constant_extractor(&mut self, n: Constant) -> Option<Ieee128> {
-        self.ctx.func.dfg.constants.get(n).try_into().ok()
+        self.ctx.func().dfg.constants.get(n).try_into().ok()
     }
 
     fn ieee128_constant(&mut self, n: Ieee128) -> Constant {
-        self.ctx.func.dfg.constants.insert(n.into())
+        self.ctx.func().dfg.constants.insert(n.into())
     }
 
     fn div_const_magic_u32(&mut self, d: u32) -> generated_code::DivConstMagicU32 {

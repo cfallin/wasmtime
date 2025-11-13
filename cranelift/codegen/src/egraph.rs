@@ -328,7 +328,9 @@ where
         ctx.stats.rewrite_rule_invoked += 1;
         debug_assert!(optimized_values.is_empty());
         crate::opts::generated_code::constructor_simplify(
-            &mut IsleContext { ctx },
+            &mut IsleContext {
+                ctx: &mut EgraphIsleContext { ctx },
+            },
             orig_value,
             optimized_values,
         );
@@ -613,7 +615,9 @@ where
         let (ctx, optimized_insts) = guard.get();
 
         crate::opts::generated_code::constructor_simplify_skeleton(
-            &mut IsleContext { ctx },
+            &mut IsleContext {
+                ctx: &mut EgraphIsleContext { ctx },
+            },
             inst,
             optimized_insts,
         );
@@ -746,6 +750,37 @@ where
                     Some(Fact::constant(ty.bits().try_into().unwrap(), imm as u64));
             }
         }
+    }
+}
+
+struct EgraphIsleContext<'a, 'b, 'c>
+where
+    'b: 'a,
+    'c: 'b,
+{
+    ctx: &'a mut OptimizeCtx<'b, 'c>,
+}
+
+impl<'a, 'b, 'c> crate::opts::EgraphImpl for EgraphIsleContext<'a, 'b, 'c>
+where
+    'b: 'a,
+    'c: 'b,
+{
+    fn insert_node(&mut self, op: InstructionData, ty: Type) -> Value {
+        self.ctx.insert_pure_enode(NewOrExistingInst::New(op, ty))
+    }
+    fn func(&mut self) -> &mut Function {
+        &mut self.ctx.func
+    }
+    fn remat(&mut self, value: Value) -> Value {
+        self.ctx.remat_values.insert(value);
+        self.ctx.stats.remat += 1;
+        value
+    }
+    fn subsume(&mut self, value: Value) -> Value {
+        self.ctx.subsume_values.insert(value);
+        self.ctx.stats.subsume += 1;
+        value
     }
 }
 
