@@ -144,6 +144,29 @@ pub(crate) fn define() -> SettingGroup {
     );
 
     settings.add_bool(
+        "classical_opts",
+        "Use a classical optimization pipeline instead of the egraph-based pass",
+        r#"
+            This enables a classical multipass optimization pipeline rather than the integrated
+            egraph-based pass.
+        "#,
+        false,
+    );
+
+    settings.add_num(
+        "classical_opts_rounds",
+        "Rounds of a classical optimization pipeline loop to run",
+        r#"
+            This determines the number of times we run the following pipeline:
+            - Rewrite rules
+            - Alias analysis
+            - GVN
+            - LICM
+        "#,
+        1,
+    );
+
+    settings.add_bool(
         "enable_verifier",
         "Run the Cranelift IR verifier at strategic times during compilation.",
         r#"

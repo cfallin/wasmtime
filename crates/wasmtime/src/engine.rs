@@ -473,6 +473,8 @@ information about this check\
             | "aegraph_simple_rewrite"
             | "aegraph_enable_subsume"
             | "aegraph_enable_remat"
+            | "classical_opts"
+            | "classical_opts_rounds"
             | "probestack_size_log2" // probestack above asserted disabled
             | "regalloc" // shouldn't change semantics
             | "enable_incremental_compilation_cache_checks" // shouldn't change semantics
