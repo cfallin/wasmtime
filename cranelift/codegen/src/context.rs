@@ -183,8 +183,12 @@ impl Context {
         self.func.dfg.resolve_all_aliases();
 
         if opt_level != OptLevel::None {
-            for _ in 0..isa.flags().aegraph_passes() {
-                self.egraph_pass(isa, ctrl_plane)?;
+            if isa.flags().classical_opts() {
+                self.classic_opts(isa, ctrl_plane)?;
+            } else {
+                for _ in 0..isa.flags().aegraph_passes() {
+                    self.egraph_pass(isa, ctrl_plane)?;
+                }
             }
         }
 
@@ -389,6 +393,34 @@ impl Context {
         pass.run();
         log::debug!("egraph stats: {:?}", pass.stats);
         trace!("After egraph optimization:\n{}", self.func.display());
+
+        self.verify_if(fisa)
+    }
+
+    /// Run a classical optimization pipeline.
+    fn classic_opts<'a, FOI>(
+        &mut self,
+        fisa: FOI,
+        _ctrl_plane: &mut ControlPlane,
+    ) -> CodegenResult<()>
+    where
+        FOI: Into<FlagsOrIsa<'a>>,
+    {
+        let fisa = fisa.into();
+        for _ in 0..fisa.flags.classical_opts_rounds() {
+            crate::rewrites::Rewriter::new(&mut self.func).run();
+            self.replace_redundant_loads()?;
+            self.compute_domtree();
+            self.compute_loop_analysis();
+            crate::simple_gvn::do_simple_gvn(&mut self.func, &mut self.domtree);
+            crate::licm::do_licm(
+                &mut self.func,
+                &mut self.cfg,
+                &mut self.domtree,
+                &mut self.loop_analysis,
+            );
+            self.func.dfg.resolve_all_aliases();
+        }
 
         self.verify_if(fisa)
     }
