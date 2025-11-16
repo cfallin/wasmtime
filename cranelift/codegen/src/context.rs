@@ -190,6 +190,11 @@ impl Context {
                     self.egraph_pass(isa, ctrl_plane)?;
                 }
             }
+
+            if isa.flags().full_egraph() {
+                #[cfg(feature = "full-egraph")]
+                self.full_egraph_pass(isa)?;
+            }
         }
 
         Ok(())
@@ -394,6 +399,20 @@ impl Context {
         log::debug!("egraph stats: {:?}", pass.stats);
         trace!("After egraph optimization:\n{}", self.func.display());
 
+        self.verify_if(fisa)
+    }
+
+    /// Run a full egraph optimization.
+    #[cfg(feature = "full-egraph")]
+    pub fn full_egraph_pass<'a, FOI>(&mut self, fisa: FOI) -> CodegenResult<()>
+    where
+        FOI: Into<FlagsOrIsa<'a>>,
+    {
+        let _tt = timing::egraph();
+
+        let fisa = fisa.into();
+        self.compute_loop_analysis();
+        crate::full_egraph::run(&mut self.func);
         self.verify_if(fisa)
     }
 

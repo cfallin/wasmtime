@@ -167,6 +167,15 @@ pub(crate) fn define() -> SettingGroup {
     );
 
     settings.add_bool(
+        "full_egraph",
+        "Use a full egraph optimizer based on egg",
+        r#"
+            This enables a full egraph-based pipeline.
+        "#,
+        false,
+    );
+
+    settings.add_bool(
         "enable_verifier",
         "Run the Cranelift IR verifier at strategic times during compilation.",
         r#"
