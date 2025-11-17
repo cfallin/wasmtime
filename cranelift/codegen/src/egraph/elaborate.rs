@@ -7,7 +7,7 @@ use crate::ctxhash::NullCtx;
 use crate::dominator_tree::DominatorTree;
 use crate::hash_map::Entry as HashEntry;
 use crate::inst_predicates::is_pure_for_egraph;
-use crate::ir::{Block, Function, Inst, Value, ValueDef};
+use crate::ir::{Block, DataFlowGraph, Function, Inst, Value, ValueDef};
 use crate::loop_analysis::{Loop, LoopAnalysis};
 use crate::scoped_hash_map::ScopedHashMap;
 use crate::settings::Flags;
@@ -72,6 +72,8 @@ pub(crate) struct Elaborator<'a> {
     /// Chaos-mode control-plane so we can test that we still get
     /// correct results when our heuristics make bad decisions.
     ctrl_plane: &'a mut ControlPlane,
+    /// "Not-chosen" set for accounting suboptimal results in stats.
+    not_chosen: FxHashSet<Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +172,7 @@ impl<'a> Elaborator<'a> {
             stats,
             flags,
             ctrl_plane,
+            not_chosen: FxHashSet::default(),
         }
     }
 
@@ -290,6 +293,9 @@ impl<'a> Elaborator<'a> {
                             " -> best of union({:?}, {:?}) = {:?}",
                             best[x], best[y], best[value]
                         );
+
+                        let not_chosen = if best[value] == best[x] { y } else { x };
+                        Self::mark_not_chosen(&mut self.not_chosen, &self.func.dfg, not_chosen);
                     }
                     ValueDef::Param(_, _) => {
                         best[value] = BestEntry(Cost::zero(), value);
@@ -354,6 +360,19 @@ impl<'a> Elaborator<'a> {
                 // set (see `cranelift/codegen/src/opts/README.md`) it is safe
                 // to choose *any* e-node in the e-class. At worst we will
                 // produce suboptimal code, but never an incorrectness.
+            }
+        }
+    }
+
+    fn mark_not_chosen(not_chosen: &mut FxHashSet<Value>, dfg: &DataFlowGraph, value: Value) {
+        if not_chosen.insert(value) {
+            log::trace!("marking not chosen: {value}");
+            match dfg.value_def(value) {
+                ValueDef::Union(x, y) => {
+                    Self::mark_not_chosen(not_chosen, dfg, x);
+                    Self::mark_not_chosen(not_chosen, dfg, y);
+                }
+                _ => {}
             }
         }
     }
@@ -435,6 +454,19 @@ impl<'a> Elaborator<'a> {
                     let BestEntry(_, best_value) = self.value_to_best_value[value];
                     trace!("elaborate: value {} -> best {}", value, best_value);
                     debug_assert_ne!(best_value, Value::reserved_value());
+
+                    // Account for "suboptimal" results due to
+                    // immutable eclass snapshot: if *our* best value
+                    // is marked as a "not best value" (some other
+                    // union on top of it picked another branch), then
+                    // note this. Full equality saturation might have
+                    // let us use the other form.
+                    if self.not_chosen.contains(&best_value) {
+                        trace!(
+                            "elaborate: value {best_value} was later union'd with another value that was better"
+                        );
+                        self.stats.elaborate_not_best_chosen += 1;
+                    }
 
                     if let Some(elab_val) =
                         self.value_to_elaborated_value.get(&NullCtx, &best_value)
