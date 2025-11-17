@@ -825,7 +825,7 @@ impl<'a> EgraphPass<'a> {
 
         self.elaborate();
 
-        log::trace!("stats: {:#?}", self.stats);
+        log::info!("egraph stats: {:#?}", self.stats);
     }
 
     /// Remove pure nodes from the `Layout` of the function, ensuring
