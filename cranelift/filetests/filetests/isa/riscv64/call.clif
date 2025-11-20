@@ -173,7 +173,7 @@ block0(v0: i8):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-32
-;   sd s1,24(sp)
+;   sd s1,16(sp)
 ; block0:
 ;   li a7,42
 ;   slli a4,a0,56; srai a4,a4,56
@@ -187,7 +187,7 @@ block0(v0: i8):
 ;   mv a5,a7
 ;   mv a6,a7
 ;   callind s1
-;   ld s1,24(sp)
+;   ld s1,16(sp)
 ;   addi sp,sp,32
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -201,7 +201,7 @@ block0(v0: i8):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x20
-;   sd s1, 0x18(sp)
+;   sd s1, 0x10(sp)
 ; block1: ; offset 0x18
 ;   addi a7, zero, 0x2a
 ;   slli a4, a0, 0x38
@@ -220,7 +220,7 @@ block0(v0: i8):
 ;   mv a5, a7
 ;   mv a6, a7
 ;   jalr s1
-;   ld s1, 0x18(sp)
+;   ld s1, 0x10(sp)
 ;   addi sp, sp, 0x20
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -290,9 +290,9 @@ block0:
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-32
-;   fsd fs0,24(sp)
-;   fsd fs2,16(sp)
-;   fsd fs4,8(sp)
+;   fsd fs0,0(sp)
+;   fsd fs2,8(sp)
+;   fsd fs4,16(sp)
 ; block0:
 ;   load_ext_name_far a3,%g0+0
 ;   callind a3
@@ -314,9 +314,9 @@ block0:
 ;   load_ext_name_far a0,%g4+0
 ;   fmv.d fa0,fs4
 ;   callind a0
-;   fld fs0,24(sp)
-;   fld fs2,16(sp)
-;   fld fs4,8(sp)
+;   fld fs0,0(sp)
+;   fld fs2,8(sp)
+;   fld fs4,16(sp)
 ;   addi sp,sp,32
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -330,9 +330,9 @@ block0:
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x20
-;   fsd fs0, 0x18(sp)
-;   fsd fs2, 0x10(sp)
-;   fsd fs4, 8(sp)
+;   fsd fs0, 0(sp)
+;   fsd fs2, 8(sp)
+;   fsd fs4, 0x10(sp)
 ; block1: ; offset 0x20
 ;   auipc a3, 0
 ;   ld a3, 0xc(a3)
@@ -382,9 +382,9 @@ block0:
 ;   .byte 0x00, 0x00, 0x00, 0x00
 ;   fmv.d fa0, fs4
 ;   jalr a0
-;   fld fs0, 0x18(sp)
-;   fld fs2, 0x10(sp)
-;   fld fs4, 8(sp)
+;   fld fs0, 0(sp)
+;   fld fs2, 8(sp)
+;   fld fs4, 0x10(sp)
 ;   addi sp, sp, 0x20
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -626,8 +626,8 @@ block0(v0: i128, v1: i64):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-32
-;   sd s1,24(sp)
-;   sd s3,16(sp)
+;   sd s1,16(sp)
+;   sd s3,24(sp)
 ; block0:
 ;   sd a1,0(sp)
 ;   load_ext_name_far s1,%f14+0
@@ -639,8 +639,8 @@ block0(v0: i128, v1: i64):
 ;   mv a3,a5
 ;   mv a4,a7
 ;   callind s1
-;   ld s1,24(sp)
-;   ld s3,16(sp)
+;   ld s1,16(sp)
+;   ld s3,24(sp)
 ;   addi sp,sp,32
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -654,8 +654,8 @@ block0(v0: i128, v1: i64):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x20
-;   sd s1, 0x18(sp)
-;   sd s3, 0x10(sp)
+;   sd s1, 0x10(sp)
+;   sd s3, 0x18(sp)
 ; block1: ; offset 0x1c
 ;   sd a1, 0(sp)
 ;   auipc s1, 0
@@ -671,8 +671,8 @@ block0(v0: i128, v1: i64):
 ;   mv a3, a5
 ;   mv a4, a7
 ;   jalr s1
-;   ld s1, 0x18(sp)
-;   ld s3, 0x10(sp)
+;   ld s1, 0x10(sp)
+;   ld s3, 0x18(sp)
 ;   addi sp, sp, 0x20
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -725,8 +725,8 @@ block0(v0: i128, v1: i64):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-32
-;   sd s1,24(sp)
-;   sd s3,16(sp)
+;   sd s1,16(sp)
+;   sd s3,24(sp)
 ; block0:
 ;   sd a1,0(sp)
 ;   load_ext_name_far s1,%f15+0
@@ -738,8 +738,8 @@ block0(v0: i128, v1: i64):
 ;   mv a3,a5
 ;   mv a4,a7
 ;   callind s1
-;   ld s1,24(sp)
-;   ld s3,16(sp)
+;   ld s1,16(sp)
+;   ld s3,24(sp)
 ;   addi sp,sp,32
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -753,8 +753,8 @@ block0(v0: i128, v1: i64):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x20
-;   sd s1, 0x18(sp)
-;   sd s3, 0x10(sp)
+;   sd s1, 0x10(sp)
+;   sd s3, 0x18(sp)
 ; block1: ; offset 0x1c
 ;   sd a1, 0(sp)
 ;   auipc s1, 0
@@ -770,8 +770,8 @@ block0(v0: i128, v1: i64):
 ;   mv a3, a5
 ;   mv a4, a7
 ;   jalr s1
-;   ld s1, 0x18(sp)
-;   ld s3, 0x10(sp)
+;   ld s1, 0x10(sp)
+;   ld s3, 0x18(sp)
 ;   addi sp, sp, 0x20
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -812,12 +812,12 @@ block0(v0: i16):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-16
-;   sd s1,8(sp)
+;   sd s1,0(sp)
 ; block0:
 ;   mv s1,a0
 ;   call userextname0
 ;   mv a0,s1
-;   ld s1,8(sp)
+;   ld s1,0(sp)
 ;   addi sp,sp,16
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -831,13 +831,13 @@ block0(v0: i16):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x10
-;   sd s1, 8(sp)
+;   sd s1, 0(sp)
 ; block1: ; offset 0x18
 ;   mv s1, a0
 ;   auipc ra, 0 ; reloc_external RiscvCallPlt u0:0 0
 ;   jalr ra
 ;   mv a0, s1
-;   ld s1, 8(sp)
+;   ld s1, 0(sp)
 ;   addi sp, sp, 0x10
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)

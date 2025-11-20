@@ -16,13 +16,13 @@ block0(v0: i32):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-16
-;   sd s1,8(sp)
+;   sd s1,0(sp)
 ; block0:
 ;   mv s1,a0
 ;   elf_tls_get_addr a0,userextname0
 ;   mv a1,a0
 ;   mv a0,s1
-;   ld s1,8(sp)
+;   ld s1,0(sp)
 ;   addi sp,sp,16
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -36,7 +36,7 @@ block0(v0: i32):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x10
-;   sd s1, 8(sp)
+;   sd s1, 0(sp)
 ; block1: ; offset 0x18
 ;   mv s1, a0
 ;   auipc a0, 0 ; reloc_external RiscvTlsGdHi20 u1:0 0
@@ -45,7 +45,7 @@ block0(v0: i32):
 ;   jalr ra
 ;   mv a1, a0
 ;   mv a0, s1
-;   ld s1, 8(sp)
+;   ld s1, 0(sp)
 ;   addi sp, sp, 0x10
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)

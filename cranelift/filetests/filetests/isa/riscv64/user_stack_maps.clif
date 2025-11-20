@@ -38,9 +38,9 @@ block0:
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-48
-;   sd s1,40(sp)
-;   sd s2,32(sp)
-;   sd s3,24(sp)
+;   sd s1,16(sp)
+;   sd s2,24(sp)
+;   sd s3,32(sp)
 ; block0:
 ;   li s3,0
 ;   li s1,1
@@ -62,9 +62,9 @@ block0:
 ;   ; UserStackMap { by_type: [(types::I32, CompoundBitSet {0})], sp_to_sized_stack_slots: None }
 ;   mv a0,s2
 ;   call userextname0
-;   ld s1,40(sp)
-;   ld s2,32(sp)
-;   ld s3,24(sp)
+;   ld s1,16(sp)
+;   ld s2,24(sp)
+;   ld s3,32(sp)
 ;   addi sp,sp,48
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -78,9 +78,9 @@ block0:
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x30
-;   sd s1, 0x28(sp)
-;   sd s2, 0x20(sp)
-;   sd s3, 0x18(sp)
+;   sd s1, 0x10(sp)
+;   sd s2, 0x18(sp)
+;   sd s3, 0x20(sp)
 ; block1: ; offset 0x20
 ;   mv s3, zero
 ;   addi s1, zero, 1
@@ -103,9 +103,9 @@ block0:
 ;   mv a0, s2
 ;   auipc ra, 0 ; reloc_external RiscvCallPlt u0:0 0
 ;   jalr ra
-;   ld s1, 0x28(sp)
-;   ld s2, 0x20(sp)
-;   ld s3, 0x18(sp)
+;   ld s1, 0x10(sp)
+;   ld s2, 0x18(sp)
+;   ld s3, 0x20(sp)
 ;   addi sp, sp, 0x30
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -138,13 +138,13 @@ block0(v0: i8, v1: i16, v2: i32, v3: i64, v4: f32, v5: f64):
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-160
-;   sd s1,152(sp)
-;   sd s2,144(sp)
-;   sd s3,136(sp)
-;   sd s4,128(sp)
-;   sd s9,120(sp)
-;   fsd fs0,112(sp)
-;   fsd fs2,104(sp)
+;   sd s1,96(sp)
+;   sd s2,104(sp)
+;   sd s3,112(sp)
+;   sd s4,120(sp)
+;   sd s9,128(sp)
+;   fsd fs0,136(sp)
+;   fsd fs2,144(sp)
 ; block0:
 ;   mv s2,a0
 ;   sb a1,0(slot)
@@ -170,13 +170,13 @@ block0(v0: i8, v1: i16, v2: i32, v3: i64, v4: f32, v5: f64):
 ;   mv a1,s9
 ;   fmv.d fa0,fs2
 ;   fmv.d fa1,fs0
-;   ld s1,152(sp)
-;   ld s2,144(sp)
-;   ld s3,136(sp)
-;   ld s4,128(sp)
-;   ld s9,120(sp)
-;   fld fs0,112(sp)
-;   fld fs2,104(sp)
+;   ld s1,96(sp)
+;   ld s2,104(sp)
+;   ld s3,112(sp)
+;   ld s4,120(sp)
+;   ld s9,128(sp)
+;   fld fs0,136(sp)
+;   fld fs2,144(sp)
 ;   addi sp,sp,160
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -190,13 +190,13 @@ block0(v0: i8, v1: i16, v2: i32, v3: i64, v4: f32, v5: f64):
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0xa0
-;   sd s1, 0x98(sp)
-;   sd s2, 0x90(sp)
-;   sd s3, 0x88(sp)
-;   sd s4, 0x80(sp)
-;   sd s9, 0x78(sp)
-;   fsd fs0, 0x70(sp)
-;   fsd fs2, 0x68(sp)
+;   sd s1, 0x60(sp)
+;   sd s2, 0x68(sp)
+;   sd s3, 0x70(sp)
+;   sd s4, 0x78(sp)
+;   sd s9, 0x80(sp)
+;   fsd fs0, 0x88(sp)
+;   fsd fs2, 0x90(sp)
 ; block1: ; offset 0x30
 ;   mv s2, a0
 ;   sb a1, 0(sp)
@@ -222,13 +222,13 @@ block0(v0: i8, v1: i16, v2: i32, v3: i64, v4: f32, v5: f64):
 ;   mv a1, s9
 ;   fmv.d fa0, fs2
 ;   fmv.d fa1, fs0
-;   ld s1, 0x98(sp)
-;   ld s2, 0x90(sp)
-;   ld s3, 0x88(sp)
-;   ld s4, 0x80(sp)
-;   ld s9, 0x78(sp)
-;   fld fs0, 0x70(sp)
-;   fld fs2, 0x68(sp)
+;   ld s1, 0x60(sp)
+;   ld s2, 0x68(sp)
+;   ld s3, 0x70(sp)
+;   ld s4, 0x78(sp)
+;   ld s9, 0x80(sp)
+;   fld fs0, 0x88(sp)
+;   fld fs2, 0x90(sp)
 ;   addi sp, sp, 0xa0
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)

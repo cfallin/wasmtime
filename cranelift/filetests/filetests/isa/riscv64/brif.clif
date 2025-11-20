@@ -354,7 +354,7 @@ block2:
 ;   sd fp,0(sp)
 ;   mv fp,sp
 ;   addi sp,sp,-16
-;   sd s1,8(sp)
+;   sd s1,0(sp)
 ; block0:
 ;   slt s1,a3,a1
 ;   sltu a4,a2,a0
@@ -363,7 +363,7 @@ block2:
 ;   bne a1,zero,taken(label2),not_taken(label1)
 ; block1:
 ;   li a0,0
-;   ld s1,8(sp)
+;   ld s1,0(sp)
 ;   addi sp,sp,16
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -371,7 +371,7 @@ block2:
 ;   ret
 ; block2:
 ;   li a0,1
-;   ld s1,8(sp)
+;   ld s1,0(sp)
 ;   addi sp,sp,16
 ;   ld ra,8(sp)
 ;   ld fp,0(sp)
@@ -385,7 +385,7 @@ block2:
 ;   sd s0, 0(sp)
 ;   mv s0, sp
 ;   addi sp, sp, -0x10
-;   sd s1, 8(sp)
+;   sd s1, 0(sp)
 ; block1: ; offset 0x18
 ;   slt s1, a3, a1
 ;   sltu a4, a2, a0
@@ -396,7 +396,7 @@ block2:
 ;   bnez a1, 0x20
 ; block2: ; offset 0x34
 ;   mv a0, zero
-;   ld s1, 8(sp)
+;   ld s1, 0(sp)
 ;   addi sp, sp, 0x10
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)
@@ -404,7 +404,7 @@ block2:
 ;   ret
 ; block3: ; offset 0x50
 ;   addi a0, zero, 1
-;   ld s1, 8(sp)
+;   ld s1, 0(sp)
 ;   addi sp, sp, 0x10
 ;   ld ra, 8(sp)
 ;   ld s0, 0(sp)

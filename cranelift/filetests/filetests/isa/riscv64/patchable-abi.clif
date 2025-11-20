@@ -1,0 +1,428 @@
+test compile precise-output
+target riscv64
+
+function %call_patchable_abi(i64) system_v {
+    sig0 = (i64, i64, i64, i64) patchable
+block0(v0: i64):
+    call_indirect sig0, v0(v0, v0, v0, v0)
+    call_indirect sig0, v0(v0, v0, v0, v0)
+    return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+; block0:
+;   mv a3,a0
+;   mv a1,a3
+;   mv a2,a3
+;   callind a3
+;   callind a3
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+; block1: ; offset 0x10
+;   mv a3, a0
+;   mv a1, a3
+;   mv a2, a3
+;   jalr a3
+;   jalr a3
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+
+function %patchable_abi_trampoline(i64) patchable {
+    fn0 = %libcall(i64) system_v
+block0(v0: i64):
+    call fn0(v0)
+    return
+}
+
+; VCode:
+;   addi sp,sp,-16
+;   sd ra,8(sp)
+;   sd fp,0(sp)
+;   mv fp,sp
+;   addi sp,sp,-816
+;   sd ra,0(sp)
+;   sd t0,8(sp)
+;   sd t1,16(sp)
+;   sd t2,24(sp)
+;   sd a0,32(sp)
+;   sd a1,40(sp)
+;   sd a2,48(sp)
+;   sd a3,56(sp)
+;   sd a4,64(sp)
+;   sd a5,72(sp)
+;   sd a6,80(sp)
+;   sd a7,88(sp)
+;   sd t3,96(sp)
+;   sd t4,104(sp)
+;   sd t5,112(sp)
+;   sd t6,120(sp)
+;   fsd ft0,128(sp)
+;   fsd ft1,136(sp)
+;   fsd ft2,144(sp)
+;   fsd ft3,152(sp)
+;   fsd ft4,160(sp)
+;   fsd ft5,168(sp)
+;   fsd ft6,176(sp)
+;   fsd ft7,184(sp)
+;   fsd fs1,192(sp)
+;   fsd fa0,200(sp)
+;   fsd fa1,208(sp)
+;   fsd fa2,216(sp)
+;   fsd fa3,224(sp)
+;   fsd fa4,232(sp)
+;   fsd fa5,240(sp)
+;   fsd fa6,248(sp)
+;   fsd fa7,256(sp)
+;   fsd ft8,264(sp)
+;   fsd ft9,272(sp)
+;   fsd ft10,280(sp)
+;   fsd ft11,288(sp)
+;   vse8.v v0,304(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v1,320(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v2,336(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v3,352(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v4,368(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v5,384(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v6,400(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v7,416(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v8,432(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v9,448(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v10,464(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v11,480(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v12,496(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v13,512(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v14,528(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v15,544(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v16,560(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v17,576(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v18,592(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v19,608(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v20,624(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v21,640(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v22,656(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v23,672(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v24,688(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v25,704(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v26,720(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v27,736(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v28,752(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v29,768(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v30,784(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vse8.v v31,800(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+; block0:
+;   load_ext_name_far a2,%libcall+0
+;   callind a2
+;   ld ra,0(sp)
+;   ld t0,8(sp)
+;   ld t1,16(sp)
+;   ld t2,24(sp)
+;   ld a0,32(sp)
+;   ld a1,40(sp)
+;   ld a2,48(sp)
+;   ld a3,56(sp)
+;   ld a4,64(sp)
+;   ld a5,72(sp)
+;   ld a6,80(sp)
+;   ld a7,88(sp)
+;   ld t3,96(sp)
+;   ld t4,104(sp)
+;   ld t5,112(sp)
+;   ld t6,120(sp)
+;   fld ft0,128(sp)
+;   fld ft1,136(sp)
+;   fld ft2,144(sp)
+;   fld ft3,152(sp)
+;   fld ft4,160(sp)
+;   fld ft5,168(sp)
+;   fld ft6,176(sp)
+;   fld ft7,184(sp)
+;   fld fs1,192(sp)
+;   fld fa0,200(sp)
+;   fld fa1,208(sp)
+;   fld fa2,216(sp)
+;   fld fa3,224(sp)
+;   fld fa4,232(sp)
+;   fld fa5,240(sp)
+;   fld fa6,248(sp)
+;   fld fa7,256(sp)
+;   fld ft8,264(sp)
+;   fld ft9,272(sp)
+;   fld ft10,280(sp)
+;   fld ft11,288(sp)
+;   vle8.v v0,304(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v1,320(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v2,336(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v3,352(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v4,368(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v5,384(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v6,400(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v7,416(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v8,432(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v9,448(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v10,464(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v11,480(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v12,496(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v13,512(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v14,528(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v15,544(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v16,560(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v17,576(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v18,592(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v19,608(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v20,624(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v21,640(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v22,656(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v23,672(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v24,688(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v25,704(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v26,720(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v27,736(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v28,752(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v29,768(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v30,784(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   vle8.v v31,800(sp) #avl=16, #vtype=(e8, m1, ta, ma)
+;   addi sp,sp,816
+;   ld ra,8(sp)
+;   ld fp,0(sp)
+;   addi sp,sp,16
+;   ret
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   addi sp, sp, -0x10
+;   sd ra, 8(sp)
+;   sd s0, 0(sp)
+;   mv s0, sp
+;   addi sp, sp, -0x330
+;   sd ra, 0(sp)
+;   sd t0, 8(sp)
+;   sd t1, 0x10(sp)
+;   sd t2, 0x18(sp)
+;   sd a0, 0x20(sp)
+;   sd a1, 0x28(sp)
+;   sd a2, 0x30(sp)
+;   sd a3, 0x38(sp)
+;   sd a4, 0x40(sp)
+;   sd a5, 0x48(sp)
+;   sd a6, 0x50(sp)
+;   sd a7, 0x58(sp)
+;   sd t3, 0x60(sp)
+;   sd t4, 0x68(sp)
+;   sd t5, 0x70(sp)
+;   sd t6, 0x78(sp)
+;   fsd ft0, 0x80(sp)
+;   fsd ft1, 0x88(sp)
+;   fsd ft2, 0x90(sp)
+;   fsd ft3, 0x98(sp)
+;   fsd ft4, 0xa0(sp)
+;   fsd ft5, 0xa8(sp)
+;   fsd ft6, 0xb0(sp)
+;   fsd ft7, 0xb8(sp)
+;   fsd fs1, 0xc0(sp)
+;   fsd fa0, 0xc8(sp)
+;   fsd fa1, 0xd0(sp)
+;   fsd fa2, 0xd8(sp)
+;   fsd fa3, 0xe0(sp)
+;   fsd fa4, 0xe8(sp)
+;   fsd fa5, 0xf0(sp)
+;   fsd fa6, 0xf8(sp)
+;   fsd fa7, 0x100(sp)
+;   fsd ft8, 0x108(sp)
+;   fsd ft9, 0x110(sp)
+;   fsd ft10, 0x118(sp)
+;   fsd ft11, 0x120(sp)
+;   .byte 0x57, 0x70, 0x08, 0xcc
+;   addi t6, sp, 0x130
+;   .byte 0x27, 0x80, 0x0f, 0x02
+;   addi t6, sp, 0x140
+;   .byte 0xa7, 0x80, 0x0f, 0x02
+;   addi t6, sp, 0x150
+;   .byte 0x27, 0x81, 0x0f, 0x02
+;   addi t6, sp, 0x160
+;   .byte 0xa7, 0x81, 0x0f, 0x02
+;   addi t6, sp, 0x170
+;   .byte 0x27, 0x82, 0x0f, 0x02
+;   addi t6, sp, 0x180
+;   .byte 0xa7, 0x82, 0x0f, 0x02
+;   addi t6, sp, 0x190
+;   .byte 0x27, 0x83, 0x0f, 0x02
+;   addi t6, sp, 0x1a0
+;   .byte 0xa7, 0x83, 0x0f, 0x02
+;   addi t6, sp, 0x1b0
+;   .byte 0x27, 0x84, 0x0f, 0x02
+;   addi t6, sp, 0x1c0
+;   .byte 0xa7, 0x84, 0x0f, 0x02
+;   addi t6, sp, 0x1d0
+;   .byte 0x27, 0x85, 0x0f, 0x02
+;   addi t6, sp, 0x1e0
+;   .byte 0xa7, 0x85, 0x0f, 0x02
+;   addi t6, sp, 0x1f0
+;   .byte 0x27, 0x86, 0x0f, 0x02
+;   addi t6, sp, 0x200
+;   .byte 0xa7, 0x86, 0x0f, 0x02
+;   addi t6, sp, 0x210
+;   .byte 0x27, 0x87, 0x0f, 0x02
+;   addi t6, sp, 0x220
+;   .byte 0xa7, 0x87, 0x0f, 0x02
+;   addi t6, sp, 0x230
+;   .byte 0x27, 0x88, 0x0f, 0x02
+;   addi t6, sp, 0x240
+;   .byte 0xa7, 0x88, 0x0f, 0x02
+;   addi t6, sp, 0x250
+;   .byte 0x27, 0x89, 0x0f, 0x02
+;   addi t6, sp, 0x260
+;   .byte 0xa7, 0x89, 0x0f, 0x02
+;   addi t6, sp, 0x270
+;   .byte 0x27, 0x8a, 0x0f, 0x02
+;   addi t6, sp, 0x280
+;   .byte 0xa7, 0x8a, 0x0f, 0x02
+;   addi t6, sp, 0x290
+;   .byte 0x27, 0x8b, 0x0f, 0x02
+;   addi t6, sp, 0x2a0
+;   .byte 0xa7, 0x8b, 0x0f, 0x02
+;   addi t6, sp, 0x2b0
+;   .byte 0x27, 0x8c, 0x0f, 0x02
+;   addi t6, sp, 0x2c0
+;   .byte 0xa7, 0x8c, 0x0f, 0x02
+;   addi t6, sp, 0x2d0
+;   .byte 0x27, 0x8d, 0x0f, 0x02
+;   addi t6, sp, 0x2e0
+;   .byte 0xa7, 0x8d, 0x0f, 0x02
+;   addi t6, sp, 0x2f0
+;   .byte 0x27, 0x8e, 0x0f, 0x02
+;   addi t6, sp, 0x300
+;   .byte 0xa7, 0x8e, 0x0f, 0x02
+;   addi t6, sp, 0x310
+;   .byte 0x27, 0x8f, 0x0f, 0x02
+;   addi t6, sp, 0x320
+;   .byte 0xa7, 0x8f, 0x0f, 0x02
+; block1: ; offset 0x1ac
+;   auipc a2, 0
+;   ld a2, 0xc(a2)
+;   j 0xc
+;   .byte 0x00, 0x00, 0x00, 0x00 ; reloc_external Abs8 %libcall 0
+;   .byte 0x00, 0x00, 0x00, 0x00
+;   jalr a2
+;   ld ra, 0(sp)
+;   ld t0, 8(sp)
+;   ld t1, 0x10(sp)
+;   ld t2, 0x18(sp)
+;   ld a0, 0x20(sp)
+;   ld a1, 0x28(sp)
+;   ld a2, 0x30(sp)
+;   ld a3, 0x38(sp)
+;   ld a4, 0x40(sp)
+;   ld a5, 0x48(sp)
+;   ld a6, 0x50(sp)
+;   ld a7, 0x58(sp)
+;   ld t3, 0x60(sp)
+;   ld t4, 0x68(sp)
+;   ld t5, 0x70(sp)
+;   ld t6, 0x78(sp)
+;   fld ft0, 0x80(sp)
+;   fld ft1, 0x88(sp)
+;   fld ft2, 0x90(sp)
+;   fld ft3, 0x98(sp)
+;   fld ft4, 0xa0(sp)
+;   fld ft5, 0xa8(sp)
+;   fld ft6, 0xb0(sp)
+;   fld ft7, 0xb8(sp)
+;   fld fs1, 0xc0(sp)
+;   fld fa0, 0xc8(sp)
+;   fld fa1, 0xd0(sp)
+;   fld fa2, 0xd8(sp)
+;   fld fa3, 0xe0(sp)
+;   fld fa4, 0xe8(sp)
+;   fld fa5, 0xf0(sp)
+;   fld fa6, 0xf8(sp)
+;   fld fa7, 0x100(sp)
+;   fld ft8, 0x108(sp)
+;   fld ft9, 0x110(sp)
+;   fld ft10, 0x118(sp)
+;   fld ft11, 0x120(sp)
+;   .byte 0x57, 0x70, 0x08, 0xcc
+;   addi t6, sp, 0x130
+;   .byte 0x07, 0x80, 0x0f, 0x02
+;   addi t6, sp, 0x140
+;   .byte 0x87, 0x80, 0x0f, 0x02
+;   addi t6, sp, 0x150
+;   .byte 0x07, 0x81, 0x0f, 0x02
+;   addi t6, sp, 0x160
+;   .byte 0x87, 0x81, 0x0f, 0x02
+;   addi t6, sp, 0x170
+;   .byte 0x07, 0x82, 0x0f, 0x02
+;   addi t6, sp, 0x180
+;   .byte 0x87, 0x82, 0x0f, 0x02
+;   addi t6, sp, 0x190
+;   .byte 0x07, 0x83, 0x0f, 0x02
+;   addi t6, sp, 0x1a0
+;   .byte 0x87, 0x83, 0x0f, 0x02
+;   addi t6, sp, 0x1b0
+;   .byte 0x07, 0x84, 0x0f, 0x02
+;   addi t6, sp, 0x1c0
+;   .byte 0x87, 0x84, 0x0f, 0x02
+;   addi t6, sp, 0x1d0
+;   .byte 0x07, 0x85, 0x0f, 0x02
+;   addi t6, sp, 0x1e0
+;   .byte 0x87, 0x85, 0x0f, 0x02
+;   addi t6, sp, 0x1f0
+;   .byte 0x07, 0x86, 0x0f, 0x02
+;   addi t6, sp, 0x200
+;   .byte 0x87, 0x86, 0x0f, 0x02
+;   addi t6, sp, 0x210
+;   .byte 0x07, 0x87, 0x0f, 0x02
+;   addi t6, sp, 0x220
+;   .byte 0x87, 0x87, 0x0f, 0x02
+;   addi t6, sp, 0x230
+;   .byte 0x07, 0x88, 0x0f, 0x02
+;   addi t6, sp, 0x240
+;   .byte 0x87, 0x88, 0x0f, 0x02
+;   addi t6, sp, 0x250
+;   .byte 0x07, 0x89, 0x0f, 0x02
+;   addi t6, sp, 0x260
+;   .byte 0x87, 0x89, 0x0f, 0x02
+;   addi t6, sp, 0x270
+;   .byte 0x07, 0x8a, 0x0f, 0x02
+;   addi t6, sp, 0x280
+;   .byte 0x87, 0x8a, 0x0f, 0x02
+;   addi t6, sp, 0x290
+;   .byte 0x07, 0x8b, 0x0f, 0x02
+;   addi t6, sp, 0x2a0
+;   .byte 0x87, 0x8b, 0x0f, 0x02
+;   addi t6, sp, 0x2b0
+;   .byte 0x07, 0x8c, 0x0f, 0x02
+;   addi t6, sp, 0x2c0
+;   .byte 0x87, 0x8c, 0x0f, 0x02
+;   addi t6, sp, 0x2d0
+;   .byte 0x07, 0x8d, 0x0f, 0x02
+;   addi t6, sp, 0x2e0
+;   .byte 0x87, 0x8d, 0x0f, 0x02
+;   addi t6, sp, 0x2f0
+;   .byte 0x07, 0x8e, 0x0f, 0x02
+;   addi t6, sp, 0x300
+;   .byte 0x87, 0x8e, 0x0f, 0x02
+;   addi t6, sp, 0x310
+;   .byte 0x07, 0x8f, 0x0f, 0x02
+;   addi t6, sp, 0x320
+;   .byte 0x87, 0x8f, 0x0f, 0x02
+;   addi sp, sp, 0x330
+;   ld ra, 8(sp)
+;   ld s0, 0(sp)
+;   addi sp, sp, 0x10
+;   ret
+

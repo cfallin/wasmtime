@@ -17,7 +17,7 @@
 ;;       sd      s0, 0(sp)
 ;;       mv      s0, sp
 ;;       addi    sp, sp, -0x10
-;;       sd      s1, 8(sp)
+;;       sd      s1, 0(sp)
 ;;       mv      s1, a1
 ;;       mv      a3, a2
 ;;       ld      a4, 0x10(a0)
@@ -37,7 +37,7 @@
 ;;       jalr    a5
 ;;       addi    a1, zero, -1
 ;;       beq     a0, a1, 0x1c
-;;       ld      s1, 8(sp)
+;;       ld      s1, 0(sp)
 ;;       addi    sp, sp, 0x10
 ;;       ld      ra, 8(sp)
 ;;       ld      s0, 0(sp)
