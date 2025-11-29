@@ -1,3 +1,4 @@
+use crate::module::ModuleRegistry;
 #[cfg(feature = "component-model-async")]
 use crate::runtime::vm::VMStore;
 use crate::runtime::vm::component::{ComponentInstance, OwnedComponentInstance};
@@ -143,6 +144,21 @@ impl StoreComponentInstanceId {
     /// Panics if `self` does not belong to `store`.
     pub(crate) fn get_mut<'a>(&self, store: &'a mut StoreOpaque) -> Pin<&'a mut ComponentInstance> {
         self.from_data_get_mut(store.store_data_mut())
+    }
+
+    /// Return a mutable `ComponentInstance` and a `ModuleRegistry`
+    /// from the store.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` does not belong to `store`.
+    pub(crate) fn get_mut_and_registry<'a>(
+        &self,
+        store: &'a mut StoreOpaque,
+    ) -> (Pin<&'a mut ComponentInstance>, &'a ModuleRegistry) {
+        let (store_data, registry) = store.store_data_mut_and_registry();
+        let instance = self.from_data_get_mut(store_data);
+        (instance, registry)
     }
 
     /// Same as `get_mut`, but borrows less of a store.
