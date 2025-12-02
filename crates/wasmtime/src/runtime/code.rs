@@ -391,7 +391,8 @@ impl Drop for StoreCode {
 /// code pointers, ready to call.
 pub struct ModuleWithCode<'a> {
     module: &'a Module,
-    store_code: &'a StoreCode,
+    store_code_text: &'a [u8],
+    store_code_range: Range<StoreCodePC>,
 }
 
 impl<'a> ModuleWithCode<'a> {
@@ -401,12 +402,36 @@ impl<'a> ModuleWithCode<'a> {
         registry: &'a ModuleRegistry,
         module: &'a Module,
     ) -> Option<ModuleWithCode<'a>> {
-        let store_code = registry.store_code(module.engine_code())?;
-        Some(ModuleWithCode { module, store_code })
+        // Fastpath: if we aren't in a debugigng context, we know that
+        // the StoreCode is just a thin wrapper around the EngineCode,
+        // so build it directly without doing a
+        // `ModuleRegistry::store_code()` lookup.
+        if module.engine().tunables().debug_guest {
+            let store_code = registry.store_code(module.engine_code())?;
+            Some(ModuleWithCode {
+                module,
+                store_code_text: store_code.text(),
+                store_code_range: store_code.text_range(),
+            })
+        } else {
+            let engine_code_range = module.engine_code().text_range();
+            let store_code_range = StoreCodePC(engine_code_range.start.raw())
+                ..StoreCodePC(engine_code_range.end.raw());
+            let store_code_text = module.engine_code().text();
+            Some(ModuleWithCode {
+                module,
+                store_code_text,
+                store_code_range,
+            })
+        }
     }
 
     pub(crate) fn from_raw(module: &'a Module, store_code: &'a StoreCode) -> ModuleWithCode<'a> {
-        ModuleWithCode { module, store_code }
+        ModuleWithCode {
+            module,
+            store_code_text: store_code.text(),
+            store_code_range: store_code.text_range(),
+        }
     }
 
     /// Provide the Module wrapped in this tuple.
@@ -414,9 +439,9 @@ impl<'a> ModuleWithCode<'a> {
         self.module
     }
 
-    /// Provide the StoreCode wrapped in this tuple.
-    pub fn store_code(&self) -> &'a StoreCode {
-        self.store_code
+    /// Provide the StoreCodePC range wrapped in this tuple.
+    pub fn store_code_range(&self) -> Range<StoreCodePC> {
+        self.store_code_range.clone()
     }
 
     /// Returns an iterator over all functions defined within this module with
@@ -439,7 +464,7 @@ impl<'a> ModuleWithCode<'a> {
             .module
             .compiled_module()
             .finished_function_range(def_func_index);
-        &self.store_code.text()[range]
+        &self.store_code_text[range]
     }
 
     /// Get the array-to-Wasm trampoline for the function `index`
@@ -456,14 +481,14 @@ impl<'a> ModuleWithCode<'a> {
             .module
             .compiled_module()
             .array_to_wasm_trampoline_range(def_func_index)?;
-        Some(&self.store_code.text()[range])
+        Some(&self.store_code_text[range])
     }
 
     /// Get the text offset (relative PC) for a given absolute PC in
     /// this module.
     #[cfg(any(feature = "gc", feature = "debug"))]
     pub(crate) fn text_offset(&self, pc: usize) -> Option<u32> {
-        StoreCodePC::offset_of(self.store_code.text_range(), pc)
+        StoreCodePC::offset_of(self.store_code_range(), pc)
             .map(|offset| u32::try_from(offset).expect("Module larger than 4GiB"))
     }
 

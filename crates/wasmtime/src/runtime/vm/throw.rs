@@ -110,7 +110,7 @@ pub unsafe fn compute_handler(store: &mut dyn VMStore) -> Option<Handler> {
             if is_match {
                 let fp_to_sp = fp_to_sp.expect("frame offset must be known if we found a handler");
                 return Some((
-                    (module.store_code().text_range().start
+                    (module.store_code_range().start
                         + usize::try_from(handler.handler_offset)
                             .expect("Module larger than usize"))
                     .raw(),
