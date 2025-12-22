@@ -90,14 +90,24 @@ struct FullEgraphPass<'a> {
     value_to_id: SecondaryMap<Value, Id>,
 }
 
-pub(crate) fn run_full_egraph(func: &mut Function) {
-    // First, convert the full CFG to an egraph.
-    let mut value_to_id = SecondaryMap::new();
+impl<'a> FullEgraphPass<'a> {
+    fn from_clif(func: &mut Function) -> Self {
+        // First, convert the full CFG to an egraph.
+        let mut value_to_id = SecondaryMap::new();
+        let mut egraph = EGraph::new(());
+        let mut cursor = FuncCursor::new(func);
+        while let Some(block) = cursor.next_block() {
+            // Create entries for the blockparams.
+            for blockparam in cursor.func.dfg.block_params(block) {
+                let node = egraph.add(Node::Root(*blockparam));
+                value_to_id[*blockparam] = node;
+            }
 
-    let mut cursor = FuncCursor::new(func);
-    while let Some(block) = cursor.next_block() {
-        // Create entries for the blockparams.
+            while let Some(_insn) = cursor.next_inst() {}
+        }
 
-        while let Some(insn) = cursor.next_inst() {}
+        todo!()
     }
 }
+
+pub(crate) fn run_full_egraph(_func: &mut Function) {}
