@@ -18,7 +18,7 @@ workspace = true
 anyhow = { workspace = true }
 log = { workspace = true }
 wasmtime-environ = { workspace = true, features = ['compile'] }
-cranelift-codegen = { workspace = true, features = ["host-arch", "timing"] }
+cranelift-codegen = { workspace = true, features = ["host-arch", "timing", "enable-serde"] }
 cranelift-frontend = { workspace = true }
 cranelift-entity = { workspace = true }
 cranelift-native = { workspace = true }
@@ -35,6 +35,7 @@ itertools = { workspace = true }
 pulley-interpreter = { workspace = true, optional = true }
 wasmtime-math = { workspace = true }
 wasmtime-unwinder = { workspace = true, features = ["cranelift"] }
+serde_json = { workspace = true }
 
 [features]
 all-arch = ["cranelift-codegen/all-arch"]

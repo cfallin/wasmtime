@@ -11,7 +11,7 @@
 
 use crate::alias_analysis::AliasAnalysis;
 use crate::dominator_tree::DominatorTree;
-use crate::egraph::EgraphPass;
+use crate::egraph::{EgraphPass, Stats};
 use crate::flowgraph::ControlFlowGraph;
 use crate::inline::{Inline, do_inlining};
 use crate::ir::Function;
@@ -55,6 +55,9 @@ pub struct Context {
 
     /// Flag: do we want a disassembly with the CompiledCode?
     pub want_disasm: bool,
+
+    /// Stats.
+    pub stats: Option<Stats>,
 }
 
 impl Context {
@@ -78,6 +81,7 @@ impl Context {
             loop_analysis: LoopAnalysis::new(),
             compiled_code: None,
             want_disasm: false,
+            stats: None,
         }
     }
 
@@ -107,6 +111,11 @@ impl Context {
     /// `MachBackend` backend.
     pub fn set_disasm(&mut self, val: bool) {
         self.want_disasm = val;
+    }
+
+    /// Take the stats, if any.
+    pub fn take_stats(&mut self) -> Option<Stats> {
+        self.stats.take()
     }
 
     /// Compile the function, and emit machine code into a `Vec<u8>`.
@@ -392,6 +401,7 @@ impl Context {
         );
         pass.run();
         log::debug!("egraph stats: {:?}", pass.stats);
+        self.stats = Some(pass.stats);
         trace!("After egraph optimization:\n{}", self.func.display());
 
         self.verify_if(fisa)

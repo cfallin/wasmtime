@@ -1473,6 +1473,19 @@ impl FunctionCompiler<'_> {
             )
             .unwrap();
             write!(output, "{}", context.func.display()).unwrap();
+
+            if let Some(stats) = context.take_stats() {
+                let mut path = self
+                    .compiler
+                    .clif_dir
+                    .as_ref()
+                    .unwrap()
+                    .join(symbol.replace(":", "-"));
+                path.set_extension("json");
+
+                let mut output = std::fs::File::create(path).unwrap();
+                serde_json::to_writer_pretty(&mut output, &stats).unwrap();
+            }
         }
 
         let compiled_code = compilation_result?;

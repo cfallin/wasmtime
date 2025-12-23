@@ -4898,6 +4898,7 @@ dependencies = [
  "log",
  "object 0.37.3",
  "pulley-interpreter",
+ "serde_json",
  "smallvec",
  "target-lexicon",
  "thiserror 2.0.17",

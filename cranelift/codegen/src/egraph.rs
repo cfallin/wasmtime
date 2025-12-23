@@ -26,6 +26,8 @@ use cranelift_control::ControlPlane;
 use cranelift_entity::SecondaryMap;
 use cranelift_entity::packed_option::ReservedValue;
 use rustc_hash::FxHashSet;
+#[cfg(feature = "enable-serde")]
+use serde_derive::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 mod cost;
@@ -1153,32 +1155,33 @@ impl<'a> CtxHash<(Type, InstructionData)> for GVNContext<'a> {
 
 /// Statistics collected during egraph-based processing.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Stats {
-    pub(crate) pure_inst: u64,
-    pub(crate) pure_inst_deduped: u64,
-    pub(crate) pure_inst_subsume: u64,
-    pub(crate) pure_inst_rewrite_to_self: u64,
-    pub(crate) pure_inst_insert_orig: u64,
-    pub(crate) pure_inst_insert_new: u64,
-    pub(crate) skeleton_inst: u64,
-    pub(crate) skeleton_inst_simplified: u64,
-    pub(crate) skeleton_inst_gvn: u64,
-    pub(crate) alias_analysis_removed: u64,
-    pub(crate) new_inst: u64,
-    pub(crate) union: u64,
-    pub(crate) subsume: u64,
-    pub(crate) remat: u64,
-    pub(crate) rewrite_rule_invoked: u64,
-    pub(crate) rewrite_rule_results: u64,
-    pub(crate) rewrite_depth_limit: u64,
-    pub(crate) elaborate_visit_node: u64,
-    pub(crate) elaborate_memoize_hit: u64,
-    pub(crate) elaborate_memoize_miss: u64,
-    pub(crate) elaborate_remat: u64,
-    pub(crate) elaborate_licm_hoist: u64,
-    pub(crate) elaborate_func: u64,
-    pub(crate) elaborate_func_pre_insts: u64,
-    pub(crate) elaborate_func_post_insts: u64,
-    pub(crate) eclass_size_limit: u64,
-    pub(crate) elaborate_not_best_chosen: u64,
+#[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
+pub struct Stats {
+    pub pure_inst: u64,
+    pub pure_inst_deduped: u64,
+    pub pure_inst_subsume: u64,
+    pub pure_inst_rewrite_to_self: u64,
+    pub pure_inst_insert_orig: u64,
+    pub pure_inst_insert_new: u64,
+    pub skeleton_inst: u64,
+    pub skeleton_inst_simplified: u64,
+    pub skeleton_inst_gvn: u64,
+    pub alias_analysis_removed: u64,
+    pub new_inst: u64,
+    pub union: u64,
+    pub subsume: u64,
+    pub remat: u64,
+    pub rewrite_rule_invoked: u64,
+    pub rewrite_rule_results: u64,
+    pub rewrite_depth_limit: u64,
+    pub elaborate_visit_node: u64,
+    pub elaborate_memoize_hit: u64,
+    pub elaborate_memoize_miss: u64,
+    pub elaborate_remat: u64,
+    pub elaborate_licm_hoist: u64,
+    pub elaborate_func: u64,
+    pub elaborate_func_pre_insts: u64,
+    pub elaborate_func_post_insts: u64,
+    pub eclass_size_limit: u64,
+    pub elaborate_not_best_chosen: u64,
 }
