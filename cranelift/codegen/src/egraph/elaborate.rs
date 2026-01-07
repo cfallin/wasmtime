@@ -337,8 +337,10 @@ impl<'a> Elaborator<'a> {
                         " -> best of union({:?}, {:?}) = {:?}",
                         best[x], best[y], best[value]
                     );
-                    let not_chosen = if best[value] == best[x] { y } else { x };
-                    Self::mark_not_chosen(&mut self.not_chosen, &self.func.dfg, not_chosen);
+                    if best[x].0 != best[y].0 {
+                        let not_chosen = if best[value] == best[x] { y } else { x };
+                        Self::mark_not_chosen(&mut self.not_chosen, &self.func.dfg, not_chosen);
+                    }
                 }
 
                 ValueDef::Param(_, _) => {
