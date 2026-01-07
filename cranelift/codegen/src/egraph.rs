@@ -384,7 +384,7 @@ where
             optimized_values
                 .iter()
                 .map(|&val| (cost_func(val), val))
-                .max_by_key(|(cost, _)| *cost)
+                .min_by_key(|(cost, _)| *cost)
                 .map(|(_, val)| val)
         } else {
             None
