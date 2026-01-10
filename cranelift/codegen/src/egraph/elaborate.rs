@@ -215,16 +215,19 @@ impl<'a> Elaborator<'a> {
             SeenUnion { generation: u32, best_child: Value },
             Committed,
         }
-        let mut states = vec![];
-        states.resize(self.func.dfg.len_values(), ValueState::Unused);
+        let mut states: SecondaryMap<Value, ValueState> =
+            SecondaryMap::with_default(ValueState::Unused);
+        // TODO: generation-tree technique; each Union needs to
+        // push/pop an "overlay" on the seen-set.
 
         fn pick_best(
             value: Value,
-            states: &mut [ValueState],
+            states: &mut SecondaryMap<Value, ValueState>,
             this_generation: u32,
             func: &Function,
         ) -> Cost {
-            match states[value.as_u32() as usize] {
+            log::trace!("pick_best: {value} state is {:?}", states[value]);
+            match states[value] {
                 ValueState::Committed => {
                     // Zero-cost once committed from a previous extraction.
                     Cost::zero()
@@ -232,6 +235,7 @@ impl<'a> Elaborator<'a> {
                 ValueState::SeenLeaf { generation } | ValueState::SeenUnion { generation, .. }
                     if generation == this_generation =>
                 {
+                    log::trace!(" -> zero cost (already seen this root-traversal)");
                     // Now zero-cost, since we don't count duplicates in this traversal.
                     Cost::zero()
                 }
@@ -240,15 +244,21 @@ impl<'a> Elaborator<'a> {
                     // or not seen at all, and not committed. We
                     // actually have to count the cost of this
                     // subtree.
+                    log::trace!(
+                        " -> not yet seen; looking at def {:?}",
+                        func.dfg.value_def(value)
+                    );
                     match func.dfg.value_def(value) {
                         ValueDef::Result(inst, _) => {
                             // Is this instruction in the skeleton?
                             let cost = if func.layout.inst_block(inst).is_some() {
                                 // If so, zero-cost.
+                                log::trace!(" -> skeleton inst; zero cost");
                                 Cost::zero()
                             } else {
                                 // Otherwise, actually count cost of
                                 // subtree.
+                                log::trace!(" -> pure op; recursing");
                                 Cost::of_pure_op(
                                     func.dfg.insts[inst].opcode(),
                                     func.dfg
@@ -257,22 +267,27 @@ impl<'a> Elaborator<'a> {
                                         .map(|&arg| pick_best(arg, states, this_generation, func)),
                                 )
                             };
-                            states[value.as_u32() as usize] = ValueState::SeenLeaf {
+                            states[value] = ValueState::SeenLeaf {
                                 generation: this_generation,
                             };
+                            log::trace!(" -> cost {cost:?}");
                             cost
                         }
                         ValueDef::Param(..) => {
                             // Block-params are zero-cost.
-                            states[value.as_u32() as usize] = ValueState::SeenLeaf {
+                            states[value] = ValueState::SeenLeaf {
                                 generation: this_generation,
                             };
+                            log::trace!(" -> blockparam; zero cost");
                             Cost::zero()
                         }
                         ValueDef::Union(x, y) => {
                             // Compute each subtree and choose the best one.
+                            log::trace!(" -> union({x}, {y}); recursing");
                             let x_cost = pick_best(x, states, this_generation, func);
-                            let y_cost = pick_best(x, states, this_generation, func);
+                            let y_cost = pick_best(y, states, this_generation, func);
+                            log::trace!(" -> cost of left ({x}) is {x_cost:?}");
+                            log::trace!(" -> cost of right ({y}) is {y_cost:?}");
                             // Tie-break toward the left (which tends
                             // to be the original expression when a
                             // rewrite occurs).
@@ -281,7 +296,8 @@ impl<'a> Elaborator<'a> {
                             } else {
                                 (y, y_cost)
                             };
-                            states[value.as_u32() as usize] = ValueState::SeenUnion {
+                            log::trace!(" -> best child is {best} (cost {cost:?}");
+                            states[value] = ValueState::SeenUnion {
                                 generation: this_generation,
                                 best_child: best,
                             };
@@ -293,20 +309,34 @@ impl<'a> Elaborator<'a> {
         }
         fn commit(
             value: Value,
-            states: &mut [ValueState],
+            states: &mut SecondaryMap<Value, ValueState>,
+            func: &Function,
             best: &mut SecondaryMap<Value, Value>,
         ) -> Value {
+            log::trace!("committing value {value}: state is {:?}", states[value]);
             // Commit the chosen path for the given root.
-            match states[value.as_u32() as usize] {
+            match states[value] {
                 ValueState::Unused => unreachable!(),
                 ValueState::SeenLeaf { .. } => {
+                    log::trace!(" -> leaf");
                     best[value] = value;
+                    states[value] = ValueState::Committed;
+                    // Now we need to commit any args of this value.
+                    match func.dfg.value_def(value) {
+                        ValueDef::Result(inst, _) => {
+                            for &arg in func.dfg.inst_args(inst) {
+                                commit(arg, states, func, best);
+                            }
+                        }
+                        _ => {}
+                    }
                     value
                 }
                 ValueState::SeenUnion { best_child, .. } => {
-                    let leaf_value = commit(best_child, states, best);
+                    log::trace!(" -> union; best child was {best_child}; recursing");
+                    let leaf_value = commit(best_child, states, func, best);
                     best[value] = leaf_value;
-                    states[value.as_u32() as usize] = ValueState::Committed;
+                    states[value] = ValueState::Committed;
                     leaf_value
                 }
                 ValueState::Committed => best[value],
@@ -318,12 +348,23 @@ impl<'a> Elaborator<'a> {
         // it (at every level).
         let mut cursor = FuncCursor::new(self.func);
         let mut generation = 1;
-        while let Some(_block) = cursor.next_block() {
+        while let Some(block) = cursor.next_block() {
+            log::trace!("block: {block}");
             while let Some(inst) = cursor.next_inst() {
-                for &result in cursor.func.dfg.inst_results(inst) {
-                    pick_best(result, &mut states, generation, &cursor.func);
-                    commit(result, &mut states, &mut self.value_to_best_value);
+                log::trace!("inst: {inst}");
+                for &arg in cursor.func.dfg.inst_args(inst) {
+                    log::trace!("extracting for root {arg}");
+                    pick_best(arg, &mut states, generation, &cursor.func);
+                    commit(
+                        arg,
+                        &mut states,
+                        &cursor.func,
+                        &mut self.value_to_best_value,
+                    );
                     generation += 1;
+                }
+                for &result in cursor.func.dfg.inst_results(inst) {
+                    self.value_to_best_value[result] = result;
                 }
             }
         }
