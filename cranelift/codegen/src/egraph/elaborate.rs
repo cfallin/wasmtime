@@ -48,7 +48,7 @@ pub(crate) struct Elaborator<'a> {
     value_to_elaborated_value: ScopedHashMap<Value, ElaboratedValue>,
     /// Map from Value to the best (lowest-cost) Value in its eclass
     /// (tree of union value-nodes).
-    value_to_best_value: SecondaryMap<Value, Value>,
+    value_to_best_value: SecondaryMap<Value, BestEntry>,
     /// Stack of blocks and loops in current elaboration path.
     loop_stack: SmallVec<[LoopStackEntry; 8]>,
     /// The current block into which we are elaborating.
@@ -82,6 +82,9 @@ struct ElaboratedValue {
     in_block: Block,
     value: Value,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BestEntry(Cost, Value);
 
 #[derive(Clone, Debug)]
 struct LoopStackEntry {
@@ -208,24 +211,35 @@ impl<'a> Elaborator<'a> {
     fn compute_best_values(&mut self) {
         trace!("Computing the best values for each eclass");
 
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum ValueState {
-            Unused,
-            SeenLeaf { generation: u32 },
-            SeenUnion { generation: u32, best_child: Value },
-            Committed,
+        #[derive(Default)]
+        struct ScopedValueSet {
+            set: FxHashSet<Value>,
+            stack: Vec<Value>,
         }
-        let mut states: SecondaryMap<Value, ValueState> =
-            SecondaryMap::with_default(ValueState::Unused);
-        // TODO: generation-tree technique; each Union needs to
-        // push/pop an "overlay" on the seen-set.
+        impl ScopedValueSet {
+            fn insert(&mut self, value: Value) {
+                if self.set.insert(value) {
+                    self.stack.push(value);
+                }
+            }
+            fn snapshot(&self) -> usize {
+                self.stack.len()
+            }
+            fn restore(&mut self, snapshot: usize) {
+                while self.stack.len() > snapshot {
+                    let to_remove = self.stack.pop().unwrap();
+                    self.set.remove(&to_remove);
+                }
+            }
+        }
+
+        let mut seen = ScopedValueSet::default();
 
         fn pick_best(
             value: Value,
-            states: &mut SecondaryMap<Value, ValueState>,
-            this_generation: u32,
+            seen: &mut ScopedValueSet,
             func: &Function,
-        ) -> Cost {
+        ) -> (Cost, Value) {
             log::trace!("pick_best: {value} state is {:?}", states[value]);
             match states[value] {
                 ValueState::Committed => {
