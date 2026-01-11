@@ -1,0 +1,27 @@
+- two-phase approach (evaluate, then commit) lets us choose best of all paths from some root use
+  - approach at this point: ValueState with SeenLeaf/SeenUnion and one generation counter
+- distinction between `op arg1, arg2` and `union arg1, arg2`: we want to *keep*
+  the per-traversal seen set for the first, and push/pop an overlay (i.e.,
+  undo/backtrack) for the second
+  - approach at this point: stack-and-set for `seen`, rather than marking in `ValueState`
+- references to intermediate Union nodes in subtrees that are *not* chosen
+  complicate things!
+  - really, the immutable data structure seems to be forcing us to choose a
+    best option for each subtree
+
+can we encode the whole thing as weighted sets and then do a greedy approximation?
+- is it actually "weighted set cover with dependencies"?
+
+- one set per operator to choose to use
+- set covers all use-sites of *that*
+- but then if we choose a set, we need to cover the use-sites for that set's
+  corresponding operator (and only if!)
+
+---
+
+multi-level `seen` does it, I think
+- key insight: think of top-level program as one conjunction of all args to all
+  skeleton.
+- then we just have conjunctions and disjunctions.
+- we traverse conjunctions (sum the costs) and, at each disjunction, split the
+  world and choose the best side.
