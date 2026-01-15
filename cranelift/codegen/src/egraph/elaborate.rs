@@ -13,6 +13,7 @@ use crate::scoped_hash_map::ScopedHashMap;
 use crate::trace;
 use crate::{FxHashMap, FxHashSet};
 use alloc::vec::Vec;
+use core::ops::Range;
 use cranelift_control::ControlPlane;
 use cranelift_entity::{EntitySet, SecondaryMap, packed_option::ReservedValue};
 use smallvec::{SmallVec, smallvec};
@@ -863,5 +864,172 @@ impl<'a> Elaborator<'a> {
         self.compute_best_values();
         self.elaborate_domtree(&self.domtree);
         self.stats.elaborate_func_post_insts += self.func.dfg.num_insts() as u64;
+    }
+}
+
+/// A "binary disjunction seen set" is a somewhat weird
+/// traversal-seen set that allows for backtracking across
+/// binary (two-arm) disjunctions.
+///
+/// The idea is that we want to be able to visit both sides of
+/// a Union node and compute our best extraction on each side,
+/// with all of the path down the tree (including prior
+/// visited arguments of operators) represented in the set,
+/// but have the ability to, with a stack discipline, create
+/// branch points, visit the left, rollback to branch, visit
+/// the right, and then choose to commit to the left or right.
+///
+/// The "rollback and try another" would work in a general
+/// (N-ary) case by returning the set of values removed from
+/// the set, so we could put them back if we actually choose
+/// that branch. However the slightly clever thing here is
+/// that with *binary* branching, we only ever have *one*
+/// other choice at a given level -- so the "alternative sets"
+/// (popped-and-saved values) can form a stack discipline as
+/// well! Thus, for efficiency, we keep them in their own
+/// separate stack.
+///
+/// This data structure is meant to work in a traversal with
+/// *conjunctions* and *disjunctions*. We grow the seen-set as
+/// we work through the items in a conjunction (later items
+/// see seen-values from earlier subtrees in the conjunction),
+/// and we branch at disjunctions.
+///
+/// The sequence of operations at a disjunction is:
+/// - Take a snapshot with `snapshot`. This returns a
+///   `Snapshot` handle.
+/// - Visit the first (left) branch.
+/// - Roll back to the snapshot with `rollback`. This returns
+///   a `Saved` handle, and the set will be reset to the state
+///   prior to this disjunction again.
+/// - Visit the second (right) branch.
+/// - Choose either the left or right branch of the
+///   disjunction as "better" to commit.
+///   - If left, use `restore_saved` to trim the right branch
+///     off the set and restore the saved values.
+///   - If right, use `drop_saved` to trim the saved values
+///     off the saved-stack.
+/// - The set is now in a state consistent with only the
+///   chosen branch.
+///
+/// Note that each subtree visit can itself visit disjunctions
+/// that use the above branching procedure; this all works
+/// fine. The user must not mix `Snapshot` or `Saved` handles
+/// across stack levels (i.e., violate the stack discipline).
+///
+///
+#[derive(Default, Debug)]
+struct BinaryDisjunctionSeenSet {
+    set: FxHashSet<Value>,
+    stack: Vec<Value>,
+    saved: Vec<Value>,
+}
+#[derive(Clone, Copy, Debug)]
+struct SeenSetSnapshot(usize, usize);
+#[derive(Clone, Debug)]
+struct SeenSetSaved(usize, Range<usize>);
+
+impl BinaryDisjunctionSeenSet {
+    /// From a given state, starts a traversal into the first
+    /// half of a binary disjunction.
+    fn snapshot(&self) -> SeenSetSnapshot {
+        SeenSetSnapshot(self.stack.len(), self.saved.len())
+    }
+
+    /// Snapshots and saves the set from the first half of a
+    /// binary disjunction and prepares for the second half.
+    fn rollback(&mut self, snapshot: SeenSetSnapshot) -> SeenSetSaved {
+        self.saved.truncate(snapshot.1);
+        let saved_start = self.saved.len();
+        for removed in self.stack.drain(snapshot.0..) {
+            self.set.remove(&removed);
+            self.saved.push(removed);
+        }
+        let saved_end = self.saved.len();
+        SeenSetSaved(self.stack.len(), saved_start..saved_end)
+    }
+
+    /// Switches to the rollback-saved values from the given snapshot.
+    fn restore_saved(&mut self, saved: SeenSetSaved) {
+        for removed in self.stack.drain(saved.0..) {
+            self.set.remove(&removed);
+        }
+        for &restored in &self.saved[saved.1.clone()] {
+            self.stack.push(restored);
+            self.set.insert(restored);
+        }
+        self.saved.truncate(saved.1.start);
+    }
+
+    /// Drops the rollback-save after we commit to the
+    /// not-saved branch (i.e., keep what we did after
+    /// rollback instead).
+    fn drop_saved(&mut self, saved: SeenSetSaved) {
+        self.saved.truncate(saved.1.start);
+    }
+
+    /// Insert into the set. Returns `true` if value was not yet
+    /// present.
+    fn insert(&mut self, value: Value) -> bool {
+        self.stack.push(value);
+        self.set.insert(value)
+    }
+
+    /// Test the set for membership.
+    fn contains(&self, value: Value) -> bool {
+        self.set.contains(&value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disjunction_seen_set() {
+        let v1 = Value::from_u32(1);
+        let v2 = Value::from_u32(2);
+        let v3 = Value::from_u32(3);
+        let v4 = Value::from_u32(4);
+        let v5 = Value::from_u32(5);
+
+        let mut set = BinaryDisjunctionSeenSet::default();
+        assert!(set.insert(v1));
+        assert!(set.contains(v1));
+        let snapshot = set.snapshot();
+        {
+            // Left branch.
+            assert!(set.contains(v1));
+            assert!(set.insert(v2));
+            assert!(set.contains(v2));
+
+            let snapshot = set.snapshot();
+            {
+                assert!(set.insert(v4));
+                assert!(set.contains(v4));
+            }
+            let saved = set.rollback(snapshot);
+            {
+                assert!(!set.contains(v4));
+                assert!(set.insert(v5));
+            }
+            set.drop_saved(saved); // Choose right branch.
+            assert!(set.contains(v5));
+            
+        }
+        let saved = set.rollback(snapshot);
+        {
+            // Right branch.
+            assert!(set.contains(v1));
+            assert!(!set.contains(v2));
+            assert!(set.insert(v3));
+            assert!(set.contains(v3));
+        }
+        set.restore_saved(saved); // Choose left branch.
+        assert!(set.contains(v1));
+        assert!(set.contains(v2));
+        assert!(!set.contains(v3));
+        assert!(!set.contains(v4));
+        assert!(set.contains(v5));
     }
 }
