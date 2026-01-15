@@ -15,7 +15,7 @@ use crate::{FxHashMap, FxHashSet};
 use alloc::vec::Vec;
 use core::ops::Range;
 use cranelift_control::ControlPlane;
-use cranelift_entity::{EntitySet, SecondaryMap, packed_option::ReservedValue};
+use cranelift_entity::{SecondaryMap, packed_option::ReservedValue};
 use smallvec::{SmallVec, smallvec};
 
 pub(crate) struct Elaborator<'a> {
@@ -220,174 +220,161 @@ impl<'a> Elaborator<'a> {
         self.cur_block = block;
     }
 
-    fn topo_sorted_values(&self) -> Vec<Value> {
+    fn compute_best_values(&mut self) {
+        let mut seen = BinaryDisjunctionSeenSet::default();
+
+        // "Fuel" to prevent super-linear blowup: we permit a certain
+        // multiple of the number of values in node visits, i.e., an
+        // average number of visits to a single node of a small
+        // constant. After we exceed this limit, we short-circuit all
+        // union nodes to the right, i.e., we don't do any disjunctive
+        // backtracking anymore.
+        const VISIT_PER_NODE_LIMIT: usize = 16;
+        let mut limit = self.func.dfg.num_values() * VISIT_PER_NODE_LIMIT;
+
+        // Perform a domtree-preorder walk.
         #[derive(Debug)]
-        enum Event {
-            Enter,
-            Exit,
+        enum StackEntry {
+            /// Visit a block. No cost return.
+            Block(Block),
+            /// Visit a value and evaluate its cost; pushes cost on
+            /// `costs`.
+            Value(Value),
+            /// Visit the right half of a union, after having visited
+            /// the left. Assumes (and leaves) cost of left half on
+            /// `costs`, and pushes cost of right half on `costs`.
+            UnionRight(Value, Value, SeenSetSnapshot),
+            /// Merges costs of left and right halves of a union after
+            /// visiting the right half, and commits the seen-set of
+            /// left or right half.
+            UnionMerge(Value, SeenSetSaved),
+            /// Merges cost of an instruction, consuming costs for
+            /// each argument and pushing cost on `costs` for each
+            /// result.
+            InstMerge(Inst),
+            /// Discard the top entry of `costs`.
+            DiscardCost,
+            /// Discard from the seen set back to a snapshot.
+            RestoreSnapshot(SeenSetSnapshot),
         }
-        let mut stack = Vec::<(Event, Value)>::new();
-
-        // Traverse the CFG in pre-order so that, when we look at the
-        // instructions and operands inside each block, we see value defs before
-        // uses.
-        for block in crate::traversals::Dfs::new().pre_order_iter(&self.func) {
-            for inst in self.func.layout.block_insts(block) {
-                stack.extend(self.func.dfg.inst_values(inst).map(|v| (Event::Enter, v)));
+        let mut stack = vec![];
+        let mut costs = vec![];
+        stack.push(StackEntry::Block(self.func.layout.entry_block().unwrap()));
+        while let Some(entry) = stack.pop() {
+            if limit == 0 {
+                // We simply stop running the abstract machine when we
+                // reach the limit. Any queries to
+                // `value_to_best_value` that find `reserved_value`
+                // (the default) will take a default rule instead,
+                // which looks right at union nodes.
+                break;
             }
-        }
+            limit -= 1;
 
-        // We pushed in the desired order, so popping would implicitly reverse
-        // that. Avoid that by reversing the initial stack before we start
-        // traversing the DFG.
-        stack.reverse();
+            trace!("compute_best_values: entry {entry:?}");
+            match entry {
+                StackEntry::Block(block) => {
+                    // Take a snapshot of the seen-set and add a Pop
+                    // entry -- the seen-set is scoped to domtree
+                    // levels.
+                    let snapshot = seen.snapshot();
+                    stack.push(StackEntry::RestoreSnapshot(snapshot));
+                    // Push domtree children.
+                    stack.extend(self.domtree.children(block).map(StackEntry::Block));
 
-        let mut sorted = Vec::with_capacity(self.func.dfg.values().len());
-        let mut seen = EntitySet::<Value>::with_capacity(self.func.dfg.values().len());
-
-        // Post-order traversal of the DFG, visiting value defs before uses.
-        while let Some((event, value)) = stack.pop() {
-            match event {
-                Event::Enter => {
-                    if seen.insert(value) {
-                        stack.push((Event::Exit, value));
-                        match self.func.dfg.value_def(value) {
-                            ValueDef::Result(inst, _) => {
-                                stack.extend(
-                                    self.func
-                                        .dfg
-                                        .inst_values(inst)
-                                        .rev()
-                                        .filter(|v| !seen.contains(*v))
-                                        .map(|v| (Event::Enter, v)),
-                                );
+                    // Now traverse roots in this block.
+                    for inst in self.func.layout.block_insts(block) {
+                        trace!("inst {inst}");
+                        // Results for this inst are their own `best`,
+                        // since the inst is in the skeleton.
+                        for &result in self.func.dfg.inst_results(inst) {
+                            self.value_to_best_value[result] = BestEntry(Cost::zero(), result);
+                        }
+                        // Visit each argument, computing a cost;
+                        // discard that cost.
+                        for &arg in self.func.dfg.inst_args(inst) {
+                            trace!("arg: {arg}");
+                            if !seen.contains(arg) {
+                                stack.push(StackEntry::DiscardCost);
+                                stack.push(StackEntry::Value(arg));
                             }
-                            ValueDef::Union(a, b) => {
-                                if !seen.contains(b) {
-                                    stack.push((Event::Enter, b));
-                                }
-                                if !seen.contains(a) {
-                                    stack.push((Event::Enter, a));
-                                }
-                            }
-                            ValueDef::Param(..) => {}
                         }
                     }
                 }
-                Event::Exit => {
-                    sorted.push(value);
-                }
-            }
-        }
-
-        sorted
-    }
-
-    fn compute_best_values(&mut self) {
-        let sorted_values = self.topo_sorted_values();
-
-        let best = &mut self.value_to_best_value;
-
-        // We can't make random decisions inside the fixpoint loop below because
-        // that could cause values to change on every iteration of the loop,
-        // which would make the loop never terminate. So in chaos testing
-        // mode we need a form of making suboptimal decisions that is fully
-        // deterministic. We choose to simply make the worst decision we know
-        // how to do instead of the best.
-        let use_worst = self.ctrl_plane.get_decision();
-
-        trace!(
-            "Computing the {} values for each eclass",
-            if use_worst {
-                "worst (chaos mode)"
-            } else {
-                "best"
-            }
-        );
-
-        // Because the values are topologically sorted, we know that we will see
-        // defs before uses, so an instruction's operands' costs will already be
-        // computed by the time we are computing the cost for the current value
-        // and its instruction.
-        for value in sorted_values.iter().copied() {
-            let def = self.func.dfg.value_def(value);
-            trace!("computing best for value {:?} def {:?}", value, def);
-
-            match def {
-                // Pick the best of the two options based on min-cost. This
-                // works because each element of `best` is a `(cost, value)`
-                // tuple; `cost` comes first so the natural comparison works
-                // based on cost, and breaks ties based on value number.
-                ValueDef::Union(x, y) => {
-                    debug_assert!(!best[x].1.is_reserved_value());
-                    debug_assert!(!best[y].1.is_reserved_value());
-                    best[value] = if use_worst {
-                        core::cmp::max(best[x], best[y])
+                StackEntry::Value(value) => {
+                    if !seen.insert(value) {
+                        let best = self.value_to_best_value[value];
+                        costs.push(BestEntry(Cost::zero(), best.1));
                     } else {
-                        core::cmp::min(best[x], best[y])
-                    };
-                    trace!(
-                        " -> best of union({:?}, {:?}) = {:?}",
-                        best[x], best[y], best[value]
-                    );
-                }
-
-                ValueDef::Param(_, _) => {
-                    best[value] = BestEntry(Cost::zero(), value);
-                }
-
-                // If the Inst is inserted into the layout (which is,
-                // at this point, only the side-effecting skeleton),
-                // then it must be computed and thus we give it zero
-                // cost.
-                ValueDef::Result(inst, _) => {
-                    if let Some(_) = self.func.layout.inst_block(inst) {
-                        best[value] = BestEntry(Cost::zero(), value);
-                    } else {
-                        let inst_data = &self.func.dfg.insts[inst];
-                        // N.B.: at this point we know that the opcode is
-                        // pure, so `pure_op_cost`'s precondition is
-                        // satisfied.
-                        let cost = Cost::of_pure_op(
-                            inst_data.opcode(),
-                            self.func.dfg.inst_values(inst).map(|value| {
-                                debug_assert!(!best[value].1.is_reserved_value());
-                                best[value].0
-                            }),
-                        );
-                        best[value] = BestEntry(cost, value);
-                        trace!(" -> cost of value {} = {:?}", value, cost);
+                        match self.func.dfg.value_def(value) {
+                            ValueDef::Result(inst, _) => {
+                                if self.func.layout.inst_block(inst).is_some() {
+                                    for &result in self.func.dfg.inst_results(inst) {
+                                        self.value_to_best_value[result] =
+                                            BestEntry(Cost::zero(), result);
+                                    }
+                                    costs.push(BestEntry(Cost::zero(), value));
+                                } else {
+                                    stack.push(StackEntry::InstMerge(inst));
+                                    for &arg in self.func.dfg.inst_args(inst) {
+                                        if seen.contains(arg) {
+                                            costs.push(BestEntry(Cost::zero(), arg));
+                                        } else {
+                                            stack.push(StackEntry::Value(arg));
+                                        }
+                                    }
+                                }
+                            }
+                            ValueDef::Param(..) => {
+                                self.value_to_best_value[value] = BestEntry(Cost::zero(), value);
+                                costs.push(BestEntry(Cost::zero(), value));
+                            }
+                            ValueDef::Union(x, y) => {
+                                let snapshot = seen.snapshot();
+                                stack.push(StackEntry::UnionRight(value, y, snapshot));
+                                stack.push(StackEntry::Value(x));
+                            }
+                        }
                     }
                 }
-            };
-
-            // You might be expecting an assert that the best cost we just
-            // computed is not infinity, however infinite cost *can* happen in
-            // practice. First, note that our cost function doesn't know about
-            // any shared structure in the dataflow graph, it only sums operand
-            // costs. (And trying to avoid that by deduping a single operation's
-            // operands is a losing game because you can always just add one
-            // indirection and go from `add(x, x)` to `add(foo(x), bar(x))` to
-            // hide the shared structure.) Given that blindness to sharing, we
-            // can make cost grow exponentially with a linear sequence of
-            // operations:
-            //
-            //     v0 = iconst.i32 1    ;; cost = 1
-            //     v1 = iadd v0, v0     ;; cost = 3 + 1 + 1
-            //     v2 = iadd v1, v1     ;; cost = 3 + 5 + 5
-            //     v3 = iadd v2, v2     ;; cost = 3 + 13 + 13
-            //     v4 = iadd v3, v3     ;; cost = 3 + 29 + 29
-            //     v5 = iadd v4, v4     ;; cost = 3 + 61 + 61
-            //     v6 = iadd v5, v5     ;; cost = 3 + 125 + 125
-            //     ;; etc...
-            //
-            // Such a chain can cause cost to saturate to infinity. How do we
-            // choose which e-node is best when there are multiple that have
-            // saturated to infinity? It doesn't matter. As long as invariant
-            // (2) for optimization rules is upheld by our rule set (see
-            // `cranelift/codegen/src/opts/README.md`) it is safe to choose
-            // *any* e-node in the e-class. At worst we will produce suboptimal
-            // code, but never an incorrectness.
+                StackEntry::UnionRight(union, right, snapshot) => {
+                    let saved = seen.rollback(snapshot);
+                    stack.push(StackEntry::UnionMerge(union, saved));
+                    stack.push(StackEntry::Value(right));
+                }
+                StackEntry::UnionMerge(union, saved) => {
+                    let right_cost = costs.pop().unwrap();
+                    let left_cost = costs.pop().unwrap();
+                    if right_cost <= left_cost {
+                        seen.drop_saved(saved);
+                        self.value_to_best_value[union] = right_cost;
+                        costs.push(right_cost);
+                    } else {
+                        seen.restore_saved(saved);
+                        self.value_to_best_value[union] = left_cost;
+                        costs.push(left_cost);
+                    }
+                }
+                StackEntry::InstMerge(inst) => {
+                    let arity = self.func.dfg.inst_args(inst).len();
+                    let cost = Cost::of_pure_op(
+                        self.func.dfg.insts[inst].opcode(),
+                        costs.drain(costs.len() - arity..).map(|be| be.0),
+                    );
+                    let results = self.func.dfg.inst_results(inst);
+                    assert_eq!(results.len(), 1); // All pure operators have one result.
+                    let result = results[0];
+                    self.value_to_best_value[result] = BestEntry(cost, result);
+                    costs.push(BestEntry(cost, result));
+                }
+                StackEntry::DiscardCost => {
+                    assert!(!costs.is_empty());
+                    costs.pop();
+                }
+                StackEntry::RestoreSnapshot(snapshot) => {
+                    seen.discard(snapshot);
+                }
+            }
         }
     }
 
@@ -461,7 +448,7 @@ impl<'a> Elaborator<'a> {
                     // value) here so we have a full view of the
                     // eclass.
                     trace!("looking up best value for {}", value);
-                    let BestEntry(_, best_value) = self.value_to_best_value[value];
+                    let BestEntry(_, best_value) = self.best_result(value);
                     trace!("elaborate: value {} -> best {}", value, best_value);
                     debug_assert_ne!(best_value, Value::reserved_value());
 
@@ -647,6 +634,7 @@ impl<'a> Elaborator<'a> {
                             remat_arg = true;
                         }
                     }
+                    let arg_values = &self.elab_result_stack[arg_idx..];
 
                     // Now we need to place `inst` at the computed
                     // location (just before `before`). Note that
@@ -681,7 +669,7 @@ impl<'a> Elaborator<'a> {
                                 value: new_result,
                                 in_block: insert_block,
                             };
-                            let best_result = self.value_to_best_value[result];
+                            let best_result = self.best_result(result);
                             self.value_to_elaborated_value.insert_if_absent_with_depth(
                                 &NullCtx,
                                 best_result.1,
@@ -707,7 +695,7 @@ impl<'a> Elaborator<'a> {
                                 value: result,
                                 in_block: insert_block,
                             };
-                            let best_result = self.value_to_best_value[result];
+                            let best_result = self.best_result(result);
                             self.value_to_elaborated_value.insert_if_absent_with_depth(
                                 &NullCtx,
                                 best_result.1,
@@ -802,7 +790,7 @@ impl<'a> Elaborator<'a> {
             // map now.
             for &result in self.func.dfg.inst_results(inst) {
                 trace!(" -> result {}", result);
-                let best_result = self.value_to_best_value[result];
+                let best_result = self.best_result(result);
                 self.value_to_elaborated_value.insert_if_absent(
                     &NullCtx,
                     best_result.1,
@@ -814,6 +802,24 @@ impl<'a> Elaborator<'a> {
             }
 
             next_inst = self.func.layout.next_inst(inst);
+        }
+    }
+
+    fn best_result(&self, mut value: Value) -> BestEntry {
+        let best = self.value_to_best_value[value];
+        if !best.1.is_reserved_value() {
+            return best;
+        }
+        loop {
+            value = self.func.dfg.resolve_aliases(value);
+            match self.func.dfg.value_def(value) {
+                ValueDef::Result(..) | ValueDef::Param(..) => {
+                    return BestEntry(Cost::zero(), value);
+                }
+                ValueDef::Union(_, y) => {
+                    value = y;
+                }
+            }
         }
     }
 
@@ -968,11 +974,20 @@ impl BinaryDisjunctionSeenSet {
         self.saved.truncate(saved.1.start);
     }
 
+    /// Discard back to a snapshot without saving.
+    fn discard(&mut self, snapshot: SeenSetSnapshot) {
+        self.stack.truncate(snapshot.0);
+        self.saved.truncate(snapshot.1);
+    }
+
     /// Insert into the set. Returns `true` if value was not yet
     /// present.
     fn insert(&mut self, value: Value) -> bool {
-        self.stack.push(value);
-        self.set.insert(value)
+        let inserted = self.set.insert(value);
+        if inserted {
+            self.stack.push(value);
+        }
+        inserted
     }
 
     /// Test the set for membership.
@@ -1015,7 +1030,6 @@ mod tests {
             }
             set.drop_saved(saved); // Choose right branch.
             assert!(set.contains(v5));
-            
         }
         let saved = set.rollback(snapshot);
         {
