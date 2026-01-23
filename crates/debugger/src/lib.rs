@@ -16,6 +16,9 @@ use wasmtime::{
     StoreContextMut, Trap,
 };
 
+mod host;
+pub use host::{DebuggerComponent, DebuggerImpl, DebuggerView, HasDebuggerView, add_debuggee, wit};
+
 /// A `Debugger` wraps up state associated with debugging the code
 /// running in a single `Store`.
 ///
