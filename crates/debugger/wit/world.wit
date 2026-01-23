@@ -1,0 +1,183 @@
+package wasmtime:debugger@42.0.0;
+
+world main {
+  include wasi:cli/imports@0.2.6;
+  import debugger;
+}
+
+interface debugger {
+  /// Get the top-level instance that this debugger is attached to, if any.
+  ///
+  /// A debugger may be attached to a core instance or a component. If the
+  /// latter, use `main-component` (TODO) instead.
+  main-instance: func() -> option<instance>;
+
+  /// Get the Wasm binary for the top-level instance/component, if known.
+  wasm-binary: func() -> option<list<u8>>;
+
+  /// Get the main entry point to invoke. This will be a function with
+  /// no arguments and no return value. If the debuggee's world does
+  /// not have a single main entry point with that signature, this function
+  /// may be a host-provided wrapper that will start execution in an
+  /// appropriate way.
+  entry-point: func() -> wasm-func;
+
+  resource instance {
+    /// Start a breakpoint edit session.
+    edit-breakpoints: func() -> instance-breakpoints;
+
+    /// Get a memory from this instance's memory index space.
+    get-memory: func(memory-index: u32) -> result<memory, error>;
+
+    /// Get a global from this instance's global index space.
+    get-global: func(global-index: u32) -> result<global, error>;
+
+    /// Get a table from this instance's table index space.
+    get-table: func(table-index: u32) -> result<table, error>;
+  }
+
+  resource memory {
+    /// Get the current memory size, in bytes.
+    size-bytes: func() -> u32;
+
+    /// Get the page size, in bytes.
+    page-size-bytes: func() -> u32;
+
+    /// Grow to a new size, in bytes.
+    grow-to-bytes: func(new-size: u32) -> result<_, error>;
+
+    /// Get a u8 (byte) at an address. Returns `none` if out-of-bounds.
+    get-u8: func(addr: u32) -> result<u8, error>;
+    /// Get a u16 (in little endian order) at an address.
+    get-u16: func(addr: u32) -> result<u16, error>;
+    /// Get a u32 (in little endian order) at an address.
+    get-u32: func(addr: u32) -> result<u32, error>;
+    /// Get a u64 (in little endian order) at an address.
+    get-u64: func(addr: u32) -> result<u64, error>;
+
+    /// Set a u8 (byte) at an address. Returns `none` if out-of-bounds.
+    set-u8: func(addr: u32, value: u8) -> result<_, error>;
+    /// Set a u16 (in little endian order) at an address.
+    set-u16: func(addr: u32, value: u16) -> result<_, error>;
+    /// Set a u32 (in little endian order) at an address.
+    set-u32: func(addr: u32, value: u32) -> result<_, error>;
+    /// Set a u64 (in little endian order) at an address.
+    set-u64: func(addr: u32, value: u64) -> result<_, error>;
+  }
+
+  resource global {
+    /// Get the value of this global.
+    get: func() -> value;
+
+    /// Set the value of this global.
+    set: func(val: value) -> result<_, error>;
+  }
+
+  resource table {
+    /// Get the current length of this table, in elements.
+    len: func() -> u32;
+
+    /// Get the value at the Nth slot.
+    get-element: func(index: u32) -> result<value, error>;
+
+    /// Set the value at the Nth slot.
+    set-element: func(index: u32, val: value) -> result<_, error>;
+  }
+
+  resource wasm-func {
+    /// Call this function.
+    call: func(args: list<value>) -> result<invocation, error>;
+  }
+
+  resource invocation {
+    /// Step forward this execution, returning a debugger event
+    /// (which may be a completion).
+    step: async func() -> debug-event;
+
+    /// Get the current frame.
+    frame: func() -> frame;
+  }
+
+  resource frame {
+    /// Instance of this frame.
+    instance: func() -> instance;
+
+    /// Current PC in this frame's instance.
+    pc: func() -> u32;
+
+    /// Wasm locals.
+    locals: func() -> list<value>;
+
+    /// Operand stack.
+    stack: func() -> list<value>;
+
+    /// parent frame (the one that called this frame), if any.
+    parent-frame: func() -> option<frame>;
+  }
+
+  resource instance-breakpoints {
+    /// Add a breakpoint.
+    add-breakpoint: func(pc: u32) -> result<_, error>;
+    /// Remove a breakpoint.
+    remove-breakpoint: func(pc: u32) -> result<_, error>;
+    /// Enable or disable single-stepping.
+    set-single-step: func(enabled: bool) -> result<_, error>;
+    /// Commit changes to breakpoints.
+    ///
+    /// Either `commit` or `cancel` must be called before
+    /// this resource is dropped.
+    commit: func() -> result<_, error>;
+    /// Cancel this edit session's changes.
+    ///
+    /// Either `commit` or `cancel` must be called before
+    /// this resource is dropped.
+    cancel: func();
+  }
+
+  enum error {
+    invalid-entity,
+    invalid-pc,
+    breakpoint-update,
+    read-only,
+    out-of-bounds,
+  }
+
+  enum value-kind {
+    wasm-i32,
+    wasm-i64,
+    wasm-f32,
+    wasm-f64,
+    wasm-v128,
+    // TODO: GC structs and arrays
+    // TODO: exceptions
+    // TODO: funcrefs (use resource func directly?)
+  }
+
+  resource value {
+    get-kind: func() -> value-kind;
+
+    /// For i32/i64/f32/f64 values, the raw bits.
+    ///
+    /// Floats (f32/f64) will have any NaNs canonicalize.
+    get-bits: func() -> u64;
+
+    /// For v128, the full 128 bit vector contents, as two u64s.
+    get-vector: func() -> tuple<u64, u64>;
+  }
+
+  resource debug-event {
+    get-kind: func() -> debug-event-kind;
+
+    /// For a `complete` event, the values returned from the function.
+    func-return-values: func() -> list<value>;
+
+    /// For a `trap` event, a string rendering of the trap reason.
+    trap-reason: func() -> string;
+  }
+
+  enum debug-event-kind {
+    complete,
+    trap,
+    breakpoint,
+  }
+}
