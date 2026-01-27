@@ -1,30 +1,174 @@
 package wasmtime:debugger@42.0.0;
 
+/* TODO:
+
+    - reflection:
+      - defining new memories, tables, globals
+      - instantiating modules into instances
+    - debugger:
+      - exception events
+ */
+
 world main {
   include wasi:cli/imports@0.2.6;
-  import debugger;
+  import debuggee;
+  export debugger;
 }
 
 interface debugger {
-  /// Get the top-level instance that this debugger is attached to, if any.
+  use debuggee.{debuggee};
+
+  /// Launch the debugger top-half (e.g., protocol server or UI)
+  /// implemented by this component, given
+  /// the provided interface to a debuggee.
+  debug: func(d: debuggee);
+}
+
+interface debuggee {
+  /// A debuggee consisting of one Store over which we have
+  /// debugging control.
   ///
-  /// A debugger may be attached to a core instance or a component. If the
-  /// latter, use `main-component` (TODO) instead.
-  main-instance: func() -> option<instance>;
+  /// A debuggee is always either "paused" or "running", and certain
+  /// methods below are only available in one or the other state.
+  resource debuggee {
+    /// List all modules that exist in the Store.
+    ///
+    /// Usable in paused or running states.
+    all-modules: func() -> list<module>;
 
-  /// Get the Wasm binary for the top-level instance/component, if known.
-  wasm-binary: func() -> option<list<u8>>;
+    /// List of all instances that exist in the Store.
+    ///
+    /// Usable in paused or running states.
+    all-instances: func() -> list<instance>;
 
-  /// Get the main entry point to invoke. This will be a function with
-  /// no arguments and no return value. If the debuggee's world does
-  /// not have a single main entry point with that signature, this function
-  /// may be a host-provided wrapper that will start execution in an
-  /// appropriate way.
-  entry-point: func() -> wasm-func;
+    /// Force an interruption event in any running code.
+    ///
+    /// Usable in paused or running states. If invoked in
+    /// the paused state, the next execution will immediately
+    /// yield an "interrupted" event.
+    interrupt: func();
+
+    /// Single-step, returning a pollable that will yield an event
+    /// when the single-step execution is complete.
+    ///
+    /// The `resumption` value indicates any mutations to
+    /// perform to execution state as part of resuming:
+    /// for example, injecting a call to another function,
+    /// or throwing an exception, or forcing an early return
+    /// from the current function.
+    ///
+    /// Usable in paused state; transitions to running state.
+    /// Debuggee remains in running state until the returned
+    /// pollable completes.
+    ///
+    /// If invoked while already running, causes a trap.
+    single-step: func(resumption: resumption-value) -> event-pollable;
+
+    /// Continue execution, returning a pollable that will
+    /// yield an event when the resumed execution
+    /// is complete.
+    ///
+    /// The `resumption` value indicates any mutations to
+    /// perform to execution state as part of resuming:
+    /// for example, injecting a call to another function,
+    /// or throwing an exception, or forcing an early return
+    /// from the current function.
+    ///
+    /// Usable in paused state; transitions to running state.
+    /// Debuggee remains in running state until the returned
+    /// pollable completes.
+    ///
+    /// If invoked while already running, causes a trap.
+    continue: func(resumption: resumption-value) -> event-pollable;
+
+    /// Get the current frame.
+    ///
+    /// Usable in paused state. If invoked while already
+    /// running, causes a trap.
+    frame: func() -> option<frame>;
+  }
+
+  /// A pollable that represents asynchronous execution of the
+  /// debuggee until the next debug event pausing execution.
+  ///
+  /// When complete, yields the resulting debug event.
+  resource event-pollable {
+    /// Is this pollable ready?
+    ready: func() -> bool;
+
+    /// Consume this pollable, producing the resulting
+    /// event. Blocks if not ready.
+    finish: static func(self: event-pollable) -> result<event, error>;
+  }
+
+  /// A `resumption` value indicates how we want to continue
+  /// execution after a pause.
+  ///
+  /// By default, if we are a "read-only" debugger, there is only
+  /// one answer: with no mutation, according to the abstract
+  /// Wasm machine semantics and current machine state.
+  ///
+  /// However, this interface also supports various kinds of mutations.
+  /// For example, the debugger can ask to insert a call to an arbitrary
+  /// Wasm function, it can force an early return from the current function,
+  /// or it can throw an exception.
+  ///
+  /// This `resumption` value is orthogonal to the
+  /// `continue` vs. `single-step` resume axis:
+  /// the resumption value indicates whether we want to mutate
+  /// the executing abstract machine's *state*, while the single-step
+  /// vs. continue axis indicates how we want to step that machine
+  /// forward from whatever state is indicated (i.e., one step or
+  /// many until an event).
+  variant resumption-value {
+    /// Resume normally: do not alter the machine state.
+    normal,
+    /// Inject a call to a Wasm function at the current point, as-if
+    /// the program contained a `call` instruction with the given
+    /// values on the operand stack.
+    ///
+    /// Execution is subject to ordinary debugger events as with
+    /// any other; e.g., the function we call may experience breakpoint
+    /// pauses, may be single-stepped if we resume with `single-step`,
+    /// etc.
+    ///
+    /// If the injected function call completes normally, an
+    /// `injected-call-return` debug event is raised with the
+    /// return value(s).
+    inject-call(inject-call),
+    /// Resume as-if an exception were thrown at the current point.
+    throw-exception(wasm-exception),
+    /// Force a return from the current function frame, with the given
+    /// value(s) as return value(s).
+    early-return(list<wasm-value>),
+  }
+
+  /// A function call to be injected upon resumption.
+  record inject-call {
+    callee: wasm-func,
+    arguments: list<wasm-value>,
+  }
+
+  /// A debug event.
+  variant event {
+    /// Execution of the debuggee has completed.
+    complete,
+    /// A trap occurred in the debuggee. Execution
+    /// is paused at the trap-point, and will terminate
+    /// when resuming execution.
+    trap,
+    /// A breakpoint was hit in the debuggee, pausing
+    /// execution.
+    breakpoint,
+    /// An interruption due to `debuggee.interrupt` occurred.
+    interrupted,
+    /// An injected call completed with return value(s).
+    injected-call-return(list<wasm-value>),
+  }
 
   resource instance {
-    /// Start a breakpoint edit session.
-    edit-breakpoints: func() -> instance-breakpoints;
+    /// Get this instance's module.
+    get-module: func() -> module;
 
     /// Get a memory from this instance's memory index space.
     get-memory: func(memory-index: u32) -> result<memory, error>;
@@ -34,6 +178,34 @@ interface debugger {
 
     /// Get a table from this instance's table index space.
     get-table: func(table-index: u32) -> result<table, error>;
+
+    /// Get a function from this instance's function index space.
+    get-func: func(func-index: u32) -> result<wasm-func, error>;
+
+    /// Get a tag from this instance's tag index space.
+    get-tag: func(tag-index: u32) -> result<wasm-tag, error>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this instance (within the debuggee)
+    /// to allow equality and hashing.
+    unique-id: func() -> u32;
+  }
+
+  resource module {
+    /// Get this module's source (Wasm bytecode) as a core Wasm module,
+    /// if available.
+    source: func() -> option<list<u8>>;
+
+    /// Start a breakpoint edit session.
+    edit-breakpoints: func() -> module-breakpoints;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this module to allow equality and hashing.
+    unique-id: func() -> u32;
   }
 
   resource memory {
@@ -63,14 +235,26 @@ interface debugger {
     set-u32: func(addr: u32, value: u32) -> result<_, error>;
     /// Set a u64 (in little endian order) at an address.
     set-u64: func(addr: u32, value: u64) -> result<_, error>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this memory to allow equality and hashing.
+    unique-id: func() -> u32;
   }
 
   resource global {
     /// Get the value of this global.
-    get: func() -> value;
+    get: func() -> wasm-value;
 
     /// Set the value of this global.
-    set: func(val: value) -> result<_, error>;
+    set: func(val: wasm-value) -> result<_, error>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this memory to allow equality and hashing.
+    unique-id: func() -> u32;
   }
 
   resource table {
@@ -78,24 +262,61 @@ interface debugger {
     len: func() -> u32;
 
     /// Get the value at the Nth slot.
-    get-element: func(index: u32) -> result<value, error>;
+    get-element: func(index: u32) -> result<wasm-value, error>;
 
     /// Set the value at the Nth slot.
-    set-element: func(index: u32, val: value) -> result<_, error>;
+    set-element: func(index: u32, val: wasm-value) -> result<_, error>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this memory to allow equality and hashing.
+    unique-id: func() -> u32;
   }
 
   resource wasm-func {
-    /// Call this function.
-    call: func(args: list<value>) -> result<invocation, error>;
+    /// Get the parameter types.
+    params: func() -> list<wasm-type>;
+
+    /// Get the result types.
+    results: func() -> list<wasm-type>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Get the unique ID of this function to allow equality and hashing.
+    unique-id: func() -> u32;
   }
 
-  resource invocation {
-    /// Step forward this execution, returning a debugger event
-    /// (which may be a completion).
-    step: async func() -> debug-event;
+  resource wasm-exception {
+    /// Get the tag of this exception.
+    get-tag: func() -> wasm-tag;
 
-    /// Get the current frame.
-    frame: func() -> frame;
+    /// Get the payload values of this exception.
+    get-values: func() -> list<wasm-value>;
+
+    /// Clone this reference.
+    clone: func() -> wasm-tag;
+
+    /// Allocate a new exception.
+    make: static func(
+        tag: borrow<wasm-tag>,
+        values: list<wasm-value>
+    ) -> result<wasm-exception, error>;
+  }
+
+  resource wasm-tag {
+    /// Get the parameter types.
+    params: func() -> list<wasm-type>;
+
+    /// Get the unique ID of this tag to allow equality and hashing.
+    unique-id: func() -> u32;
+
+    /// Clone this handle.
+    clone: func() -> wasm-tag;
+
+    /// Allocate a new tag.
+    make: static func(params: list<wasm-type>) -> wasm-tag;
   }
 
   resource frame {
@@ -106,32 +327,30 @@ interface debugger {
     pc: func() -> u32;
 
     /// Wasm locals.
-    locals: func() -> list<value>;
+    locals: func() -> list<wasm-value>;
 
     /// Operand stack.
-    stack: func() -> list<value>;
+    stack: func() -> list<wasm-value>;
 
     /// parent frame (the one that called this frame), if any.
     parent-frame: func() -> option<frame>;
   }
 
-  resource instance-breakpoints {
+  resource module-breakpoints {
     /// Add a breakpoint.
     add-breakpoint: func(pc: u32) -> result<_, error>;
     /// Remove a breakpoint.
     remove-breakpoint: func(pc: u32) -> result<_, error>;
-    /// Enable or disable single-stepping.
-    set-single-step: func(enabled: bool) -> result<_, error>;
     /// Commit changes to breakpoints.
     ///
     /// Either `commit` or `cancel` must be called before
     /// this resource is dropped.
-    commit: func() -> result<_, error>;
+    commit: static func(self: module-breakpoints) -> result<_, error>;
     /// Cancel this edit session's changes.
     ///
     /// Either `commit` or `cancel` must be called before
     /// this resource is dropped.
-    cancel: func();
+    cancel: static func(self: module-breakpoints);
   }
 
   enum error {
@@ -142,42 +361,28 @@ interface debugger {
     out-of-bounds,
   }
 
-  enum value-kind {
+  variant wasm-value {
+    wasm-i32(u32),
+    wasm-i64(u64),
+    wasm-f32(f32),
+    wasm-f64(f64),
+    wasm-v128(list<u8>),
+    wasm-func(wasm-func),
+    wasm-exception(wasm-exception),
+    // TODO: GC structs and arrays
+  }
+
+  /// Standalone clone implementation for a Wasm value.
+  clone-wasm-value: func(value: wasm-value) -> wasm-value;
+
+  variant wasm-type {
     wasm-i32,
     wasm-i64,
     wasm-f32,
     wasm-f64,
     wasm-v128,
+    wasm-funcref,
+    wasm-exnref,
     // TODO: GC structs and arrays
-    // TODO: exceptions
-    // TODO: funcrefs (use resource func directly?)
-  }
-
-  resource value {
-    get-kind: func() -> value-kind;
-
-    /// For i32/i64/f32/f64 values, the raw bits.
-    ///
-    /// Floats (f32/f64) will have any NaNs canonicalize.
-    get-bits: func() -> u64;
-
-    /// For v128, the full 128 bit vector contents, as two u64s.
-    get-vector: func() -> tuple<u64, u64>;
-  }
-
-  resource debug-event {
-    get-kind: func() -> debug-event-kind;
-
-    /// For a `complete` event, the values returned from the function.
-    func-return-values: func() -> list<value>;
-
-    /// For a `trap` event, a string rendering of the trap reason.
-    trap-reason: func() -> string;
-  }
-
-  enum debug-event-kind {
-    complete,
-    trap,
-    breakpoint,
   }
 }
