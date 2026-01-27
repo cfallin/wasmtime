@@ -361,19 +361,18 @@ interface debuggee {
     out-of-bounds,
   }
 
-  variant wasm-value {
-    wasm-i32(u32),
-    wasm-i64(u64),
-    wasm-f32(f32),
-    wasm-f64(f64),
-    wasm-v128(list<u8>),
-    wasm-func(wasm-func),
-    wasm-exception(wasm-exception),
-    // TODO: GC structs and arrays
-  }
+  resource wasm-value {
+    get-type: func() -> wasm-type;
+    unwrap-i32: func() -> u32;
+    unwrap-i64: func() -> u64;
+    unwrap-f32: func() -> f32;
+    unwrap-f64: func() -> f64;
+    unwrap-v128: func() -> list<u8>;
+    unwrap-func: func() -> wasm-func;
+    unwrap-exception: func() -> wasm-exception;
 
-  /// Standalone clone implementation for a Wasm value.
-  clone-wasm-value: func(value: wasm-value) -> wasm-value;
+    clone: func() -> wasm-value;
+  }
 
   variant wasm-type {
     wasm-i32,
