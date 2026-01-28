@@ -168,22 +168,22 @@ interface debuggee {
 
   resource instance {
     /// Get this instance's module.
-    get-module: func() -> module;
+    get-module: func(d: borrow<debuggee>) -> module;
 
     /// Get a memory from this instance's memory index space.
-    get-memory: func(memory-index: u32) -> result<memory, error>;
+    get-memory: func(d: borrow<debuggee>, memory-index: u32) -> result<memory, error>;
 
     /// Get a global from this instance's global index space.
-    get-global: func(global-index: u32) -> result<global, error>;
+    get-global: func(d: borrow<debuggee>, global-index: u32) -> result<global, error>;
 
     /// Get a table from this instance's table index space.
-    get-table: func(table-index: u32) -> result<table, error>;
+    get-table: func(d: borrow<debuggee>, table-index: u32) -> result<table, error>;
 
     /// Get a function from this instance's function index space.
-    get-func: func(func-index: u32) -> result<wasm-func, error>;
+    get-func: func(d: borrow<debuggee>, func-index: u32) -> result<wasm-func, error>;
 
     /// Get a tag from this instance's tag index space.
-    get-tag: func(tag-index: u32) -> result<wasm-tag, error>;
+    get-tag: func(d: borrow<debuggee>, tag-index: u32) -> result<wasm-tag, error>;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -196,10 +196,10 @@ interface debuggee {
   resource module {
     /// Get this module's source (Wasm bytecode) as a core Wasm module,
     /// if available.
-    source: func() -> option<list<u8>>;
+    source: func(d: borrow<debuggee>) -> option<list<u8>>;
 
     /// Start a breakpoint edit session.
-    edit-breakpoints: func() -> module-breakpoints;
+    edit-breakpoints: func(d: borrow<debuggee>) -> module-breakpoints;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -213,28 +213,28 @@ interface debuggee {
     size-bytes: func() -> u32;
 
     /// Get the page size, in bytes.
-    page-size-bytes: func() -> u32;
+    page-size-bytes: func(d: borrow<debuggee>) -> u32;
 
     /// Grow to a new size, in bytes.
-    grow-to-bytes: func(new-size: u32) -> result<_, error>;
+    grow-to-bytes: func(d: borrow<debuggee>, new-size: u32) -> result<_, error>;
 
     /// Get a u8 (byte) at an address. Returns `none` if out-of-bounds.
-    get-u8: func(addr: u32) -> result<u8, error>;
+    get-u8: func(d: borrow<debuggee>, addr: u32) -> result<u8, error>;
     /// Get a u16 (in little endian order) at an address.
-    get-u16: func(addr: u32) -> result<u16, error>;
+    get-u16: func(addr: u32, d: borrow<debuggee>) -> result<u16, error>;
     /// Get a u32 (in little endian order) at an address.
-    get-u32: func(addr: u32) -> result<u32, error>;
+    get-u32: func(addr: u32, d: borrow<debuggee>) -> result<u32, error>;
     /// Get a u64 (in little endian order) at an address.
-    get-u64: func(addr: u32) -> result<u64, error>;
+    get-u64: func(addr: u32, d: borrow<debuggee>) -> result<u64, error>;
 
     /// Set a u8 (byte) at an address. Returns `none` if out-of-bounds.
-    set-u8: func(addr: u32, value: u8) -> result<_, error>;
+    set-u8: func(addr: u32, d: borrow<debuggee>, value: u8) -> result<_, error>;
     /// Set a u16 (in little endian order) at an address.
-    set-u16: func(addr: u32, value: u16) -> result<_, error>;
+    set-u16: func(addr: u32, d: borrow<debuggee>, value: u16) -> result<_, error>;
     /// Set a u32 (in little endian order) at an address.
-    set-u32: func(addr: u32, value: u32) -> result<_, error>;
+    set-u32: func(addr: u32, d: borrow<debuggee>, value: u32) -> result<_, error>;
     /// Set a u64 (in little endian order) at an address.
-    set-u64: func(addr: u32, value: u64) -> result<_, error>;
+    set-u64: func(addr: u32, d: borrow<debuggee>, value: u64) -> result<_, error>;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -245,10 +245,10 @@ interface debuggee {
 
   resource global {
     /// Get the value of this global.
-    get: func() -> wasm-value;
+    get: func(d: borrow<debuggee>) -> wasm-value;
 
     /// Set the value of this global.
-    set: func(val: wasm-value) -> result<_, error>;
+    set: func(d: borrow<debuggee>, val: wasm-value) -> result<_, error>;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -259,13 +259,13 @@ interface debuggee {
 
   resource table {
     /// Get the current length of this table, in elements.
-    len: func() -> u32;
+    len: func(d: borrow<debuggee>) -> u32;
 
     /// Get the value at the Nth slot.
-    get-element: func(index: u32) -> result<wasm-value, error>;
+    get-element: func(d: borrow<debuggee>, index: u32) -> result<wasm-value, error>;
 
     /// Set the value at the Nth slot.
-    set-element: func(index: u32, val: wasm-value) -> result<_, error>;
+    set-element: func(d: borrow<debuggee>, index: u32, val: wasm-value) -> result<_, error>;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -276,10 +276,10 @@ interface debuggee {
 
   resource wasm-func {
     /// Get the parameter types.
-    params: func() -> list<wasm-type>;
+    params: func(d: borrow<debuggee>) -> list<wasm-type>;
 
     /// Get the result types.
-    results: func() -> list<wasm-type>;
+    results: func(d: borrow<debuggee>) -> list<wasm-type>;
 
     /// Clone this handle.
     clone: func() -> wasm-tag;
@@ -290,16 +290,17 @@ interface debuggee {
 
   resource wasm-exception {
     /// Get the tag of this exception.
-    get-tag: func() -> wasm-tag;
+    get-tag: func(d: borrow<debuggee>) -> wasm-tag;
 
     /// Get the payload values of this exception.
-    get-values: func() -> list<wasm-value>;
+    get-values: func(d: borrow<debuggee>) -> list<wasm-value>;
 
     /// Clone this reference.
-    clone: func() -> wasm-tag;
+    clone: func(d: borrow<debuggee>) -> wasm-tag;
 
     /// Allocate a new exception.
     make: static func(
+        d: borrow<debuggee>,
         tag: borrow<wasm-tag>,
         values: list<wasm-value>
     ) -> result<wasm-exception, error>;
@@ -307,7 +308,7 @@ interface debuggee {
 
   resource wasm-tag {
     /// Get the parameter types.
-    params: func() -> list<wasm-type>;
+    params: func(d: borrow<debuggee>) -> list<wasm-type>;
 
     /// Get the unique ID of this tag to allow equality and hashing.
     unique-id: func() -> u32;
@@ -316,24 +317,24 @@ interface debuggee {
     clone: func() -> wasm-tag;
 
     /// Allocate a new tag.
-    make: static func(params: list<wasm-type>) -> wasm-tag;
+    make: static func(d: borrow<debuggee>, params: list<wasm-type>) -> wasm-tag;
   }
 
   resource frame {
     /// Instance of this frame.
-    instance: func() -> instance;
+    instance: func(d: borrow<debuggee>) -> instance;
 
     /// Current PC in this frame's instance.
-    pc: func() -> u32;
+    pc: func(d: borrow<debuggee>) -> u32;
 
     /// Wasm locals.
-    locals: func() -> list<wasm-value>;
+    locals: func(d: borrow<debuggee>) -> list<wasm-value>;
 
     /// Operand stack.
-    stack: func() -> list<wasm-value>;
+    stack: func(d: borrow<debuggee>) -> list<wasm-value>;
 
     /// parent frame (the one that called this frame), if any.
-    parent-frame: func() -> option<frame>;
+    parent-frame: static func(self: frame, d: borrow<debuggee>) -> option<frame>;
   }
 
   resource module-breakpoints {
@@ -345,12 +346,12 @@ interface debuggee {
     ///
     /// Either `commit` or `cancel` must be called before
     /// this resource is dropped.
-    commit: static func(self: module-breakpoints) -> result<_, error>;
+    commit: static func(self: module-breakpoints, d: borrow<debuggee>) -> result<_, error>;
     /// Cancel this edit session's changes.
     ///
     /// Either `commit` or `cancel` must be called before
     /// this resource is dropped.
-    cancel: static func(self: module-breakpoints);
+    cancel: static func(self: module-breakpoints, d: borrow<debuggee>);
   }
 
   enum error {
