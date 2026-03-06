@@ -69,6 +69,8 @@ pub struct CompiledFunction {
     pub debug_slot_descriptor: Option<FrameStateSlotBuilder>,
     /// Debug breakpoint patches: Wasm PC, offset range in buffer.
     pub breakpoint_patch_points: Vec<(u32, Range<u32>)>,
+    /// Call return offsets: (wasm_pc_of_call, wasm_instruction_length).
+    pub call_return_offsets: Vec<(u32, u32)>,
 }
 
 impl CompiledFunction {
@@ -87,6 +89,7 @@ impl CompiledFunction {
             metadata: Default::default(),
             debug_slot_descriptor: None,
             breakpoint_patch_points: vec![],
+            call_return_offsets: vec![],
         };
         this.finalize_breakpoints();
 

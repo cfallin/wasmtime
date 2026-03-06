@@ -560,6 +560,29 @@ impl FrameHandle {
         Ok(Some((func, wasm_pc)))
     }
 
+    /// Get the return address for this frame, i.e., the Wasm PC of the
+    /// instruction after the call at which this frame is paused.
+    ///
+    /// Returns `None` if this PC is not a known call site, or if the
+    /// frame is not a Wasm function.
+    pub fn return_address_pc(&self, mut store: impl AsContextMut) -> Result<Option<u32>> {
+        let mut store = store.as_context_mut();
+        let frame_data = self.frame_data(store.0.as_store_opaque())?;
+        let FuncKey::DefinedWasmFunction(_, _) = frame_data.func_key else {
+            return Ok(None);
+        };
+        let wasm_pc = frame_data.wasm_pc;
+        let module = self
+            .module(&mut store)?
+            .expect("module should be defined if this is a defined function");
+        let frame_table = module
+            .frame_table()
+            .expect("Frame table must be present when guest-debug is enabled");
+        Ok(frame_table
+            .call_instruction_length(wasm_pc)
+            .map(|len| wasm_pc + len))
+    }
+
     /// Get the number of locals in this frame.
     pub fn num_locals(&self, mut store: impl AsContextMut) -> Result<u32> {
         let store = store.as_context_mut();

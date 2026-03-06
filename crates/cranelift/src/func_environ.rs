@@ -223,6 +223,15 @@ pub struct FuncEnvironment<'module_environment> {
     /// The stack-slot used for exposing Wasm state via debug
     /// instrumentation, if any, and the builder containing its metadata.
     pub(crate) state_slot: Option<(ir::StackSlot, FrameStateSlotBuilder)>,
+
+    /// The Wasm PC of the most recently seen call-like instruction, if any.
+    /// Used to compute call instruction lengths for return address metadata.
+    last_call_wasm_pc: Option<u32>,
+
+    /// Accumulated (call_wasm_pc, instruction_length) pairs for call
+    /// instructions. Used to populate the frame table with return
+    /// address offsets so the debugger can compute return addresses.
+    pub(crate) call_return_offsets: Vec<(u32, u32)>,
 }
 
 impl<'module_environment> FuncEnvironment<'module_environment> {
@@ -284,6 +293,9 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             stack_switching_values_buffer: None,
 
             state_slot: None,
+
+            last_call_wasm_pc: None,
+            call_return_offsets: vec![],
         }
     }
 
@@ -3823,6 +3835,21 @@ impl FuncEnvironment<'_> {
             self.fuel_before_op(op, builder, self.is_reachable());
         }
         if self.is_reachable() && self.state_slot.is_some() {
+            let current_pc = builder.srcloc().bits();
+
+            // If the previous instruction was a call, we now know its
+            // length: current_pc - call_pc. Record this so the frame
+            // table can provide return addresses.
+            if let Some(call_pc) = self.last_call_wasm_pc.take() {
+                self.call_return_offsets
+                    .push((call_pc, current_pc - call_pc));
+            }
+
+            // Track whether the current instruction is a call-like op.
+            if op_is_call(op) {
+                self.last_call_wasm_pc = Some(current_pc);
+            }
+
             let builtin = self.builtin_functions.patchable_breakpoint(builder.func);
             let vmctx = self.vmctx_val(&mut builder.cursor());
             let inst = builder.ins().call(builtin, &[vmctx]);
@@ -4523,4 +4550,16 @@ fn index_type_to_ir_type(index_type: IndexType) -> ir::Type {
         IndexType::I32 => I32,
         IndexType::I64 => I64,
     }
+}
+
+fn op_is_call(op: &Operator) -> bool {
+    matches!(
+        op,
+        Operator::Call { .. }
+            | Operator::CallIndirect { .. }
+            | Operator::CallRef { .. }
+            | Operator::ReturnCall { .. }
+            | Operator::ReturnCallIndirect { .. }
+            | Operator::ReturnCallRef { .. }
+    )
 }

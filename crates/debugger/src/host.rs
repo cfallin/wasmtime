@@ -163,6 +163,7 @@ trait OpaqueDebugger {
 
     async fn frame_instance(&mut self, frame: FrameHandle) -> Result<WitResult<Instance>>;
     async fn frame_func_and_pc(&mut self, frame: FrameHandle) -> Result<WitResult<(u32, u32)>>;
+    async fn frame_return_address(&mut self, frame: FrameHandle) -> Result<WitResult<Option<u32>>>;
     async fn frame_locals(&mut self, frame: FrameHandle) -> Result<WitResult<Vec<WasmValue>>>;
     async fn frame_stack(&mut self, frame: FrameHandle) -> Result<WitResult<Vec<WasmValue>>>;
     async fn frame_parent(&mut self, frame: FrameHandle) -> Result<WitResult<Option<FrameHandle>>>;
@@ -595,6 +596,15 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debugger<T> {
                 .map_err(|_| wit::Error::InvalidFrame)?
                 .ok_or(wit::Error::NonWasmFrame)?;
             Ok((func.as_u32(), pc))
+        })
+        .await
+    }
+
+    async fn frame_return_address(&mut self, frame: FrameHandle) -> Result<WitResult<Option<u32>>> {
+        self.with_store(move |mut store| {
+            frame
+                .return_address_pc(&mut store)
+                .map_err(|_| wit::Error::InvalidFrame)
         })
         .await
     }
@@ -1457,6 +1467,16 @@ impl<T: DebuggerView> wit::HostFrame for DebuggerImpl<T> {
             Ok((_, pc)) => Ok(Ok(pc)),
             Err(e) => Ok(Err(e)),
         }
+    }
+
+    async fn get_return_address(
+        &mut self,
+        self_: Resource<Frame>,
+        d: Resource<Debuggee>,
+    ) -> Result<WitResult<Option<u32>>> {
+        let frame = self.table().get(&self_)?.0.clone();
+        let d = debugger(self, &d)?;
+        d.frame_return_address(frame).await
     }
 
     async fn get_locals(

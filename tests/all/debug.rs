@@ -1420,3 +1420,47 @@ async fn early_epoch_yield_still_has_vmctx() -> wasmtime::Result<()> {
 
     Ok(())
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn return_address_pc() -> wasmtime::Result<()> {
+    let _ = env_logger::try_init();
+
+    test_stack_values(
+        r#"
+    (module
+      (import "" "host" (func))
+      (func (export "main")
+        call 2)
+      (func
+        call 0))
+    "#,
+        |_config| {},
+        |mut caller: Caller<'_, ()>| {
+            let inner = caller.debug_exit_frames().next().unwrap();
+            let (inner_func, inner_pc) = inner
+                .wasm_function_index_and_pc(&mut caller)?
+                .expect("should be a wasm frame");
+            assert_eq!(inner_func.as_u32(), 1);
+            let inner_ret = inner
+                .return_address_pc(&mut caller)?
+                .expect("should have return address at call site");
+            assert_eq!(inner_ret, inner_pc + 2, "call 0 is 2 bytes");
+
+            let outer = inner.parent(&mut caller)?.expect("should have parent");
+            let (outer_func, outer_pc) = outer
+                .wasm_function_index_and_pc(&mut caller)?
+                .expect("should be a wasm frame");
+            assert_eq!(outer_func.as_u32(), 0);
+            let outer_ret = outer
+                .return_address_pc(&mut caller)?
+                .expect("should have return address at call site");
+            assert_eq!(outer_ret, outer_pc + 2, "call 2 is 2 bytes");
+
+            assert!(outer.parent(&mut caller)?.is_none());
+
+            Ok(())
+        },
+    )?;
+    Ok(())
+}

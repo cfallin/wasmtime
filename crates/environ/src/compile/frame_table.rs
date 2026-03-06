@@ -197,6 +197,7 @@ impl FrameStateSlotBuilder {
 /// - `num_slot_descriptors`: u32
 /// - `num_progpoints`: u32
 /// - `num_breakpoints`: u32
+/// - `num_call_returns`: u32
 /// - `frame_descriptor_pool_length`: u32
 /// - `progpoint_descriptor_pool_length`: u32
 /// - `breakpoint_patch_pool_length`: u32
@@ -218,6 +219,10 @@ impl FrameStateSlotBuilder {
 ///    - end of breakpoint patch data in pool: u32
 ///      (find the start by end of previous; patches are in the
 ///      pool in order and this saves storing redundant start/end values)
+/// - `num_call_returns` times:
+///    - Wasm PC of call instruction: u32 (sorted order; unique)
+/// - `num_call_returns` times:
+///    - Wasm instruction length: u8
 /// - frame descriptors (format described above; `frame_descriptor_pool_length` bytes)
 /// - progpoint descriptors (`progpoint_descriptor_pool_length` bytes)
 ///   - each descriptor: sequence of frames
@@ -245,6 +250,9 @@ pub struct FrameTableBuilder {
     breakpoint_patch_data_ends: Vec<U32Bytes<LittleEndian>>,
 
     breakpoint_patch_data: Vec<u8>,
+
+    call_return_wasm_pcs: Vec<U32Bytes<LittleEndian>>,
+    call_return_lengths: Vec<u8>,
 }
 
 impl FrameTableBuilder {
@@ -325,6 +333,18 @@ impl FrameTableBuilder {
             .push(U32Bytes::new(LittleEndian, end));
     }
 
+    /// Add call return offset entries (wasm_pc, instruction_length).
+    ///
+    /// Must be called with sorted, deduplicated entries.
+    pub fn add_call_return_offsets(&mut self, offsets: &[(u32, u32)]) {
+        for &(wasm_pc, len) in offsets {
+            self.call_return_wasm_pcs
+                .push(U32Bytes::new(LittleEndian, wasm_pc));
+            self.call_return_lengths
+                .push(u8::try_from(len).expect("call instruction length must fit in u8"));
+        }
+    }
+
     /// Serialize the framd-table data section, taking a closure to
     /// consume slices.
     pub fn serialize<F: FnMut(&[u8])>(&mut self, mut f: F) {
@@ -340,6 +360,8 @@ impl FrameTableBuilder {
         f(&num_prog_points.to_le_bytes());
         let num_breakpoints = u32::try_from(self.breakpoint_pcs.len()).unwrap();
         f(&num_breakpoints.to_le_bytes());
+        let num_call_returns = u32::try_from(self.call_return_wasm_pcs.len()).unwrap();
+        f(&num_call_returns.to_le_bytes());
 
         let frame_descriptor_pool_length = u32::try_from(self.frame_descriptor_data.len()).unwrap();
         f(&frame_descriptor_pool_length.to_le_bytes());
@@ -356,6 +378,8 @@ impl FrameTableBuilder {
         f(object::bytes_of_slice(&self.breakpoint_pcs));
         f(object::bytes_of_slice(&self.breakpoint_patch_offsets));
         f(object::bytes_of_slice(&self.breakpoint_patch_data_ends));
+        f(object::bytes_of_slice(&self.call_return_wasm_pcs));
+        f(&self.call_return_lengths);
         f(&self.frame_descriptor_data);
         f(object::bytes_of_slice(&self.progpoint_descriptor_data));
         f(&self.breakpoint_patch_data);

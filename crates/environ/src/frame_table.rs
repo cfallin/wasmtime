@@ -58,6 +58,9 @@ pub struct FrameTable<'a> {
     breakpoint_patch_data_ends: &'a [U32Bytes<LittleEndian>],
     breakpoint_patch_data: &'a [u8],
 
+    call_return_wasm_pcs: &'a [U32Bytes<LittleEndian>],
+    call_return_lengths: &'a [u8],
+
     original_text: &'a [u8],
 }
 
@@ -79,6 +82,10 @@ impl<'a> FrameTable<'a> {
             .read::<U32Bytes<LittleEndian>>()
             .map_err(|_| anyhow::anyhow!("Unable to read breakpoint count prefix"))?;
         let num_breakpoints = usize::try_from(num_breakpoints.get(LittleEndian))?;
+        let num_call_returns = data
+            .read::<U32Bytes<LittleEndian>>()
+            .map_err(|_| anyhow::anyhow!("Unable to read call return count prefix"))?;
+        let num_call_returns = usize::try_from(num_call_returns.get(LittleEndian))?;
 
         let frame_descriptor_pool_length = data
             .read::<U32Bytes<LittleEndian>>()
@@ -118,6 +125,12 @@ impl<'a> FrameTable<'a> {
         let (breakpoint_patch_data_ends, data) =
             object::slice_from_bytes::<U32Bytes<LittleEndian>>(data, num_breakpoints)
                 .map_err(|_| anyhow::anyhow!("Unable to read breakpoint patch data ends slice"))?;
+        let (call_return_wasm_pcs, data) =
+            object::slice_from_bytes::<U32Bytes<LittleEndian>>(data, num_call_returns)
+                .map_err(|_| anyhow::anyhow!("Unable to read call return wasm PCs slice"))?;
+        let (call_return_lengths, data) = data
+            .split_at_checked(num_call_returns)
+            .ok_or_else(|| anyhow::anyhow!("Unable to read call return lengths slice"))?;
 
         let (frame_descriptor_data, data) = data
             .split_at_checked(frame_descriptor_pool_length)
@@ -144,6 +157,8 @@ impl<'a> FrameTable<'a> {
             breakpoint_patch_offsets,
             breakpoint_patch_data_ends,
             breakpoint_patch_data,
+            call_return_wasm_pcs,
+            call_return_lengths,
             original_text,
         })
     }
@@ -308,6 +323,18 @@ impl<'a> FrameTable<'a> {
             let data = self.breakpoint_patch(i);
             (wasm_pc, data)
         })
+    }
+
+    /// Look up the Wasm instruction length for a call at `wasm_pc`.
+    ///
+    /// Returns `Some(length)` if this PC is a known call site, allowing
+    /// the caller to compute the return address as `wasm_pc + length`.
+    pub fn call_instruction_length(&self, wasm_pc: u32) -> Option<u32> {
+        let idx = self
+            .call_return_wasm_pcs
+            .binary_search_by_key(&wasm_pc, |p| p.get(LittleEndian))
+            .ok()?;
+        Some(u32::from(self.call_return_lengths[idx]))
     }
 }
 

@@ -58,6 +58,7 @@ struct CompilerContext {
     incremental_cache_ctx: Option<IncrementalCacheContext>,
     validator_allocations: FuncValidatorAllocations,
     debug_slot_descriptor: Option<FrameStateSlotBuilder>,
+    call_return_offsets: Vec<(u32, u32)>,
     abi: Option<Abi>,
 }
 
@@ -69,6 +70,7 @@ impl Default for CompilerContext {
             incremental_cache_ctx: None,
             validator_allocations: Default::default(),
             debug_slot_descriptor: None,
+            call_return_offsets: vec![],
             abi: None,
         }
     }
@@ -338,6 +340,7 @@ impl wasmtime_environ::Compiler for Compiler {
         if let Some((_, slot_builder)) = func_env.state_slot {
             compiler.cx.debug_slot_descriptor = Some(slot_builder);
         }
+        compiler.cx.call_return_offsets = func_env.call_return_offsets;
 
         let timing = cranelift_codegen::timing::take_current();
         log::debug!("`{symbol}` translated to CLIF in {:?}", timing.total());
@@ -509,6 +512,7 @@ impl wasmtime_environ::Compiler for Compiler {
 
         let mut frame_descriptors = HashMap::new();
         if self.tunables.debug_guest {
+            let mut all_call_return_offsets = Vec::new();
             for (_, key, func) in &funcs {
                 frame_descriptors.insert(
                     *key,
@@ -517,7 +521,11 @@ impl wasmtime_environ::Compiler for Compiler {
                         .map(|builder| builder.serialize())
                         .unwrap_or_else(|| vec![]),
                 );
+                all_call_return_offsets.extend_from_slice(&func.call_return_offsets);
             }
+            all_call_return_offsets.sort_unstable();
+            all_call_return_offsets.dedup();
+            frame_tables.add_call_return_offsets(&all_call_return_offsets);
         }
 
         let mut breakpoint_table = Vec::new();
@@ -1541,6 +1549,7 @@ impl FunctionCompiler<'_> {
         if let Some(builder) = self.cx.debug_slot_descriptor.take() {
             compiled_function.debug_slot_descriptor = Some(builder);
         }
+        compiled_function.call_return_offsets = mem::take(&mut self.cx.call_return_offsets);
 
         if body_and_tunables
             .map(|(_, t)| t.debug_native)

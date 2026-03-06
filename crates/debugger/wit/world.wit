@@ -330,6 +330,10 @@ interface debuggee {
     /// Current PC in this frame's instance.
     get-pc: func(d: borrow<debuggee>) -> result<u32, error>;
 
+    /// Return address: the PC of the instruction after the call at
+    /// which this frame is paused. Returns none if not at a call site.
+    get-return-address: func(d: borrow<debuggee>) -> result<option<u32>, error>;
+
     /// Wasm locals.
     get-locals: func(d: borrow<debuggee>) -> result<list<wasm-value>, error>;
 
