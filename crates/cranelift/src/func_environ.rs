@@ -3830,14 +3830,17 @@ impl FuncEnvironment<'_> {
             self.fuel_before_op(op, builder, self.is_reachable());
         }
         if self.is_reachable() && self.state_slot.is_some() {
-            let builtin = self.builtin_functions.patchable_breakpoint(builder.func);
-            let vmctx = self.vmctx_val(&mut builder.cursor());
-            let inst = builder.ins().call(builtin, &[vmctx]);
-            let tags = self.debug_tags(builder.srcloc());
-            builder.func.debug_tags.set(inst, tags);
+            self.insert_breakpoint(builder);
         }
-
         Ok(())
+    }
+
+    fn insert_breakpoint(&mut self, builder: &mut FunctionBuilder) {
+        let builtin = self.builtin_functions.patchable_breakpoint(builder.func);
+        let vmctx = self.vmctx_val(&mut builder.cursor());
+        let inst = builder.ins().call(builtin, &[vmctx]);
+        let tags = self.debug_tags(builder.srcloc());
+        builder.func.debug_tags.set(inst, tags);
     }
 
     pub fn after_translate_operator(
@@ -3882,6 +3885,25 @@ impl FuncEnvironment<'_> {
         // Initialize `epoch_var` with the current epoch.
         if self.tunables.epoch_interruption {
             self.epoch_function_entry(builder);
+        }
+
+        // Emit a breakpoint at the function entry point. This is
+        // needed because debuggers sometimes attempt to set a
+        // breakpoint at the "start of the function", but in the Wasm
+        // binary format, there is at least 1 byte (the locals count)
+        // between that offset and the offset of the first
+        // bytecode. We want breakpoints at the start-PC of a function
+        // to work, so we add a sequence-point here.
+        //
+        // Note that this does have the side-effect of causing an
+        // extra "instruction step" to occur at the start of a
+        // function. This is unfortunate but is ultimately more
+        // consistent than the alternative of making these
+        // sequence-points special somehow. In essence we have an
+        // invisible "prologue" that runs between the start-offset of
+        // the function and the first actual bytecode.
+        if self.state_slot.is_some() {
+            self.insert_breakpoint(builder);
         }
 
         #[cfg(feature = "wmemcheck")]

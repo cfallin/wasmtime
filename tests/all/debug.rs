@@ -841,15 +841,14 @@ async fn breakpoint_events() -> wasmtime::Result<()> {
           wasmtime::DebugEvent::Breakpoint => {
               let stack = store.debug_exit_frames().next().unwrap();
               let (_, pc) = stack.wasm_function_index_and_pc(&mut store).unwrap().unwrap();
-              assert_eq!(pc, 0x24);
+              assert_eq!(pc, 0x23);
           }
         },
-        {
-          1 ;
+        { 1 ;
           wasmtime::DebugEvent::Breakpoint => {
               let stack = store.debug_exit_frames().next().unwrap();
               let (_, pc) = stack.wasm_function_index_and_pc(&mut store).unwrap().unwrap();
-              assert_eq!(pc, 0x26);
+              assert_eq!(pc, 0x24);
           }
         },
         {
@@ -857,11 +856,19 @@ async fn breakpoint_events() -> wasmtime::Result<()> {
           wasmtime::DebugEvent::Breakpoint => {
               let stack = store.debug_exit_frames().next().unwrap();
               let (_, pc) = stack.wasm_function_index_and_pc(&mut store).unwrap().unwrap();
-              assert_eq!(pc, 0x28);
+              assert_eq!(pc, 0x26);
           }
         },
         {
           3 ;
+          wasmtime::DebugEvent::Breakpoint => {
+              let stack = store.debug_exit_frames().next().unwrap();
+              let (_, pc) = stack.wasm_function_index_and_pc(&mut store).unwrap().unwrap();
+              assert_eq!(pc, 0x28);
+          }
+        },
+        {
+          4 ;
           wasmtime::DebugEvent::Breakpoint => {
               let stack = store.debug_exit_frames().next().unwrap();
               let (_, pc) = stack.wasm_function_index_and_pc(&mut store).unwrap().unwrap();
@@ -875,7 +882,7 @@ async fn breakpoint_events() -> wasmtime::Result<()> {
 
     func.call_async(&mut store, &[Val::I32(1), Val::I32(2)], &mut results)
         .await?;
-    assert_eq!(counter.load(Ordering::Relaxed), 4);
+    assert_eq!(counter.load(Ordering::Relaxed), 5);
 
     // Re-enable individual breakpoint.
     store
@@ -1368,7 +1375,7 @@ async fn single_step_before_instantiation() -> wasmtime::Result<()> {
         .await?;
     assert_eq!(results[0].unwrap_i32(), 3);
 
-    assert_eq!(counter.load(Ordering::Relaxed), 4);
+    assert_eq!(counter.load(Ordering::Relaxed), 5);
 
     Ok(())
 }
