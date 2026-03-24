@@ -7,6 +7,7 @@ use crate::sema::{
 use crate::serialize::{Block, ControlFlow, EvalStep, MatchArm};
 use crate::stablemapset::StableSet;
 use crate::trie_again::{Binding, BindingId, Constraint, RuleSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::slice::Iter;
 use std::sync::Arc;
@@ -77,6 +78,16 @@ enum Nested<'a> {
     Arms(BindingId, Iter<'a, MatchArm>),
 }
 
+/// Key identifying an iterator pool: the term producing the iterator and
+/// whether it is used as an extractor (`true`) or constructor (`false`).
+type IterPoolKey = (TermId, bool);
+
+/// Saved scope state, returned by `enter_scope` and consumed by `end_block`.
+struct ScopeState {
+    is_bound: StableSet<BindingId>,
+    iters_used: HashMap<IterPoolKey, usize>,
+}
+
 struct BodyContext<'a> {
     ruleset: &'a RuleSet,
     indent: String,
@@ -86,6 +97,10 @@ struct BodyContext<'a> {
     emit_logging: bool,
     split_match_arms: bool,
     match_arm_split_threshold: Option<usize>,
+
+    /// Per-type count of iterator variables currently in use in this scope.
+    /// Saved/restored by `enter_scope`/`end_block`.
+    iters_used: HashMap<IterPoolKey, usize>,
 
     // Extra fields for iterator-returning terms.
     // These fields are used to generate optimized Rust code for iterator-returning terms.
@@ -115,14 +130,20 @@ impl<'a> BodyContext<'a> {
             emit_logging,
             split_match_arms,
             match_arm_split_threshold,
+            iters_used: Default::default(),
             match_split: Default::default(),
             iter_overflow_action,
         }
     }
 
-    fn enter_scope(&mut self) -> StableSet<BindingId> {
-        let new = self.is_bound.clone();
-        std::mem::replace(&mut self.is_bound, new)
+    fn enter_scope(&mut self) -> ScopeState {
+        ScopeState {
+            is_bound: {
+                let new = self.is_bound.clone();
+                std::mem::replace(&mut self.is_bound, new)
+            },
+            iters_used: self.iters_used.clone(),
+        }
     }
 
     fn begin_block<W: Write>(&mut self, out: &mut W) -> std::fmt::Result {
@@ -134,12 +155,13 @@ impl<'a> BodyContext<'a> {
         &mut self,
         out: &mut W,
         last_line: &str,
-        scope: StableSet<BindingId>,
+        scope: ScopeState,
     ) -> std::fmt::Result {
         if !last_line.is_empty() {
             writeln!(out, "{}{}", &self.indent, last_line)?;
         }
-        self.is_bound = scope;
+        self.is_bound = scope.is_bound;
+        self.iters_used = scope.iters_used;
         self.end_block_without_newline(out)?;
         writeln!(out)
     }
@@ -598,10 +620,22 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         block: &Block,
         ret_kind: ReturnKind,
         last_expr: &str,
-        scope: StableSet<BindingId>,
+        scope: ScopeState,
     ) -> std::fmt::Result {
         ctx.begin_block(out)?;
         self.emit_block_contents(out, ctx, block, ret_kind, last_expr, scope)
+    }
+
+    /// Get the iterator pool key for a given source binding (which
+    /// must be an Extractor or Constructor). Returns the term ID and
+    /// whether it is an extractor.
+    fn iter_pool_key(&self, ctx: &BodyContext, source: &BindingId) -> IterPoolKey {
+        let binding = &ctx.ruleset.bindings[source.index()];
+        match binding {
+            Binding::Extractor { term, .. } => (*term, true),
+            Binding::Constructor { term, .. } => (*term, false),
+            _ => unreachable!("iterator source must be Extractor or Constructor"),
+        }
     }
 
     fn emit_block_contents<W: Write>(
@@ -611,7 +645,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         block: &Block,
         ret_kind: ReturnKind,
         last_expr: &str,
-        scope: StableSet<BindingId>,
+        scope: ScopeState,
     ) -> std::fmt::Result {
         let mut stack = Vec::new();
 
@@ -621,10 +655,10 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         let mut out = String::new();
         let mut declarations = String::new();
         let declaration_indent = ctx.indent.clone();
-        let mut num_iters_declared = 0;
+        let mut iters_declared: HashMap<IterPoolKey, usize> = HashMap::new();
 
-        stack.push((Self::validate_block(ret_kind, block), last_expr, scope, 0));
-        while let Some((mut nested, last_line, scope, num_iters_used)) = stack.pop() {
+        stack.push((Self::validate_block(ret_kind, block), last_expr, scope));
+        while let Some((mut nested, last_line, scope)) = stack.pop() {
             match &mut nested {
                 Nested::Cases(cases) => {
                     let Some(case) = cases.next() else {
@@ -632,7 +666,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         continue;
                     };
                     // Iterator isn't done, put it back on the stack.
-                    stack.push((nested, last_line, scope, num_iters_used));
+                    stack.push((nested, last_line, scope));
 
                     for &expr in case.bind_order.iter() {
                         let iter_return = match &ctx.ruleset.bindings[expr.index()] {
@@ -707,7 +741,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Self::validate_block(ret_kind, &arm.body),
                                 "",
                                 scope,
-                                num_iters_used,
                             ));
                         }
 
@@ -724,7 +757,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Nested::Arms(*source, arms.iter()),
                                 "_ => {}",
                                 scope,
-                                num_iters_used,
                             ));
                         }
 
@@ -739,7 +771,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Self::validate_block(ret_kind, body),
                                 "",
                                 scope,
-                                num_iters_used,
                             ));
                         }
 
@@ -750,26 +781,40 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             };
                             let scope = ctx.enter_scope();
 
-                            // Allocate a new ContextIter from our shared declarations.
-                            let iter = format!("iter{num_iters_used}");
-                            while num_iters_used >= num_iters_declared {
+                            // Allocate a reusable ContextIter variable from the
+                            // per-type pool. Each iterator type gets its own set
+                            // of shared declarations at the top of the block.
+                            let pool_key = self.iter_pool_key(ctx, source);
+                            let num_used = ctx.iters_used.entry(pool_key).or_insert(0);
+                            let idx = *num_used;
+                            *num_used += 1;
+                            let pool_name = format!(
+                                "{}{}",
+                                pool_key.0.index(),
+                                if pool_key.1 { "e" } else { "c" }
+                            );
+                            let iter = format!("iter_{pool_name}_{idx}");
+
+                            let num_declared = iters_declared.entry(pool_key).or_insert(0);
+                            while idx >= *num_declared {
                                 writeln!(
                                     &mut declarations,
-                                    "{declaration_indent}let mut iter{num_iters_declared} = None;"
+                                    "{declaration_indent}let mut iter_{pool_name}_{nd};",
+                                    nd = *num_declared,
                                 )?;
-                                num_iters_declared += 1;
+                                *num_declared += 1;
                             }
 
                             writeln!(
                                 &mut out,
-                                "{}{iter} = Some(v{}.into_context_iter());",
+                                "{}{iter} = v{}.into_context_iter();",
                                 &ctx.indent,
                                 source.index(),
                             )?;
 
                             write!(
                                 &mut out,
-                                "{}while let Some(v{}) = {iter}.as_mut().unwrap().next(ctx)",
+                                "{}while let Some(v{}) = {iter}.next(ctx)",
                                 &ctx.indent,
                                 result.index(),
                             )?;
@@ -779,7 +824,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Self::validate_block(ret_kind, body),
                                 "",
                                 scope,
-                                num_iters_used + 1,
                             ));
                         }
 
@@ -832,7 +876,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                     };
                     let source = *source;
                     // Iterator isn't done, put it back on the stack.
-                    stack.push((nested, last_line, scope, num_iters_used));
+                    stack.push((nested, last_line, scope));
 
                     let scope = ctx.enter_scope();
                     write!(&mut out, "{}", &ctx.indent)?;
@@ -884,7 +928,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             Self::validate_block(ret_kind, &arm.body),
                             "",
                             scope,
-                            num_iters_used,
                         ));
                     }
                 }
