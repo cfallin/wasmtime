@@ -77,8 +77,7 @@ enum Nested<'a> {
     Arms(BindingId, Iter<'a, MatchArm>),
 }
 
-struct BodyContext<'a, W> {
-    out: &'a mut W,
+struct BodyContext<'a> {
     ruleset: &'a RuleSet,
     indent: String,
     is_ref: StableSet<BindingId>,
@@ -98,9 +97,8 @@ struct BodyContext<'a, W> {
     iter_overflow_action: &'static str,
 }
 
-impl<'a, W: Write> BodyContext<'a, W> {
+impl<'a> BodyContext<'a> {
     fn new(
-        out: &'a mut W,
         ruleset: &'a RuleSet,
         term_name: &'a str,
         emit_logging: bool,
@@ -109,7 +107,6 @@ impl<'a, W: Write> BodyContext<'a, W> {
         iter_overflow_action: &'static str,
     ) -> Self {
         Self {
-            out,
             ruleset,
             indent: Default::default(),
             is_ref: Default::default(),
@@ -128,23 +125,28 @@ impl<'a, W: Write> BodyContext<'a, W> {
         std::mem::replace(&mut self.is_bound, new)
     }
 
-    fn begin_block(&mut self) -> std::fmt::Result {
+    fn begin_block<W: Write>(&mut self, out: &mut W) -> std::fmt::Result {
         self.indent.push_str("    ");
-        writeln!(self.out, " {{")
+        writeln!(out, " {{")
     }
 
-    fn end_block(&mut self, last_line: &str, scope: StableSet<BindingId>) -> std::fmt::Result {
+    fn end_block<W: Write>(
+        &mut self,
+        out: &mut W,
+        last_line: &str,
+        scope: StableSet<BindingId>,
+    ) -> std::fmt::Result {
         if !last_line.is_empty() {
-            writeln!(self.out, "{}{}", &self.indent, last_line)?;
+            writeln!(out, "{}{}", &self.indent, last_line)?;
         }
         self.is_bound = scope;
-        self.end_block_without_newline()?;
-        writeln!(self.out)
+        self.end_block_without_newline(out)?;
+        writeln!(out)
     }
 
-    fn end_block_without_newline(&mut self) -> std::fmt::Result {
+    fn end_block_without_newline<W: Write>(&mut self, out: &mut W) -> std::fmt::Result {
         self.indent.truncate(self.indent.len() - 4);
-        write!(self.out, "{}}}", &self.indent)
+        write!(out, "{}}}", &self.indent)
     }
 
     fn set_ref(&mut self, binding: BindingId, is_ref: bool) {
@@ -465,7 +467,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
             // Split a match if the term returns an iterator.
             let mut ctx = BodyContext::new(
-                code,
                 ruleset,
                 term_name,
                 options.emit_logging,
@@ -475,48 +476,44 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             );
 
             // Generate the function signature.
-            writeln!(ctx.out)?;
+            writeln!(code)?;
             writeln!(
-                ctx.out,
+                code,
                 "{}// Generated as internal constructor for term {}.",
                 &ctx.indent, term_name,
             )?;
 
             let sig = termdata.constructor_sig(self.typeenv).unwrap();
-            writeln!(
-                ctx.out,
-                "{}pub fn {}<C: Context>(",
-                &ctx.indent, sig.func_name
-            )?;
+            writeln!(code, "{}pub fn {}<C: Context>(", &ctx.indent, sig.func_name)?;
 
-            writeln!(ctx.out, "{}    ctx: &mut C,", &ctx.indent)?;
+            writeln!(code, "{}    ctx: &mut C,", &ctx.indent)?;
             for (i, &ty) in sig.param_tys.iter().enumerate() {
                 let (is_ref, ty) = self.ty(ty);
-                write!(ctx.out, "{}    arg{}: ", &ctx.indent, i)?;
-                write!(ctx.out, "{}{}", if is_ref { "&" } else { "" }, ty)?;
+                write!(code, "{}    arg{}: ", &ctx.indent, i)?;
+                write!(code, "{}{}", if is_ref { "&" } else { "" }, ty)?;
                 if let Some(binding) = ctx.ruleset.find_binding(&Binding::Argument {
                     index: i.try_into().unwrap(),
                 }) {
                     ctx.set_ref(binding, is_ref);
                 }
-                writeln!(ctx.out, ",")?;
+                writeln!(code, ",")?;
             }
 
             let (_, ret) = self.ty(sig.ret_tys[0]);
 
             if let ReturnKind::Iterator = sig.ret_kind {
                 writeln!(
-                    ctx.out,
+                    code,
                     "{}    returns: &mut (impl Extend<{}> + Length),",
                     &ctx.indent, ret
                 )?;
             }
 
-            write!(ctx.out, "{}) -> ", &ctx.indent)?;
+            write!(code, "{}) -> ", &ctx.indent)?;
             match sig.ret_kind {
-                ReturnKind::Iterator => write!(ctx.out, "()")?,
-                ReturnKind::Option => write!(ctx.out, "Option<{ret}>")?,
-                ReturnKind::Plain => write!(ctx.out, "{ret}")?,
+                ReturnKind::Iterator => write!(code, "()")?,
+                ReturnKind::Option => write!(code, "Option<{ret}>")?,
+                ReturnKind::Plain => write!(code, "{ret}")?,
             };
             // Generating the function signature is done.
 
@@ -540,7 +537,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             };
 
             let scope = ctx.enter_scope();
-            self.emit_block(&mut ctx, &root, sig.ret_kind, &last_expr, scope)?;
+            self.emit_block(code, &mut ctx, &root, sig.ret_kind, &last_expr, scope)?;
         }
         Ok(())
     }
@@ -596,19 +593,21 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
     fn emit_block<W: Write>(
         &self,
-        ctx: &mut BodyContext<W>,
+        out: &mut W,
+        ctx: &mut BodyContext,
         block: &Block,
         ret_kind: ReturnKind,
         last_expr: &str,
         scope: StableSet<BindingId>,
     ) -> std::fmt::Result {
-        ctx.begin_block()?;
-        self.emit_block_contents(ctx, block, ret_kind, last_expr, scope)
+        ctx.begin_block(out)?;
+        self.emit_block_contents(out, ctx, block, ret_kind, last_expr, scope)
     }
 
     fn emit_block_contents<W: Write>(
         &self,
-        ctx: &mut BodyContext<W>,
+        out: &mut W,
+        ctx: &mut BodyContext,
         block: &Block,
         ret_kind: ReturnKind,
         last_expr: &str,
@@ -621,7 +620,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             match &mut nested {
                 Nested::Cases(cases) => {
                     let Some(case) = cases.next() else {
-                        ctx.end_block(last_line, scope)?;
+                        ctx.end_block(out, last_line, scope)?;
                         continue;
                     };
                     // Iterator isn't done, put it back on the stack.
@@ -659,18 +658,18 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         };
                         if let Some(ty) = iter_return {
                             writeln!(
-                                ctx.out,
+                                out,
                                 "{}let mut v{} = {}::default();",
                                 &ctx.indent,
                                 expr.index(),
                                 ty
                             )?;
-                            write!(ctx.out, "{}", &ctx.indent)?;
+                            write!(out, "{}", &ctx.indent)?;
                         } else {
-                            write!(ctx.out, "{}let v{} = ", &ctx.indent, expr.index())?;
+                            write!(out, "{}let v{} = ", &ctx.indent, expr.index())?;
                         }
-                        self.emit_expr(ctx, expr)?;
-                        writeln!(ctx.out, ";")?;
+                        self.emit_expr(out, ctx, expr)?;
+                        writeln!(out, ";")?;
                         ctx.is_bound.insert(expr);
                     }
 
@@ -683,27 +682,27 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Constraint::ConstBool { .. }
                                 | Constraint::ConstInt { .. }
                                 | Constraint::ConstPrim { .. } => {
-                                    write!(ctx.out, "{}if ", &ctx.indent)?;
-                                    self.emit_expr(ctx, *source)?;
-                                    write!(ctx.out, " == ")?;
-                                    self.emit_constraint(ctx, *source, arm)?;
+                                    write!(out, "{}if ", &ctx.indent)?;
+                                    self.emit_expr(out, ctx, *source)?;
+                                    write!(out, " == ")?;
+                                    self.emit_constraint(out, ctx, *source, arm)?;
                                 }
                                 Constraint::Variant { .. } | Constraint::Some => {
-                                    write!(ctx.out, "{}if let ", &ctx.indent)?;
-                                    self.emit_constraint(ctx, *source, arm)?;
-                                    write!(ctx.out, " = ")?;
-                                    self.emit_source(ctx, *source, arm.constraint)?;
+                                    write!(out, "{}if let ", &ctx.indent)?;
+                                    self.emit_constraint(out, ctx, *source, arm)?;
+                                    write!(out, " = ")?;
+                                    self.emit_source(out, ctx, *source, arm.constraint)?;
                                 }
                             }
-                            ctx.begin_block()?;
+                            ctx.begin_block(out)?;
                             stack.push((Self::validate_block(ret_kind, &arm.body), "", scope));
                         }
 
                         ControlFlow::Match { source, arms } => {
                             let scope = ctx.enter_scope();
-                            write!(ctx.out, "{}match ", &ctx.indent)?;
-                            self.emit_source(ctx, *source, arms[0].constraint)?;
-                            ctx.begin_block()?;
+                            write!(out, "{}match ", &ctx.indent)?;
+                            self.emit_source(out, ctx, *source, arms[0].constraint)?;
+                            ctx.begin_block(out)?;
 
                             // Always add a catchall arm, because we
                             // don't do exhaustiveness checking on the
@@ -713,11 +712,11 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
                         ControlFlow::Equal { a, b, body } => {
                             let scope = ctx.enter_scope();
-                            write!(ctx.out, "{}if ", &ctx.indent)?;
-                            self.emit_expr(ctx, *a)?;
-                            write!(ctx.out, " == ")?;
-                            self.emit_expr(ctx, *b)?;
-                            ctx.begin_block()?;
+                            write!(out, "{}if ", &ctx.indent)?;
+                            self.emit_expr(out, ctx, *a)?;
+                            write!(out, " == ")?;
+                            self.emit_expr(out, ctx, *b)?;
+                            ctx.begin_block(out)?;
                             stack.push((Self::validate_block(ret_kind, body), "", scope));
                         }
 
@@ -729,7 +728,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             let scope = ctx.enter_scope();
 
                             writeln!(
-                                ctx.out,
+                                out,
                                 "{}let mut v{} = v{}.into_context_iter();",
                                 &ctx.indent,
                                 source.index(),
@@ -737,20 +736,20 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             )?;
 
                             write!(
-                                ctx.out,
+                                out,
                                 "{}while let Some(v{}) = v{}.next(ctx)",
                                 &ctx.indent,
                                 result.index(),
                                 source.index()
                             )?;
                             ctx.is_bound.insert(*result);
-                            ctx.begin_block()?;
+                            ctx.begin_block(out)?;
                             stack.push((Self::validate_block(ret_kind, body), "", scope));
                         }
 
                         &ControlFlow::Return { pos, result } => {
                             writeln!(
-                                ctx.out,
+                                out,
                                 "{}// Rule at {}.",
                                 &ctx.indent,
                                 pos.pretty_print_line(&self.files)
@@ -759,28 +758,26 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 // Produce a valid Rust string literal with escapes.
                                 let pp = pos.pretty_print_line(&self.files);
                                 writeln!(
-                                    ctx.out,
+                                    out,
                                     "{}log::debug!(\"ISLE {{}} {{}}\", {:?}, {:?});",
                                     &ctx.indent, ctx.term_name, pp
                                 )?;
                             }
-                            write!(ctx.out, "{}", &ctx.indent)?;
+                            write!(out, "{}", &ctx.indent)?;
                             match ret_kind {
-                                ReturnKind::Plain | ReturnKind::Option => {
-                                    write!(ctx.out, "return ")?
-                                }
-                                ReturnKind::Iterator => write!(ctx.out, "returns.extend(Some(")?,
+                                ReturnKind::Plain | ReturnKind::Option => write!(out, "return ")?,
+                                ReturnKind::Iterator => write!(out, "returns.extend(Some(")?,
                             }
-                            self.emit_expr(ctx, result)?;
+                            self.emit_expr(out, ctx, result)?;
                             if ctx.is_ref.contains(&result) {
-                                write!(ctx.out, ".clone()")?;
+                                write!(out, ".clone()")?;
                             }
                             match ret_kind {
-                                ReturnKind::Plain | ReturnKind::Option => writeln!(ctx.out, ";")?,
+                                ReturnKind::Plain | ReturnKind::Option => writeln!(out, ";")?,
                                 ReturnKind::Iterator => {
-                                    writeln!(ctx.out, "));")?;
+                                    writeln!(out, "));")?;
                                     writeln!(
-                                        ctx.out,
+                                        out,
                                         "{}if returns.len() >= MAX_ISLE_RETURNS {{ {} }}",
                                         ctx.indent, ctx.iter_overflow_action
                                     )?;
@@ -792,7 +789,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
                 Nested::Arms(source, arms) => {
                     let Some(arm) = arms.next() else {
-                        ctx.end_block(last_line, scope)?;
+                        ctx.end_block(out, last_line, scope)?;
                         continue;
                     };
                     let source = *source;
@@ -800,10 +797,10 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                     stack.push((nested, last_line, scope));
 
                     let scope = ctx.enter_scope();
-                    write!(ctx.out, "{}", &ctx.indent)?;
-                    self.emit_constraint(ctx, source, arm)?;
-                    write!(ctx.out, " =>")?;
-                    ctx.begin_block()?;
+                    write!(out, "{}", &ctx.indent)?;
+                    self.emit_constraint(out, ctx, source, arm)?;
+                    write!(out, " =>")?;
+                    ctx.begin_block(out)?;
 
                     // Compile-time optimization: huge function bodies (often from very large match arms
                     // of constructor bodies)cause rustc to spend a lot of time in analysis passes.
@@ -819,24 +816,31 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         let closure_id = ctx.match_split;
                         ctx.match_split += 1;
 
-                        write!(ctx.out, "{}if (|| -> bool", &ctx.indent)?;
-                        ctx.begin_block()?;
+                        write!(out, "{}if (|| -> bool", &ctx.indent)?;
+                        ctx.begin_block(out)?;
 
                         let old_overflow_action = ctx.iter_overflow_action;
                         ctx.iter_overflow_action = "return true;";
                         let closure_scope = ctx.enter_scope();
-                        self.emit_block_contents(ctx, &arm.body, ret_kind, "false", closure_scope)?;
+                        self.emit_block_contents(
+                            out,
+                            ctx,
+                            &arm.body,
+                            ret_kind,
+                            "false",
+                            closure_scope,
+                        )?;
                         ctx.iter_overflow_action = old_overflow_action;
 
                         // Close `if (|| -> bool { ... })()` and stop the outer function on
                         // iterator-overflow.
                         writeln!(
-                            ctx.out,
+                            out,
                             "{})() {{ {} }} // __isle_arm_{}",
                             &ctx.indent, ctx.iter_overflow_action, closure_id
                         )?;
 
-                        ctx.end_block("", scope)?;
+                        ctx.end_block(out, "", scope)?;
                     } else {
                         stack.push((Self::validate_block(ret_kind, &arm.body), "", scope));
                     }
@@ -847,9 +851,14 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         Ok(())
     }
 
-    fn emit_expr<W: Write>(&self, ctx: &mut BodyContext<W>, result: BindingId) -> std::fmt::Result {
+    fn emit_expr<W: Write>(
+        &self,
+        out: &mut W,
+        ctx: &mut BodyContext,
+        result: BindingId,
+    ) -> std::fmt::Result {
         if ctx.is_bound.contains(&result) {
-            return write!(ctx.out, "v{}", result.index());
+            return write!(out, "v{}", result.index());
         }
 
         let binding = &ctx.ruleset.bindings[result.index()];
@@ -865,34 +874,34 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                     let (is_ref, _) = self.ty(ret_ty);
                     if is_ref {
                         ctx.set_ref(result, true);
-                        write!(ctx.out, "&")?;
+                        write!(out, "&")?;
                     }
                 }
-                write!(ctx.out, "{}(ctx", sig.full_name)?;
+                write!(out, "{}(ctx", sig.full_name)?;
                 debug_assert_eq!(parameters.len(), sig.param_tys.len());
                 for (&parameter, &arg_ty) in parameters.iter().zip(sig.param_tys.iter()) {
                     let (is_ref, _) = self.ty(arg_ty);
-                    write!(ctx.out, ", ")?;
+                    write!(out, ", ")?;
                     let (before, after) = match (is_ref, ctx.is_ref.contains(&parameter)) {
                         (false, true) => ("", ".clone()"),
                         (true, false) => ("&", ""),
                         _ => ("", ""),
                     };
-                    write!(ctx.out, "{before}")?;
-                    self.emit_expr(ctx, parameter)?;
-                    write!(ctx.out, "{after}")?;
+                    write!(out, "{before}")?;
+                    self.emit_expr(out, ctx, parameter)?;
+                    write!(out, "{after}")?;
                 }
                 if let ReturnKind::Iterator = sig.ret_kind {
-                    write!(ctx.out, ", &mut v{}", result.index())?;
+                    write!(out, ", &mut v{}", result.index())?;
                 }
-                write!(ctx.out, ")")
+                write!(out, ")")
             };
 
         match binding {
-            &Binding::ConstBool { val, .. } => self.emit_bool(ctx, val),
-            &Binding::ConstInt { val, ty } => self.emit_int(ctx, val, ty),
-            Binding::ConstPrim { val } => write!(ctx.out, "{}", &self.typeenv.syms[val.index()]),
-            Binding::Argument { index } => write!(ctx.out, "arg{}", index.index()),
+            &Binding::ConstBool { val, .. } => self.emit_bool(out, val),
+            &Binding::ConstInt { val, ty } => self.emit_int(out, val, ty),
+            Binding::ConstPrim { val } => write!(out, "{}", &self.typeenv.syms[val.index()]),
+            Binding::Argument { index } => write!(out, "arg{}", index.index()),
             Binding::Extractor { term, parameter } => {
                 call(*term, std::slice::from_ref(parameter), Term::extractor_sig)
             }
@@ -911,75 +920,77 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                 };
                 let variant = &variants[variant.index()];
                 write!(
-                    ctx.out,
+                    out,
                     "{}::{}",
                     &self.typeenv.syms[name.index()],
                     &self.typeenv.syms[variant.name.index()]
                 )?;
                 if !fields.is_empty() {
-                    ctx.begin_block()?;
+                    ctx.begin_block(out)?;
                     for (field, value) in variant.fields.iter().zip(fields.iter()) {
                         write!(
-                            ctx.out,
+                            out,
                             "{}{}: ",
                             &ctx.indent,
                             &self.typeenv.syms[field.name.index()],
                         )?;
-                        self.emit_expr(ctx, *value)?;
+                        self.emit_expr(out, ctx, *value)?;
                         if ctx.is_ref.contains(value) {
-                            write!(ctx.out, ".clone()")?;
+                            write!(out, ".clone()")?;
                         }
-                        writeln!(ctx.out, ",")?;
+                        writeln!(out, ",")?;
                     }
-                    ctx.end_block_without_newline()?;
+                    ctx.end_block_without_newline(out)?;
                 }
                 Ok(())
             }
 
             &Binding::MakeSome { inner } => {
-                write!(ctx.out, "Some(")?;
-                self.emit_expr(ctx, inner)?;
-                write!(ctx.out, ")")
+                write!(out, "Some(")?;
+                self.emit_expr(out, ctx, inner)?;
+                write!(out, ")")
             }
             &Binding::MatchSome { source } => {
-                self.emit_expr(ctx, source)?;
-                write!(ctx.out, "?")
+                self.emit_expr(out, ctx, source)?;
+                write!(out, "?")
             }
             &Binding::MatchTuple { source, field } => {
-                self.emit_expr(ctx, source)?;
-                write!(ctx.out, ".{}", field.index())
+                self.emit_expr(out, ctx, source)?;
+                write!(out, ".{}", field.index())
             }
 
             // These are not supposed to happen. If they do, make the generated code fail to compile
             // so this is easier to debug than if we panic during codegen.
             &Binding::MatchVariant { source, field, .. } => {
-                self.emit_expr(ctx, source)?;
-                write!(ctx.out, ".{} /*FIXME*/", field.index())
+                self.emit_expr(out, ctx, source)?;
+                write!(out, ".{} /*FIXME*/", field.index())
             }
             &Binding::Iterator { source } => {
-                self.emit_expr(ctx, source)?;
-                write!(ctx.out, ".next() /*FIXME*/")
+                self.emit_expr(out, ctx, source)?;
+                write!(out, ".next() /*FIXME*/")
             }
         }
     }
 
     fn emit_source<W: Write>(
         &self,
-        ctx: &mut BodyContext<W>,
+        out: &mut W,
+        ctx: &mut BodyContext,
         source: BindingId,
         constraint: Constraint,
     ) -> std::fmt::Result {
         if let Constraint::Variant { .. } = constraint {
             if !ctx.is_ref.contains(&source) {
-                write!(ctx.out, "&")?;
+                write!(out, "&")?;
             }
         }
-        self.emit_expr(ctx, source)
+        self.emit_expr(out, ctx, source)
     }
 
     fn emit_constraint<W: Write>(
         &self,
-        ctx: &mut BodyContext<W>,
+        out: &mut W,
+        ctx: &mut BodyContext,
         source: BindingId,
         arm: &MatchArm,
     ) -> std::fmt::Result {
@@ -994,10 +1005,10 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             }
         }
         match *constraint {
-            Constraint::ConstBool { val, .. } => self.emit_bool(ctx, val),
-            Constraint::ConstInt { val, ty } => self.emit_int(ctx, val, ty),
+            Constraint::ConstBool { val, .. } => self.emit_bool(out, val),
+            Constraint::ConstInt { val, ty } => self.emit_int(out, val, ty),
             Constraint::ConstPrim { val } => {
-                write!(ctx.out, "{}", &self.typeenv.syms[val.index()])
+                write!(out, "{}", &self.typeenv.syms[val.index()])
             }
             Constraint::Variant { ty, variant, .. } => {
                 let (name, variants) = match &self.typeenv.types[ty.index()] {
@@ -1006,18 +1017,18 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                 };
                 let variant = &variants[variant.index()];
                 write!(
-                    ctx.out,
+                    out,
                     "&{}::{}",
                     &self.typeenv.syms[name.index()],
                     &self.typeenv.syms[variant.name.index()]
                 )?;
                 if !bindings.is_empty() {
-                    ctx.begin_block()?;
+                    ctx.begin_block(out)?;
                     let mut skipped_some = false;
                     for (&binding, field) in bindings.iter().zip(variant.fields.iter()) {
                         if let Some(binding) = binding {
                             write!(
-                                ctx.out,
+                                out,
                                 "{}{}: ",
                                 &ctx.indent,
                                 &self.typeenv.syms[field.name.index()]
@@ -1025,53 +1036,49 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             let (is_ref, _) = self.ty(field.ty);
                             if is_ref {
                                 ctx.set_ref(binding, true);
-                                write!(ctx.out, "ref ")?;
+                                write!(out, "ref ")?;
                             }
-                            writeln!(ctx.out, "v{},", binding.index())?;
+                            writeln!(out, "v{},", binding.index())?;
                         } else {
                             skipped_some = true;
                         }
                     }
                     if skipped_some {
-                        writeln!(ctx.out, "{}..", &ctx.indent)?;
+                        writeln!(out, "{}..", &ctx.indent)?;
                     }
-                    ctx.end_block_without_newline()?;
+                    ctx.end_block_without_newline(out)?;
                 }
                 Ok(())
             }
             Constraint::Some => {
-                write!(ctx.out, "Some(")?;
+                write!(out, "Some(")?;
                 if let Some(binding) = bindings[0] {
                     ctx.set_ref(binding, ctx.is_ref.contains(&source));
-                    write!(ctx.out, "v{}", binding.index())?;
+                    write!(out, "v{}", binding.index())?;
                 } else {
-                    write!(ctx.out, "_")?;
+                    write!(out, "_")?;
                 }
-                write!(ctx.out, ")")
+                write!(out, ")")
             }
         }
     }
 
-    fn emit_bool<W: Write>(
-        &self,
-        ctx: &mut BodyContext<W>,
-        val: bool,
-    ) -> Result<(), std::fmt::Error> {
-        write!(ctx.out, "{val}")
+    fn emit_bool<W: Write>(&self, out: &mut W, val: bool) -> Result<(), std::fmt::Error> {
+        write!(out, "{val}")
     }
 
     fn emit_int<W: Write>(
         &self,
-        ctx: &mut BodyContext<W>,
+        out: &mut W,
         val: i128,
         ty: TypeId,
     ) -> Result<(), std::fmt::Error> {
         let ty_data = &self.typeenv.types[ty.index()];
         match ty_data {
             Type::Builtin(BuiltinType::Int(ty)) => {
-                write!(ctx.out, "{}", rust_int_literal(*ty, val))
+                write!(out, "{}", rust_int_literal(*ty, val))
             }
-            _ => write!(ctx.out, "{val:#x}"),
+            _ => write!(out, "{val:#x}"),
         }
     }
 }
