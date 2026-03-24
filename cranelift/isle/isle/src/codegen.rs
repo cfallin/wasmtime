@@ -606,7 +606,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
     fn emit_block_contents<W: Write>(
         &self,
-        out: &mut W,
+        raw_out: &mut W,
         ctx: &mut BodyContext,
         block: &Block,
         ret_kind: ReturnKind,
@@ -614,17 +614,25 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         scope: StableSet<BindingId>,
     ) -> std::fmt::Result {
         let mut stack = Vec::new();
-        stack.push((Self::validate_block(ret_kind, block), last_expr, scope));
 
-        while let Some((mut nested, last_line, scope)) = stack.pop() {
+        // We'll codegen the body into `out`, then prefix it with any
+        // shared declarations we use before emitting it into
+        // `raw_out` at the end.
+        let mut out = String::new();
+        let mut declarations = String::new();
+        let declaration_indent = ctx.indent.clone();
+        let mut num_iters_declared = 0;
+
+        stack.push((Self::validate_block(ret_kind, block), last_expr, scope, 0));
+        while let Some((mut nested, last_line, scope, num_iters_used)) = stack.pop() {
             match &mut nested {
                 Nested::Cases(cases) => {
                     let Some(case) = cases.next() else {
-                        ctx.end_block(out, last_line, scope)?;
+                        ctx.end_block(&mut out, last_line, scope)?;
                         continue;
                     };
                     // Iterator isn't done, put it back on the stack.
-                    stack.push((nested, last_line, scope));
+                    stack.push((nested, last_line, scope, num_iters_used));
 
                     for &expr in case.bind_order.iter() {
                         let iter_return = match &ctx.ruleset.bindings[expr.index()] {
@@ -658,18 +666,18 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         };
                         if let Some(ty) = iter_return {
                             writeln!(
-                                out,
+                                &mut out,
                                 "{}let mut v{} = {}::default();",
                                 &ctx.indent,
                                 expr.index(),
                                 ty
                             )?;
-                            write!(out, "{}", &ctx.indent)?;
+                            write!(&mut out, "{}", &ctx.indent)?;
                         } else {
-                            write!(out, "{}let v{} = ", &ctx.indent, expr.index())?;
+                            write!(&mut out, "{}let v{} = ", &ctx.indent, expr.index())?;
                         }
-                        self.emit_expr(out, ctx, expr)?;
-                        writeln!(out, ";")?;
+                        self.emit_expr(&mut out, ctx, expr)?;
+                        writeln!(&mut out, ";")?;
                         ctx.is_bound.insert(expr);
                     }
 
@@ -682,42 +690,57 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 Constraint::ConstBool { .. }
                                 | Constraint::ConstInt { .. }
                                 | Constraint::ConstPrim { .. } => {
-                                    write!(out, "{}if ", &ctx.indent)?;
-                                    self.emit_expr(out, ctx, *source)?;
-                                    write!(out, " == ")?;
-                                    self.emit_constraint(out, ctx, *source, arm)?;
+                                    write!(&mut out, "{}if ", &ctx.indent)?;
+                                    self.emit_expr(&mut out, ctx, *source)?;
+                                    write!(&mut out, " == ")?;
+                                    self.emit_constraint(&mut out, ctx, *source, arm)?;
                                 }
                                 Constraint::Variant { .. } | Constraint::Some => {
-                                    write!(out, "{}if let ", &ctx.indent)?;
-                                    self.emit_constraint(out, ctx, *source, arm)?;
-                                    write!(out, " = ")?;
-                                    self.emit_source(out, ctx, *source, arm.constraint)?;
+                                    write!(&mut out, "{}if let ", &ctx.indent)?;
+                                    self.emit_constraint(&mut out, ctx, *source, arm)?;
+                                    write!(&mut out, " = ")?;
+                                    self.emit_source(&mut out, ctx, *source, arm.constraint)?;
                                 }
                             }
-                            ctx.begin_block(out)?;
-                            stack.push((Self::validate_block(ret_kind, &arm.body), "", scope));
+                            ctx.begin_block(&mut out)?;
+                            stack.push((
+                                Self::validate_block(ret_kind, &arm.body),
+                                "",
+                                scope,
+                                num_iters_used,
+                            ));
                         }
 
                         ControlFlow::Match { source, arms } => {
                             let scope = ctx.enter_scope();
-                            write!(out, "{}match ", &ctx.indent)?;
-                            self.emit_source(out, ctx, *source, arms[0].constraint)?;
-                            ctx.begin_block(out)?;
+                            write!(&mut out, "{}match ", &ctx.indent)?;
+                            self.emit_source(&mut out, ctx, *source, arms[0].constraint)?;
+                            ctx.begin_block(&mut out)?;
 
                             // Always add a catchall arm, because we
                             // don't do exhaustiveness checking on the
                             // match arms.
-                            stack.push((Nested::Arms(*source, arms.iter()), "_ => {}", scope));
+                            stack.push((
+                                Nested::Arms(*source, arms.iter()),
+                                "_ => {}",
+                                scope,
+                                num_iters_used,
+                            ));
                         }
 
                         ControlFlow::Equal { a, b, body } => {
                             let scope = ctx.enter_scope();
-                            write!(out, "{}if ", &ctx.indent)?;
-                            self.emit_expr(out, ctx, *a)?;
-                            write!(out, " == ")?;
-                            self.emit_expr(out, ctx, *b)?;
-                            ctx.begin_block(out)?;
-                            stack.push((Self::validate_block(ret_kind, body), "", scope));
+                            write!(&mut out, "{}if ", &ctx.indent)?;
+                            self.emit_expr(&mut out, ctx, *a)?;
+                            write!(&mut out, " == ")?;
+                            self.emit_expr(&mut out, ctx, *b)?;
+                            ctx.begin_block(&mut out)?;
+                            stack.push((
+                                Self::validate_block(ret_kind, body),
+                                "",
+                                scope,
+                                num_iters_used,
+                            ));
                         }
 
                         ControlFlow::Loop { result, body } => {
@@ -727,29 +750,42 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             };
                             let scope = ctx.enter_scope();
 
+                            // Allocate a new ContextIter from our shared declarations.
+                            let iter = format!("iter{num_iters_used}");
+                            while num_iters_used >= num_iters_declared {
+                                writeln!(
+                                    &mut declarations,
+                                    "{declaration_indent}let mut iter{num_iters_declared} = None;"
+                                )?;
+                                num_iters_declared += 1;
+                            }
+
                             writeln!(
-                                out,
-                                "{}let mut v{} = v{}.into_context_iter();",
+                                &mut out,
+                                "{}{iter} = Some(v{}.into_context_iter());",
                                 &ctx.indent,
-                                source.index(),
                                 source.index(),
                             )?;
 
                             write!(
-                                out,
-                                "{}while let Some(v{}) = v{}.next(ctx)",
+                                &mut out,
+                                "{}while let Some(v{}) = {iter}.as_mut().unwrap().next(ctx)",
                                 &ctx.indent,
                                 result.index(),
-                                source.index()
                             )?;
                             ctx.is_bound.insert(*result);
-                            ctx.begin_block(out)?;
-                            stack.push((Self::validate_block(ret_kind, body), "", scope));
+                            ctx.begin_block(&mut out)?;
+                            stack.push((
+                                Self::validate_block(ret_kind, body),
+                                "",
+                                scope,
+                                num_iters_used + 1,
+                            ));
                         }
 
                         &ControlFlow::Return { pos, result } => {
                             writeln!(
-                                out,
+                                &mut out,
                                 "{}// Rule at {}.",
                                 &ctx.indent,
                                 pos.pretty_print_line(&self.files)
@@ -758,26 +794,28 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                                 // Produce a valid Rust string literal with escapes.
                                 let pp = pos.pretty_print_line(&self.files);
                                 writeln!(
-                                    out,
+                                    &mut out,
                                     "{}log::debug!(\"ISLE {{}} {{}}\", {:?}, {:?});",
                                     &ctx.indent, ctx.term_name, pp
                                 )?;
                             }
-                            write!(out, "{}", &ctx.indent)?;
+                            write!(&mut out, "{}", &ctx.indent)?;
                             match ret_kind {
-                                ReturnKind::Plain | ReturnKind::Option => write!(out, "return ")?,
-                                ReturnKind::Iterator => write!(out, "returns.extend(Some(")?,
+                                ReturnKind::Plain | ReturnKind::Option => {
+                                    write!(&mut out, "return ")?
+                                }
+                                ReturnKind::Iterator => write!(&mut out, "returns.extend(Some(")?,
                             }
-                            self.emit_expr(out, ctx, result)?;
+                            self.emit_expr(&mut out, ctx, result)?;
                             if ctx.is_ref.contains(&result) {
-                                write!(out, ".clone()")?;
+                                write!(&mut out, ".clone()")?;
                             }
                             match ret_kind {
-                                ReturnKind::Plain | ReturnKind::Option => writeln!(out, ";")?,
+                                ReturnKind::Plain | ReturnKind::Option => writeln!(&mut out, ";")?,
                                 ReturnKind::Iterator => {
-                                    writeln!(out, "));")?;
+                                    writeln!(&mut out, "));")?;
                                     writeln!(
-                                        out,
+                                        &mut out,
                                         "{}if returns.len() >= MAX_ISLE_RETURNS {{ {} }}",
                                         ctx.indent, ctx.iter_overflow_action
                                     )?;
@@ -789,18 +827,18 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
                 Nested::Arms(source, arms) => {
                     let Some(arm) = arms.next() else {
-                        ctx.end_block(out, last_line, scope)?;
+                        ctx.end_block(&mut out, last_line, scope)?;
                         continue;
                     };
                     let source = *source;
                     // Iterator isn't done, put it back on the stack.
-                    stack.push((nested, last_line, scope));
+                    stack.push((nested, last_line, scope, num_iters_used));
 
                     let scope = ctx.enter_scope();
-                    write!(out, "{}", &ctx.indent)?;
-                    self.emit_constraint(out, ctx, source, arm)?;
-                    write!(out, " =>")?;
-                    ctx.begin_block(out)?;
+                    write!(&mut out, "{}", &ctx.indent)?;
+                    self.emit_constraint(&mut out, ctx, source, arm)?;
+                    write!(&mut out, " =>")?;
+                    ctx.begin_block(&mut out)?;
 
                     // Compile-time optimization: huge function bodies (often from very large match arms
                     // of constructor bodies)cause rustc to spend a lot of time in analysis passes.
@@ -816,14 +854,14 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         let closure_id = ctx.match_split;
                         ctx.match_split += 1;
 
-                        write!(out, "{}if (|| -> bool", &ctx.indent)?;
-                        ctx.begin_block(out)?;
+                        write!(&mut out, "{}if (|| -> bool", &ctx.indent)?;
+                        ctx.begin_block(&mut out)?;
 
                         let old_overflow_action = ctx.iter_overflow_action;
                         ctx.iter_overflow_action = "return true;";
                         let closure_scope = ctx.enter_scope();
                         self.emit_block_contents(
-                            out,
+                            &mut out,
                             ctx,
                             &arm.body,
                             ret_kind,
@@ -835,18 +873,25 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                         // Close `if (|| -> bool { ... })()` and stop the outer function on
                         // iterator-overflow.
                         writeln!(
-                            out,
+                            &mut out,
                             "{})() {{ {} }} // __isle_arm_{}",
                             &ctx.indent, ctx.iter_overflow_action, closure_id
                         )?;
 
-                        ctx.end_block(out, "", scope)?;
+                        ctx.end_block(&mut out, "", scope)?;
                     } else {
-                        stack.push((Self::validate_block(ret_kind, &arm.body), "", scope));
+                        stack.push((
+                            Self::validate_block(ret_kind, &arm.body),
+                            "",
+                            scope,
+                            num_iters_used,
+                        ));
                     }
                 }
             }
         }
+
+        write!(raw_out, "{}{}", declarations, out)?;
 
         Ok(())
     }
