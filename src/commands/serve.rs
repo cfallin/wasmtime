@@ -238,6 +238,13 @@ impl ServeCommand {
             };
             self.run.common.debug.debugger = Some("<built-in gdbstub>".into());
             self.run.common.debug.arg.push(addr);
+            // Skip the initial single-step for serve: no wasm executes until
+            // an HTTP request arrives, so the step would block forever.
+            self.run
+                .common
+                .debug
+                .arg
+                .push("--no-initial-step".to_string());
             Some(gdbstub_component_artifact::GDBSTUB_COMPONENT)
         } else {
             None

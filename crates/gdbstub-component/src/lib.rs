@@ -35,6 +35,11 @@ struct Options {
     /// Verbose logging.
     #[clap(short = 'v')]
     verbose: bool,
+    /// Skip the initial single-step that loads modules before the debugger
+    /// connects. Used for `wasmtime serve` where no wasm executes until an
+    /// HTTP request arrives.
+    #[clap(long)]
+    no_initial_step: bool,
 }
 
 struct Component;
@@ -81,16 +86,25 @@ struct Debugger<'a> {
 
 impl<'a> Debugger<'a> {
     async fn run(&mut self) -> Result<()> {
-        // Load module info and initial state from the debuggee (paused at
-        // the initial breakpoint) without executing any wasm. This lets
-        // LLDB see modules immediately on connect.
+        if !self.options.no_initial_step {
+            // Single-step once so modules are loaded and PC is at the
+            // first instruction.
+            self.start_single_step(api::ResumptionValue::Normal);
+            self.running.as_mut().unwrap().wait().await;
+            let _ = self.running.take().unwrap().result(self.debuggee)?;
+        }
         self.update_on_stop();
 
         let listener = TcpListener::bind(&self.options.tcp_address)
             .await
             .expect("Could not bind to TCP port");
 
-        log::info!("Debugger waiting on {}", self.options.tcp_address);
+        // Print readiness marker to stderr so the test harness knows when to
+        // connect. Using eprintln ensures it goes through even without logging.
+        eprintln!(
+            "Debugger listening on {}",
+            self.options.tcp_address
+        );
         log::info!(
             "In LLDB, attach with `process connect --plugin wasm connect://{}",
             self.options.tcp_address

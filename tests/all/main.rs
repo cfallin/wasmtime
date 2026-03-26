@@ -24,6 +24,7 @@ mod func;
 mod funcref;
 mod gc;
 mod globals;
+mod guest_debug;
 mod host_funcs;
 mod i31ref;
 mod iloop;

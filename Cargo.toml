@@ -118,6 +118,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 walkdir = { workspace = true }
 test-programs-artifacts = { workspace = true }
+guest-debug-test-programs-artifact = { workspace = true }
 bytesize = "2.0.1"
 wit-component = { workspace = true }
 cranelift-filetests = { workspace = true }
@@ -169,6 +170,8 @@ members = [
   "crates/debugger",
   "crates/gdbstub-component",
   "crates/gdbstub-component/artifact",
+  "crates/guest-debug-test-programs",
+  "crates/guest-debug-test-programs/artifact",
   "crates/wizer/fuzz",
   "crates/wizer/tests/regex-test",
   "crates/wizer/benches/regex-bench",
@@ -317,6 +320,7 @@ winch-codegen = { path = "winch/codegen", version = "=44.0.0" }
 wasi-preview1-component-adapter = { path = "crates/wasi-preview1-component-adapter" }
 wasmtime-fuzzing = { path = "crates/fuzzing" }
 test-programs-artifacts = { path = 'crates/test-programs/artifacts' }
+guest-debug-test-programs-artifact = { path = 'crates/guest-debug-test-programs/artifact' }
 wasmtime-test-util = { path = "crates/test-util" }
 byte-array-literals = { path = "crates/wasi-preview1-component-adapter/byte-array-literals" }
 pulley-interpreter-fuzz = { path = 'pulley/fuzz' }

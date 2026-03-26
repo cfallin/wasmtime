@@ -1708,6 +1708,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
+name = "guest-debug-test-programs"
+version = "44.0.0"
+dependencies = [
+ "anyhow",
+ "wstd",
+]
+
+[[package]]
+name = "guest-debug-test-programs-artifact"
+version = "44.0.0"
+
+[[package]]
 name = "gzip-header"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4714,6 +4726,7 @@ dependencies = [
  "filecheck",
  "futures",
  "gimli 0.33.0",
+ "guest-debug-test-programs-artifact",
  "http",
  "http-body-util",
  "hyper",

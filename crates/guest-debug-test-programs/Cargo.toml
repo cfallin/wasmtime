@@ -1,0 +1,18 @@
+[package]
+name = "guest-debug-test-programs"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0 WITH LLVM-exception"
+description = "wasi-http test component for guest-debug integration tests"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wstd = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
