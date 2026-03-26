@@ -81,11 +81,9 @@ struct Debugger<'a> {
 
 impl<'a> Debugger<'a> {
     async fn run(&mut self) -> Result<()> {
-        // Single-step once so modules are loaded and PC is at the
-        // first instruction.
-        self.start_single_step(api::ResumptionValue::Normal);
-        self.running.as_mut().unwrap().wait().await;
-        let _ = self.running.take().unwrap().result(self.debuggee)?;
+        // Load module info and initial state from the debuggee (paused at
+        // the initial breakpoint) without executing any wasm. This lets
+        // LLDB see modules immediately on connect.
         self.update_on_stop();
 
         let listener = TcpListener::bind(&self.options.tcp_address)

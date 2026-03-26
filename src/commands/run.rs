@@ -251,26 +251,8 @@ impl RunCommand {
 
             #[cfg(feature = "debug")]
             if let Some(mut debug_run) = debug_run {
-                let debug_engine = debug_run.new_engine()?;
-                let debug_main = debug_run.run.load_module(
-                    &debug_engine,
-                    debug_run.module_and_args[0].as_ref(),
-                    debug_run.module_bytes.as_ref().map(|v| &v[..]),
-                )?;
-                let (mut debug_store, debug_linker) =
-                    debug_run.new_store_and_linker(&debug_engine, &debug_main)?;
-
-                let debug_component = match debug_main {
-                    RunTarget::Core(_) => wasmtime::bail!(
-                        "Debugger component is a core module; only components are supported"
-                    ),
-                    RunTarget::Component(c) => c,
-                };
-                let mut debug_linker = match debug_linker {
-                    CliLinker::Core(_) => unreachable!(),
-                    CliLinker::Component(l) => l,
-                };
-                debug_run.add_debugger_api(&mut debug_linker)?;
+                let (mut debug_store, debug_component, mut debug_linker) =
+                    debug_run.prepare_debugger()?;
 
                 debug_run
                     .invoke_debugger(
@@ -384,7 +366,7 @@ impl RunCommand {
     }
 
     #[cfg(feature = "debug")]
-    fn add_debugger_api(&mut self, linker: &mut wasmtime::component::Linker<Host>) -> Result<()> {
+    pub(crate) fn add_debugger_api(&mut self, linker: &mut wasmtime::component::Linker<Host>) -> Result<()> {
         wasmtime_debugger::add_to_linker(linker, |x| x.ctx().table)?;
         Ok(())
     }
@@ -498,7 +480,7 @@ impl RunCommand {
         Ok(instance)
     }
 
-    fn compute_argv(&self) -> Result<Vec<String>> {
+    pub(crate) fn compute_argv(&self) -> Result<Vec<String>> {
         let mut result = Vec::new();
 
         for (i, arg) in self.module_and_args.iter().enumerate() {
@@ -886,25 +868,71 @@ impl RunCommand {
         }
     }
 
+    /// Prepare a debugger component for execution.
+    ///
+    /// Loads the debugger component, creates a store and linker, and
+    /// returns the pieces needed to invoke the debugger. This factors out
+    /// the boilerplate shared between `wasmtime run` and `wasmtime serve`.
     #[cfg(feature = "debug")]
-    async fn invoke_debugger<
+    pub(crate) fn prepare_debugger(
+        &mut self,
+    ) -> Result<(
+        Store<Host>,
+        wasmtime::component::Component,
+        wasmtime::component::Linker<Host>,
+    )> {
+        let debug_engine = self.new_engine()?;
+        let debug_main = self.run.load_module(
+            &debug_engine,
+            self.module_and_args[0].as_ref(),
+            self.module_bytes.as_ref().map(|v| &v[..]),
+        )?;
+        let (debug_store, debug_linker) =
+            self.new_store_and_linker(&debug_engine, &debug_main)?;
+
+        let debug_component = match debug_main {
+            RunTarget::Core(_) => {
+                bail!("Debugger component is a core module; only components are supported")
+            }
+            RunTarget::Component(c) => c,
+        };
+        let mut debug_linker = match debug_linker {
+            CliLinker::Core(_) => unreachable!(),
+            CliLinker::Component(l) => l,
+        };
+        self.add_debugger_api(&mut debug_linker)?;
+        Ok((debug_store, debug_component, debug_linker))
+    }
+
+    /// Invoke the debugger component with a debuggee.
+    ///
+    /// The debugger runs in `debug_store` while the debuggee wraps an
+    /// arbitrary store type `T` and body closure. The debuggee store type
+    /// is erased through the `Debuggee` abstraction.
+    #[cfg(feature = "debug")]
+    pub(crate) async fn invoke_debugger<
+        T: Send + 'static,
         F: for<'a> FnOnce(
-                &'a mut Store<Host>,
+                &'a mut Store<T>,
             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
             + Send
             + 'static,
     >(
         &self,
-        store: &mut Store<Host>,
-        component: &wasmtime::component::Component,
-        linker: &mut wasmtime::component::Linker<Host>,
-        debuggee_host: Store<Host>,
+        debug_store: &mut Store<Host>,
+        debug_component: &wasmtime::component::Component,
+        debug_linker: &mut wasmtime::component::Linker<Host>,
+        debuggee_store: Store<T>,
         body: F,
     ) -> Result<()> {
-        let instance = linker.instantiate_async(&mut *store, component).await?;
-        let command = wasmtime_debugger::DebuggerComponent::new(&mut *store, &instance)?;
-        let debuggee = wasmtime_debugger::Debuggee::new(debuggee_host, body);
-        let debuggee = wasmtime_debugger::add_debuggee(store.data_mut().ctx().table, debuggee)?;
+        let instance = debug_linker
+            .instantiate_async(&mut *debug_store, debug_component)
+            .await?;
+        let command =
+            wasmtime_debugger::DebuggerComponent::new(&mut *debug_store, &instance)?;
+        let debuggee = wasmtime_debugger::Debuggee::new(debuggee_store, body);
+        let debuggee =
+            wasmtime_debugger::add_debuggee(debug_store.data_mut().ctx().table, debuggee)?;
         {
             // Manually construct a borrow -- wasmtime-wit-bindgen
             // generates code that consumes the `Resource<T>` for
@@ -914,10 +942,10 @@ impl RunCommand {
             let args = self.compute_argv()?;
             command
                 .bytecodealliance_wasmtime_debugger()
-                .call_debug(&mut *store, borrowed, &args)
+                .call_debug(&mut *debug_store, borrowed, &args)
                 .await?;
         }
-        let mut debuggee = store.data_mut().ctx().table.delete(debuggee)?;
+        let mut debuggee = debug_store.data_mut().ctx().table.delete(debuggee)?;
         debuggee.finish().await?;
         Ok(())
     }
