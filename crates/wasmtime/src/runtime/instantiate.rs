@@ -157,14 +157,21 @@ impl CompiledModule {
     /// `VMFuncRef::wasm_call` for `Func::wrap`-style host funcrefs
     /// that don't have access to a compiler when created.
     pub fn wasm_to_array_trampoline(&self, signature: ModuleInternedTypeIndex) -> Option<&[u8]> {
+        let range = self.wasm_to_array_trampoline_range(signature)?;
+        Some(self.engine_code.raw_wasm_to_array_trampoline_data(range))
+    }
+
+    /// Get the Wasm-to-array trampoline for the given signature, as a
+    /// range in the text segment.
+    pub fn wasm_to_array_trampoline_range(
+        &self,
+        signature: ModuleInternedTypeIndex,
+    ) -> Option<Range<usize>> {
         let key = FuncKey::WasmToArrayTrampoline(signature);
         let loc = self.index.func_loc(key)?;
         let start = usize::try_from(loc.start).unwrap();
         let end = usize::try_from(loc.start + loc.length).unwrap();
-        Some(
-            self.engine_code
-                .raw_wasm_to_array_trampoline_data(start..end),
-        )
+        Some(start..end)
     }
 
     /// Lookups a defined function by a program counter value.

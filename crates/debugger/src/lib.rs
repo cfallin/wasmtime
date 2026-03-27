@@ -184,6 +184,7 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
             }
             DebugEvent::Trap(trap) => DebugRunResult::Trap(trap),
             DebugEvent::Breakpoint => DebugRunResult::Breakpoint,
+            DebugEvent::User(payload) => DebugRunResult::User(payload),
             DebugEvent::EpochYield => {
                 // Only pause on epoch yields that were requested via
                 // interrupt(). Other epoch ticks simply yield to the
@@ -522,6 +523,8 @@ pub enum DebugRunResult {
     Trap(Trap),
     /// A breakpoint was reached.
     Breakpoint,
+    /// A user-defined debug event.
+    User(u64),
 }
 
 #[cfg(test)]

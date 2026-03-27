@@ -165,6 +165,8 @@ interface debuggee {
     uncaught-exception-thrown(wasm-exception),
     /// An injected call completed with return value(s).
     injected-call-return(list<wasm-value>),
+    /// A user-defined debug event emitted by the host.
+    user(u64),
   }
 
   resource instance {

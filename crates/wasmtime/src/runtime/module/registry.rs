@@ -235,7 +235,8 @@ impl ModuleRegistry {
         });
 
         // Create a StoreCode if one does not already exist.
-        let store_code_pc = match self.store_code.entry(code.text_range().start) {
+        let engine_code_start = code.text_range().start;
+        let store_code_pc = match self.store_code.entry(engine_code_start) {
             Entry::Vacant(v) => {
                 let store_code = StoreCode::new(engine, code)?;
                 let store_code_pc = store_code.text_range().start;
@@ -306,8 +307,28 @@ impl ModuleRegistry {
         //
         // See also the comment in `ModuleInner::wasm_to_native_trampoline`.
         for module in self.modules.values() {
-            if let Some(trampoline) = module.wasm_to_array_trampoline(sig) {
-                return Some(trampoline);
+            // Look up the trampoline via ModuleWithCode so the returned
+            // pointer targets the store-private code copy (StoreCode)
+            // rather than the shared EngineCode. This is important for
+            // debug mode where breakpoints are patched into StoreCode.
+            if let Some(module_with_code) = ModuleWithCode::in_store(self, module) {
+                let trampoline_shared_ty =
+                    module.engine().signatures().trampoline_type(sig);
+                let trampoline_module_ty = module
+                    .engine_code()
+                    .signatures()
+                    .trampoline_type(trampoline_shared_ty);
+                if let Some(trampoline_module_ty) = trampoline_module_ty {
+                    if let Some(data) =
+                        module_with_code.wasm_to_array_trampoline(trampoline_module_ty)
+                    {
+                        let ptr = data
+                            .as_ptr()
+                            .cast::<VMWasmCallFunction>()
+                            .cast_mut();
+                        return NonNull::new(ptr);
+                    }
+                }
             }
         }
         None

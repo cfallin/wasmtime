@@ -1306,6 +1306,59 @@ impl<T> Store<T> {
     pub fn clear_debug_handler(&mut self) {
         self.inner.debug_handler = None;
     }
+
+    /// Register a [`Module`] with this store's module registry for
+    /// debugging, without instantiating it.
+    ///
+    /// This makes the module visible to
+    /// [`Store::debug_all_modules`](crate::Store::debug_all_modules) and
+    /// to attached debuggers before the module is actually instantiated.
+    ///
+    /// Note: breakpoints set on pre-registered modules may not take effect
+    /// because the module's code is not yet mapped into the store's
+    /// private code copy at the addresses used during execution. This API
+    /// is primarily useful for making modules visible for inspection; use
+    /// the normal instantiation path for breakpoints to work.
+    #[cfg(feature = "debug")]
+    pub fn debug_register_module(&mut self, module: &crate::Module) -> crate::Result<()> {
+        let (modules, engine, breakpoints) =
+            self.inner.modules_and_engine_and_breakpoints_mut();
+        modules.register_module(module, engine, breakpoints)?;
+        Ok(())
+    }
+
+    /// Register all inner modules of a [`Component`](crate::component::Component)
+    /// with this store's module registry for debugging, without instantiating
+    /// the component.
+    #[cfg(all(feature = "debug", feature = "component-model"))]
+    pub fn debug_register_component(
+        &mut self,
+        component: &crate::component::Component,
+    ) -> crate::Result<()> {
+        for module in component.static_modules() {
+            self.debug_register_module(module)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a user-defined debug event.
+    ///
+    /// If a debug handler is attached to this store, it will receive a
+    /// [`DebugEvent::User`](crate::DebugEvent::User) event with the given
+    /// payload. This causes the debuggee to pause, giving an attached
+    /// debugger the opportunity to inspect state (e.g., set breakpoints
+    /// on newly registered modules).
+    ///
+    /// This is an async operation because the debug handler runs
+    /// asynchronously.
+    #[cfg(feature = "debug")]
+    pub async fn emit_debug_event(&mut self, payload: u64) -> crate::Result<()>
+    where
+        T: Send,
+    {
+        self.inner
+            .block_on_debug_handler(crate::DebugEvent::User(payload))
+    }
 }
 
 impl<'a, T> StoreContext<'a, T> {

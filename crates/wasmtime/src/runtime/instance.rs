@@ -17,7 +17,7 @@ use core::ptr::NonNull;
 use wasmparser::WasmFeatures;
 use wasmtime_environ::{
     EntityIndex, EntityType, FuncIndex, GlobalIndex, MemoryIndex, PrimaryMap, TableIndex, TagIndex,
-    TypeTrace,
+    TypeTrace, VMSharedTypeIndex,
 };
 
 /// An instantiated WebAssembly module.
@@ -796,13 +796,15 @@ pub struct InstancePre<T> {
     /// preallocate space in a `Store` up front for all entries to be inserted.
     host_funcs: usize,
 
-    /// The `VMFuncRef`s for the functions in `items` that do not
-    /// have a `wasm_call` trampoline. We pre-allocate and pre-patch these
-    /// `VMFuncRef`s so that we don't have to do it at
-    /// instantiation time.
+    /// For host functions without a `wasm_call` trampoline, we store
+    /// a `VMFuncRef` template (with `wasm_call = None`) and the
+    /// `VMSharedTypeIndex` needed to look up the trampoline. The actual
+    /// trampoline pointer is resolved at instantiation time from the
+    /// store-private code copy so that breakpoint patching works
+    /// correctly in debug mode.
     ///
     /// This is an `Arc` for the same reason as `items`.
-    func_refs: Arc<TryVec<VMFuncRef>>,
+    func_refs_with_trampolines: Arc<TryVec<(VMFuncRef, VMSharedTypeIndex)>>,
 
     /// Whether or not any import in `items` is flagged as needing async.
     ///
@@ -820,7 +822,7 @@ impl<T> Clone for InstancePre<T> {
             module: self.module.clone(),
             items: self.items.clone(),
             host_funcs: self.host_funcs,
-            func_refs: self.func_refs.clone(),
+            func_refs_with_trampolines: self.func_refs_with_trampolines.clone(),
             asyncness: self.asyncness,
             _marker: self._marker,
         }
@@ -839,7 +841,7 @@ impl<T: 'static> InstancePre<T> {
     pub(crate) unsafe fn new(module: &Module, items: TryVec<Definition>) -> Result<InstancePre<T>> {
         typecheck(module, &items, |cx, ty, item| cx.definition(ty, &item.ty()))?;
 
-        let mut func_refs = TryVec::with_capacity(items.len())?;
+        let mut func_refs_with_trampolines = TryVec::with_capacity(items.len())?;
         let mut host_funcs = 0;
         let mut asyncness = Asyncness::No;
         for item in &items {
@@ -848,12 +850,16 @@ impl<T: 'static> InstancePre<T> {
                 Definition::HostFunc(f) => {
                     host_funcs += 1;
                     if f.func_ref().wasm_call.is_none() {
-                        func_refs.push(VMFuncRef {
-                            wasm_call: module
-                                .wasm_to_array_trampoline(f.sig_index())
-                                .map(|f| f.into()),
-                            ..*f.func_ref()
-                        })?;
+                        // Store the VMFuncRef template WITHOUT the trampoline
+                        // pointer. The trampoline will be resolved at
+                        // instantiation time from the store-private code copy.
+                        func_refs_with_trampolines.push((
+                            VMFuncRef {
+                                wasm_call: None,
+                                ..*f.func_ref()
+                            },
+                            f.sig_index(),
+                        ))?;
                     }
                     asyncness = asyncness | f.asyncness();
                 }
@@ -864,7 +870,7 @@ impl<T: 'static> InstancePre<T> {
             module: module.clone(),
             items: try_new::<Arc<_>>(items)?,
             host_funcs,
-            func_refs: try_new::<Arc<_>>(func_refs)?,
+            func_refs_with_trampolines: try_new::<Arc<_>>(func_refs_with_trampolines)?,
             asyncness,
             _marker: core::marker::PhantomData,
         })
@@ -898,7 +904,7 @@ impl<T: 'static> InstancePre<T> {
             &self.module,
             &self.items,
             self.host_funcs,
-            &self.func_refs,
+            &self.func_refs_with_trampolines,
             self.asyncness,
         )?;
 
@@ -937,7 +943,7 @@ impl<T: 'static> InstancePre<T> {
             &self.module,
             &self.items,
             self.host_funcs,
-            &self.func_refs,
+            &self.func_refs_with_trampolines,
             self.asyncness,
         )?;
 
@@ -961,7 +967,7 @@ fn pre_instantiate_raw(
     module: &Module,
     items: &Arc<TryVec<Definition>>,
     host_funcs: usize,
-    func_refs: &Arc<TryVec<VMFuncRef>>,
+    func_ref_templates: &Arc<TryVec<(VMFuncRef, VMSharedTypeIndex)>>,
     asyncness: Asyncness,
 ) -> Result<OwnedImports> {
     // Register this module and use it to fill out any funcref wasm_call holes
@@ -971,11 +977,30 @@ fn pre_instantiate_raw(
     let (funcrefs, modules) = store.func_refs_and_modules();
     funcrefs.fill(modules);
 
+    // Resolve trampoline pointers from the store-private code copy.
+    // This is deferred from `InstancePre::new` so that the pointers
+    // target the correct (possibly breakpoint-patched) copy of the code.
+    let resolved_func_refs = {
+        let modules_ref = store.modules();
+        let mut resolved = TryVec::with_capacity(func_ref_templates.len())?;
+        for (template, sig) in func_ref_templates.iter() {
+            let trampoline = modules_ref
+                .wasm_to_array_trampoline(*sig)
+                .map(|f| f.into());
+            resolved.push(VMFuncRef {
+                wasm_call: trampoline,
+                ..*template
+            })?;
+        }
+        try_new::<Arc<_>>(resolved)?
+    };
+
     if host_funcs > 0 {
         // Any linker-defined function of the `Definition::HostFunc` variant
         // will insert a function into the store automatically as part of
         // instantiation, so reserve space here to make insertion more efficient
         // as it won't have to realloc during the instantiation.
+        let (funcrefs, _) = store.func_refs_and_modules();
         funcrefs.reserve_storage(host_funcs);
 
         // The usage of `to_extern_store_rooted` requires that the items are
@@ -983,12 +1008,12 @@ fn pre_instantiate_raw(
         // items into the store once. This avoids cloning each individual item
         // below.
         funcrefs.push_instance_pre_definitions(items.clone());
-        funcrefs.push_instance_pre_func_refs(func_refs.clone());
+        funcrefs.push_instance_pre_func_refs(resolved_func_refs.clone());
     }
 
     store.set_async_required(asyncness);
 
-    let mut func_refs = func_refs.iter().map(|f| NonNull::from(f));
+    let mut func_refs = resolved_func_refs.iter().map(|f| NonNull::from(f));
     let mut imports = OwnedImports::new(module);
     for import in items.iter() {
         if !import.comes_from_same_store(store) {

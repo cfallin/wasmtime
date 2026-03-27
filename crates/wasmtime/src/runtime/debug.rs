@@ -877,6 +877,9 @@ pub enum DebugEvent<'a> {
     Breakpoint,
     /// An epoch yield occurred.
     EpochYield,
+    /// A user-defined debug event emitted via
+    /// [`Store::emit_debug_event`](crate::Store::emit_debug_event).
+    User(u64),
 }
 
 /// A handler for debug events.
@@ -1100,11 +1103,12 @@ impl<'a> BreakpointEdit<'a> {
         *refcount += 1;
         if *refcount == 1 {
             // First reference: actually patch the code.
-            log::trace!("patching in breakpoint {actual_key:?}");
             let mem =
                 Self::get_code_memory(self.state, self.registry, &mut self.dirty_modules, module)?;
             let patches = frame_table.lookup_breakpoint_patches_by_pc(actual_pc);
-            Self::patch(patches, mem, true);
+            for p in patches {
+                Self::patch(core::iter::once(p), mem, true);
+            }
         }
         Ok(())
     }

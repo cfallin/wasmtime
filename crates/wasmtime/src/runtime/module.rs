@@ -1125,6 +1125,7 @@ impl Module {
     /// this *can* be present on `Module` (without a `StoreCode`)
     /// because we can execute the `EngineCode` for trampolines that
     /// leave the store to call the host.
+    #[allow(dead_code)] // Used indirectly via ModuleWithCode::wasm_to_array_trampoline
     pub(crate) fn wasm_to_array_trampoline(
         &self,
         signature: VMSharedTypeIndex,

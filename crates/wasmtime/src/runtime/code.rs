@@ -467,6 +467,19 @@ impl<'a> ModuleWithCode<'a> {
         Some(&self.store_code.text()[range])
     }
 
+    /// Get the Wasm-to-array trampoline for the given signature, as a
+    /// slice of raw code from the store-private code copy.
+    pub fn wasm_to_array_trampoline(
+        &self,
+        signature: wasmtime_environ::ModuleInternedTypeIndex,
+    ) -> Option<&[u8]> {
+        let range = self
+            .module
+            .compiled_module()
+            .wasm_to_array_trampoline_range(signature)?;
+        Some(&self.store_code.text()[range])
+    }
+
     /// Get the text offset (relative PC) for a given absolute PC in
     /// this module.
     #[cfg(feature = "gc")]

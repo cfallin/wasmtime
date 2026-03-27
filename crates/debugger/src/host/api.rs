@@ -265,6 +265,7 @@ fn result_to_event(table: &mut ResourceTable, value: DebugRunResult) -> Result<w
             let e = table.push(WasmException(e))?;
             wit::Event::UncaughtExceptionThrown(e)
         }
+        DebugRunResult::User(payload) => wit::Event::User(payload),
     })
 }
 

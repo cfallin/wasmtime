@@ -540,17 +540,19 @@ impl ServeCommand {
             let instance_pre = linker.instantiate_pre(&component)?;
             let proxy_pre = wasmtime_wasi_http::p2::bindings::ProxyPre::new(instance_pre)?;
             let debuggee_store = self.new_store(&engine, None)?;
-            let (mut debug_store, debug_component, mut debug_linker) =
+            let (mut debug_store, debug_component_wasm, mut debug_linker) =
                 debug_run.prepare_debugger()?;
 
             let addr = self.addr;
             return debug_run
                 .invoke_debugger(
                     &mut debug_store,
-                    &debug_component,
+                    &debug_component_wasm,
                     &mut debug_linker,
                     debuggee_store,
-                    move |store| Box::pin(debug_serve_body(store, proxy_pre, addr)),
+                    move |store| {
+                        Box::pin(debug_serve_body(store, proxy_pre, addr))
+                    },
                 )
                 .await;
         }
