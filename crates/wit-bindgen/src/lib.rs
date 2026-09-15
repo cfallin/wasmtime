@@ -1168,6 +1168,7 @@ impl<_T: Send + 'static> {camel}Pre<_T> {{
                 world,
                 wit_component::StringEncoding::UTF8,
                 None,
+                false,
             )?;
             uwriteln!(
                 self.src,

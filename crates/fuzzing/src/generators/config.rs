@@ -137,6 +137,7 @@ impl Config {
             reference_types,
             tail_call,
             extended_const,
+            multiloop: _,
             wide_arithmetic,
             branch_hinting,
             component_model_async,

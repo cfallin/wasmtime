@@ -634,6 +634,8 @@ const fn default_operator_cost(op: &Operator) -> i64 {
         // cost is incurred with the conditional check.
         Operator::Block { .. }
         | Operator::Loop { .. }
+        | Operator::MultiLoop { .. }
+        | Operator::Label
         | Operator::Unreachable
         | Operator::Return
         | Operator::Else
@@ -657,6 +659,12 @@ macro_rules! default_cost {
     // free, so don't consume fuel. Note the lack of `if` since some
     // cost is incurred with the conditional check.
     (Block) => {
+        0
+    };
+    (MultiLoop) => {
+        0
+    };
+    (Label) => {
         0
     };
     (Loop) => {

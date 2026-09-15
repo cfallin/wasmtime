@@ -583,6 +583,8 @@ impl<'module_environment> FuncEnvironment<'module_environment> {
             // To ensure all code preceding a loop is only counted once we
             // update the fuel variable on entry.
             Operator::Loop { .. }
+            | Operator::MultiLoop { .. }
+            | Operator::Label
 
             // Entering into an `if` block means that the edge we take isn't
             // known until runtime, so we need to update our fuel consumption

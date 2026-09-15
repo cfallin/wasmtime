@@ -265,6 +265,42 @@ pub fn translate_operator(
             let next = block_with_params(builder, results.clone(), environ)?;
             environ.stacks.push_block(next, params.len(), results.len());
         }
+        Operator::MultiLoop { blocktys } => {
+            let mut entries = Vec::with_capacity(blocktys.len());
+            let mut param_counts = Vec::with_capacity(blocktys.len());
+            let mut destination = None;
+            let mut num_return_values = 0;
+            for blockty in blocktys.iter() {
+                let (params, results) = blocktype_params_results(validator, *blockty)?;
+                param_counts.push(params.len());
+                entries.push(block_with_params(builder, params, environ)?);
+                num_return_values = results.len();
+                destination = Some(results);
+            }
+            let destination = block_with_params(builder, destination.unwrap(), environ)?;
+            let num_param_values = param_counts[0];
+            canonicalise_then_jump(
+                environ,
+                builder,
+                entries[0],
+                environ.stacks.peekn(num_param_values),
+            );
+            environ.stacks.multiloop_frames += 1;
+            environ
+                .stacks
+                .control_stack
+                .push(ControlStackFrame::MultiLoop {
+                    destination,
+                    entries,
+                    param_counts,
+                    active_body: None,
+                    num_param_values,
+                    num_return_values,
+                    original_stack_size: environ.stacks.stack.len() - num_param_values,
+                    head_is_reachable: true,
+                });
+        }
+        Operator::Label => translate_multiloop_label(builder, environ),
         Operator::Loop { blockty } => {
             let (params, results) = blocktype_params_results(validator, *blockty)?;
             let loop_body = block_with_params(builder, params.clone(), environ)?;
@@ -454,6 +490,9 @@ pub fn translate_operator(
         }
         Operator::End => {
             let frame = environ.stacks.control_stack.pop().unwrap();
+            if matches!(frame, ControlStackFrame::MultiLoop { .. }) {
+                environ.stacks.multiloop_frames -= 1;
+            }
             let next_block = frame.following_code();
             let return_count = frame.num_return_values();
 
@@ -474,9 +513,7 @@ pub fn translate_operator(
             builder.seal_block(next_block);
 
             // If it is a loop we also have to seal the body loop block
-            if let ControlStackFrame::Loop { header, .. } = frame {
-                builder.seal_block(header)
-            }
+            frame.seal_loop_entries(builder);
 
             frame.restore_catch_handlers(&mut environ.stacks.handlers, builder);
 
@@ -508,17 +545,13 @@ pub fn translate_operator(
          * `br_table`.
          ***********************************************************************************/
         Operator::Br { relative_depth } => {
-            let i = environ.stacks.control_stack.len() - 1 - (*relative_depth as usize);
+            let (i, label_index) = environ.stacks.resolve_label(*relative_depth as usize);
             let (return_count, br_destination) = {
                 let frame = &mut environ.stacks.control_stack[i];
                 // We signal that all the code that follows until the next End is unreachable
                 frame.set_branched_to_exit();
-                let return_count = if frame.is_loop() {
-                    frame.num_param_values()
-                } else {
-                    frame.num_return_values()
-                };
-                (return_count, frame.br_destination())
+                let return_count = frame.branch_arity(label_index);
+                (return_count, frame.br_destination(label_index))
             };
             canonicalise_then_jump(
                 environ,
@@ -540,13 +573,9 @@ pub fn translate_operator(
                 }
             }
             let jump_args_count = {
-                let i = environ.stacks.control_stack.len() - 1 - (min_depth as usize);
+                let (i, label_index) = environ.stacks.resolve_label(min_depth as usize);
                 let min_depth_frame = &environ.stacks.control_stack[i];
-                if min_depth_frame.is_loop() {
-                    min_depth_frame.num_param_values()
-                } else {
-                    min_depth_frame.num_return_values()
-                }
+                min_depth_frame.branch_arity(label_index)
             };
             let val = environ.stacks.pop1();
             let mut data = Vec::with_capacity(targets.len() as usize);
@@ -555,18 +584,18 @@ pub fn translate_operator(
                 for depth in targets.targets() {
                     let depth = depth?;
                     let block = {
-                        let i = environ.stacks.control_stack.len() - 1 - (depth as usize);
+                        let (i, label_index) = environ.stacks.resolve_label(depth as usize);
                         let frame = &mut environ.stacks.control_stack[i];
                         frame.set_branched_to_exit();
-                        frame.br_destination()
+                        frame.br_destination(label_index)
                     };
                     data.push(builder.func.dfg.block_call(block, &[]));
                 }
                 let block = {
-                    let i = environ.stacks.control_stack.len() - 1 - (default as usize);
+                    let (i, label_index) = environ.stacks.resolve_label(default as usize);
                     let frame = &mut environ.stacks.control_stack[i];
                     frame.set_branched_to_exit();
-                    frame.br_destination()
+                    frame.br_destination(label_index)
                 };
                 let block = builder.func.dfg.block_call(block, &[]);
                 let jt = builder.create_jump_table(JumpTableData::new(block, &data));
@@ -604,10 +633,10 @@ pub fn translate_operator(
                     builder.switch_to_block(dest_block);
                     builder.seal_block(dest_block);
                     let real_dest_block = {
-                        let i = environ.stacks.control_stack.len() - 1 - depth;
+                        let (i, label_index) = environ.stacks.resolve_label(depth);
                         let frame = &mut environ.stacks.control_stack[i];
                         frame.set_branched_to_exit();
-                        frame.br_destination()
+                        frame.br_destination(label_index)
                     };
                     canonicalise_then_jump(
                         environ,
@@ -3208,11 +3237,11 @@ pub fn translate_operator(
             for handle in &wasm_resume_table.handlers {
                 match handle {
                     wasmparser::Handle::OnLabel { tag, label } => {
-                        let i = environ.stacks.control_stack.len() - 1 - (*label as usize);
+                        let (i, label_index) = environ.stacks.resolve_label(*label as usize);
                         let frame = &mut environ.stacks.control_stack[i];
                         // This is side-effecting!
                         frame.set_branched_to_exit();
-                        clif_resume_table.push((*tag, Some(frame.br_destination())));
+                        clif_resume_table.push((*tag, Some(frame.br_destination(label_index))));
                     }
                     wasmparser::Handle::OnSwitch { tag } => {
                         clif_resume_table.push((*tag, None));
@@ -3246,10 +3275,10 @@ pub fn translate_operator(
             for handle in &wasm_resume_table.handlers {
                 match handle {
                     wasmparser::Handle::OnLabel { tag, label } => {
-                        let i = environ.stacks.control_stack.len() - 1 - (*label as usize);
+                        let (i, label_index) = environ.stacks.resolve_label(*label as usize);
                         let frame = &mut environ.stacks.control_stack[i];
                         frame.set_branched_to_exit();
-                        clif_resume_table.push((*tag, Some(frame.br_destination())));
+                        clif_resume_table.push((*tag, Some(frame.br_destination(label_index))));
                     }
                     wasmparser::Handle::OnSwitch { tag } => {
                         clif_resume_table.push((*tag, None));
@@ -3283,10 +3312,10 @@ pub fn translate_operator(
             for handle in &wasm_resume_table.handlers {
                 match handle {
                     wasmparser::Handle::OnLabel { tag, label } => {
-                        let i = environ.stacks.control_stack.len() - 1 - (*label as usize);
+                        let (i, label_index) = environ.stacks.resolve_label(*label as usize);
                         let frame = &mut environ.stacks.control_stack[i];
                         frame.set_branched_to_exit();
-                        clif_resume_table.push((*tag, Some(frame.br_destination())));
+                        clif_resume_table.push((*tag, Some(frame.br_destination(label_index))));
                     }
                     wasmparser::Handle::OnSwitch { tag } => {
                         clif_resume_table.push((*tag, None));
@@ -3441,6 +3470,40 @@ pub fn translate_operator(
     Ok(())
 }
 
+/// Start each body independently: even an earlier body with no known incoming
+/// edge may later acquire a predecessor from a subsequent body.
+fn translate_multiloop_label(builder: &mut FunctionBuilder, environ: &mut FuncEnvironment<'_>) {
+    let ControlStackFrame::MultiLoop {
+        entries,
+        active_body,
+        original_stack_size,
+        head_is_reachable,
+        ..
+    } = environ.stacks.control_stack.last_mut().unwrap()
+    else {
+        unreachable!()
+    };
+    let next = active_body.map_or(0, |body| body + 1);
+    let entry = entries[next];
+    let first = active_body.is_none();
+    *active_body = Some(next);
+    let base = *original_stack_size;
+    let reachable = *head_is_reachable;
+    if !reachable {
+        return;
+    }
+    if !first && environ.stacks.reachable {
+        let count = environ.stacks.block_param_vars[entry].len();
+        canonicalise_then_jump(environ, builder, entry, environ.stacks.peekn(count));
+    }
+    environ.stacks.stack.truncate(base);
+    environ.stacks.stack_shape.truncate(base);
+    builder.switch_to_block(entry);
+    push_block_params(environ, builder, entry);
+    environ.stacks.reachable = true;
+    environ.translate_loop_header(builder);
+}
+
 /// Deals with a Wasm instruction located in an unreachable portion of the code. Most of them
 /// are dropped but special ones like `End` or `Else` signal the potential end of the unreachable
 /// portion so the translation state must be updated accordingly.
@@ -3451,6 +3514,23 @@ fn translate_unreachable_operator(
 ) -> WasmResult<()> {
     debug_assert!(!environ.is_reachable());
     match *op {
+        Operator::MultiLoop { ref blocktys } => {
+            environ.stacks.multiloop_frames += 1;
+            environ
+                .stacks
+                .control_stack
+                .push(ControlStackFrame::MultiLoop {
+                    destination: ir::Block::reserved_value(),
+                    entries: vec![ir::Block::reserved_value(); blocktys.len()],
+                    param_counts: vec![0; blocktys.len()],
+                    active_body: None,
+                    num_param_values: 0,
+                    num_return_values: 0,
+                    original_stack_size: environ.stacks.stack.len(),
+                    head_is_reachable: false,
+                });
+        }
+        Operator::Label => translate_multiloop_label(builder, environ),
         Operator::If { blockty } => {
             // Push a placeholder control stack entry. The if isn't reachable,
             // so we don't have any branches anywhere.
@@ -3532,6 +3612,9 @@ fn translate_unreachable_operator(
         }
         Operator::End => {
             let frame = environ.stacks.control_stack.pop().unwrap();
+            if matches!(frame, ControlStackFrame::MultiLoop { .. }) {
+                environ.stacks.multiloop_frames -= 1;
+            }
 
             frame.restore_catch_handlers(&mut environ.stacks.handlers, builder);
 
@@ -3541,10 +3624,10 @@ fn translate_unreachable_operator(
                 &mut environ.stacks.stack_shape,
             );
 
+            frame.seal_loop_entries(builder);
             let reachable_anyway = match frame {
                 // If it is a loop we also have to seal the body loop block
-                ControlStackFrame::Loop { header, .. } => {
-                    builder.seal_block(header);
+                ControlStackFrame::Loop { .. } | ControlStackFrame::MultiLoop { .. } => {
                     // And loops can't have branches to the end.
                     false
                 }
@@ -4133,18 +4216,14 @@ fn translate_br_if_args(
     relative_depth: u32,
     env: &mut FuncEnvironment<'_>,
 ) -> (ir::Block, SmallVec<[ir::Value; 8]>) {
-    let i = env.stacks.control_stack.len() - 1 - (relative_depth as usize);
+    let (i, label_index) = env.stacks.resolve_label(relative_depth as usize);
     let (return_count, br_destination) = {
         let frame = &mut env.stacks.control_stack[i];
         // The values returned by the branch are still available for the reachable
         // code that comes after it
         frame.set_branched_to_exit();
-        let return_count = if frame.is_loop() {
-            frame.num_param_values()
-        } else {
-            frame.num_return_values()
-        };
-        (return_count, frame.br_destination())
+        let return_count = frame.branch_arity(label_index);
+        (return_count, frame.br_destination(label_index))
     };
     // Copy the branch arguments off the operand stack into an owned buffer so
     // that callers can subsequently borrow `env` (e.g. to look up the
@@ -4664,10 +4743,10 @@ fn create_catch_block(
     }
 
     // Generate the branch itself.
-    let i = environ.stacks.control_stack.len() - 1 - (label as usize);
+    let (i, label_index) = environ.stacks.resolve_label(label as usize);
     let frame = &mut environ.stacks.control_stack[i];
     frame.set_branched_to_exit();
-    let br_destination = frame.br_destination();
+    let br_destination = frame.br_destination(label_index);
     canonicalise_then_jump(environ, builder, br_destination, &params);
 
     Ok(block)

@@ -407,6 +407,11 @@ class Config {
   }
 #endif // WASMTIME_FEATURE_GC
 
+  /// \brief Enables the local multiloop extension (Cranelift only).
+  void wasm_multiloop(bool enable) {
+    wasmtime_config_wasm_multiloop_set(ptr.get(), enable);
+  }
+
   /// \brief Configures whether the WebAssembly wide arithmetic proposal will be
   /// enabled
   ///

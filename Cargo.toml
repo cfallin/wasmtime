@@ -782,3 +782,15 @@ fpr = "fpr"
 
 [workspace.metadata.typos.files]
 extend-exclude = [ "docs/js/mermaid*.js", "crates/wasi-nn/**/*.txt", "*.isle" ]
+
+# Use the local multiloop implementation during development.
+[patch.crates-io]
+wasmparser = { path = "../wasm-tools/crates/wasmparser" }
+wasm-encoder = { path = "../wasm-tools/crates/wasm-encoder" }
+wasmprinter = { path = "../wasm-tools/crates/wasmprinter" }
+wat = { path = "../wasm-tools/crates/wat" }
+wast = { path = "../wasm-tools/crates/wast" }
+json-from-wast = { path = "../wasm-tools/crates/json-from-wast" }
+wasm-metadata = { path = "../wasm-tools/crates/wasm-metadata" }
+wit-component = { path = "../wasm-tools/crates/wit-component" }
+wit-parser = { path = "../wasm-tools/crates/wit-parser" }

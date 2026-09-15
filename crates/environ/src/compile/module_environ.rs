@@ -1146,7 +1146,9 @@ and for re-adding support for interface types you can see this issue:
                         }
                     }
                 }
-                wasmparser::Name::Label(_)
+                wasmparser::Name::Parameter(_)
+                | wasmparser::Name::TagParameter(_)
+                | wasmparser::Name::Label(_)
                 | wasmparser::Name::Type(_)
                 | wasmparser::Name::Table(_)
                 | wasmparser::Name::Global(_)

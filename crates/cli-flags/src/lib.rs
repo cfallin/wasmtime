@@ -513,6 +513,8 @@ wasmtime_option_group! {
         pub gc: Option<bool>,
         /// Configure support for the custom-page-sizes proposal.
         pub custom_page_sizes: Option<bool>,
+        /// Configure support for the local multiloop extension (Cranelift only).
+        pub multiloop: Option<bool>,
         /// Configure support for the wide-arithmetic proposal.
         pub wide_arithmetic: Option<bool>,
         /// Configure support for the branch-hinting proposal.
@@ -1314,6 +1316,9 @@ impl CommonOptions {
         if let Some(enable) = self.wasm.custom_page_sizes.or(all) {
             config.wasm_custom_page_sizes(enable);
         }
+        if let Some(enable) = self.wasm.multiloop {
+            config.wasm_multiloop(enable);
+        }
         if let Some(enable) = self.wasm.wide_arithmetic.or(all) {
             config.wasm_wide_arithmetic(enable);
         }
@@ -1546,6 +1551,7 @@ impl CommonOptions {
                 stack_switching: Some(features.contains(WasmFeatures::STACK_SWITCHING)),
                 tail_call: Some(features.contains(WasmFeatures::TAIL_CALL)),
                 threads: Some(features.contains(WasmFeatures::THREADS)),
+                multiloop: Some(features.contains(WasmFeatures::MULTILOOP)),
                 wide_arithmetic: Some(features.contains(WasmFeatures::WIDE_ARITHMETIC)),
                 concurrency_support: Some(engine.get_concurrency_support()),
                 epoch_interruption: Some(engine.get_epoch_interruption()),

@@ -38,6 +38,7 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
         reference_types,
         tail_call,
         extended_const,
+        multiloop,
         wide_arithmetic,
         branch_hinting,
         component_model_async,
@@ -119,6 +120,7 @@ pub fn apply_test_config(config: &mut Config, test_config: &wast::TestConfig) {
         .wasm_tail_call(tail_call)
         .wasm_custom_page_sizes(custom_page_sizes)
         .wasm_extended_const(extended_const)
+        .wasm_multiloop(multiloop.unwrap_or(false))
         .wasm_wide_arithmetic(wide_arithmetic)
         .wasm_branch_hinting(branch_hinting)
         .wasm_component_model_async(component_model_async)

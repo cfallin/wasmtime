@@ -306,6 +306,12 @@ WASMTIME_CONFIG_PROP(void, wasm_memory64, bool)
 WASMTIME_CONFIG_PROP(void, wasm_wide_arithmetic, bool)
 
 /**
+ * \brief Enables the local multiloop extension (Cranelift only).
+ * Disabled by default.
+ */
+WASMTIME_CONFIG_PROP(void, wasm_multiloop, bool)
+
+/**
  * \brief Configures whether the WebAssembly branch-hinting proposal is
  * enabled.
  *

@@ -41,7 +41,7 @@ pub enum ElseData {
     },
 }
 
-/// A control stack frame can be an `if`, a `block` or a `loop`, each one having the following
+/// A control stack frame can be an `if`, a `block`, a `loop`, or a `multiloop`, each one having the following
 /// fields:
 ///
 /// - `destination`: reference to the `Block` that will hold the code after the control block;
@@ -86,6 +86,16 @@ pub enum ControlStackFrame {
         /// list of catch blocks to seal when done.
         try_table_info: Option<(HandlerStateCheckpoint, Vec<Block>)>,
     },
+    MultiLoop {
+        destination: Block,
+        entries: Vec<Block>,
+        param_counts: Vec<usize>,
+        active_body: Option<usize>,
+        num_param_values: usize,
+        num_return_values: usize,
+        original_stack_size: usize,
+        head_is_reachable: bool,
+    },
     Loop {
         destination: Block,
         header: Block,
@@ -97,12 +107,40 @@ pub enum ControlStackFrame {
 
 /// Helper methods for the control stack objects.
 impl ControlStackFrame {
+    pub fn branch_arity(&self, label: usize) -> usize {
+        match self {
+            Self::MultiLoop { param_counts, .. } => param_counts[label],
+            _ if self.is_loop() => self.num_param_values(),
+            _ => self.num_return_values(),
+        }
+    }
+
+    /// Entries remain unsealed until all bodies have contributed predecessors.
+    pub fn seal_loop_entries(&self, builder: &mut FunctionBuilder) {
+        match self {
+            Self::Loop { header, .. } => builder.seal_block(*header),
+            Self::MultiLoop {
+                entries,
+                head_is_reachable: true,
+                ..
+            } => {
+                for entry in entries {
+                    builder.seal_block(*entry);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn num_return_values(&self) -> usize {
         match *self {
             Self::If {
                 num_return_values, ..
             }
             | Self::Block {
+                num_return_values, ..
+            }
+            | Self::MultiLoop {
                 num_return_values, ..
             }
             | Self::Loop {
@@ -119,6 +157,9 @@ impl ControlStackFrame {
             | Self::Block {
                 num_param_values, ..
             }
+            | Self::MultiLoop {
+                num_param_values, ..
+            }
             | Self::Loop {
                 num_param_values, ..
             } => num_param_values,
@@ -129,14 +170,16 @@ impl ControlStackFrame {
         match *self {
             Self::If { destination, .. }
             | Self::Block { destination, .. }
+            | Self::MultiLoop { destination, .. }
             | Self::Loop { destination, .. } => destination,
         }
     }
 
-    pub fn br_destination(&self) -> Block {
+    pub fn br_destination(&self, label: usize) -> Block {
         match *self {
             Self::If { destination, .. } | Self::Block { destination, .. } => destination,
             Self::Loop { header, .. } => header,
+            Self::MultiLoop { ref entries, .. } => entries[label],
         }
     }
 
@@ -152,6 +195,10 @@ impl ControlStackFrame {
                 original_stack_size,
                 ..
             }
+            | Self::MultiLoop {
+                original_stack_size,
+                ..
+            }
             | Self::Loop {
                 original_stack_size,
                 ..
@@ -162,7 +209,7 @@ impl ControlStackFrame {
     pub fn is_loop(&self) -> bool {
         match *self {
             Self::If { .. } | Self::Block { .. } => false,
-            Self::Loop { .. } => true,
+            Self::Loop { .. } | Self::MultiLoop { .. } => true,
         }
     }
 
@@ -176,7 +223,7 @@ impl ControlStackFrame {
                 exit_is_branched_to,
                 ..
             } => exit_is_branched_to,
-            Self::Loop { .. } => false,
+            Self::Loop { .. } | Self::MultiLoop { .. } => false,
         }
     }
 
@@ -190,7 +237,7 @@ impl ControlStackFrame {
                 ref mut exit_is_branched_to,
                 ..
             } => *exit_is_branched_to = true,
-            Self::Loop { .. } => {}
+            Self::Loop { .. } | Self::MultiLoop { .. } => {}
         }
     }
 
@@ -269,6 +316,8 @@ pub struct FuncTranslationStacks {
     pub(crate) stack_shape: Vec<FrameStackShape>,
     /// A stack of active control flow operations at this point in the input wasm function.
     pub(crate) control_stack: Vec<ControlStackFrame>,
+    /// Number of multiloop frames, allowing ordinary label resolution to stay constant time.
+    pub(crate) multiloop_frames: usize,
     /// Maps a CLIF block representing a Wasm control-flow target to the
     /// `Variable`s that hold its Wasm stack parameters.
     ///
@@ -305,12 +354,32 @@ impl FuncTranslationStacks {
 }
 
 impl FuncTranslationStacks {
+    /// Resolve a logical Wasm label to its physical frame and body index.
+    pub(crate) fn resolve_label(&self, depth: usize) -> (usize, usize) {
+        if self.multiloop_frames == 0 {
+            return (self.control_stack.len() - 1 - depth, 0);
+        }
+        let mut remaining = depth;
+        for (index, frame) in self.control_stack.iter().enumerate().rev() {
+            let count = match frame {
+                ControlStackFrame::MultiLoop { entries, .. } => entries.len(),
+                _ => 1,
+            };
+            if remaining < count {
+                return (index, remaining);
+            }
+            remaining -= count;
+        }
+        unreachable!("validated branch depth")
+    }
+
     /// Construct a new, empty, `FuncTranslationStacks`
     pub(crate) fn new() -> Self {
         Self {
             stack: Vec::new(),
             stack_shape: Vec::new(),
             control_stack: Vec::new(),
+            multiloop_frames: 0,
             block_param_vars: SecondaryMap::new(),
             handlers: HandlerState::default(),
             reachable: true,
@@ -321,6 +390,7 @@ impl FuncTranslationStacks {
         debug_assert!(self.stack.is_empty());
         debug_assert!(self.stack_shape.is_empty());
         debug_assert!(self.control_stack.is_empty());
+        debug_assert_eq!(self.multiloop_frames, 0);
         debug_assert!(self.handlers.is_empty());
         self.block_param_vars.clear();
         self.reachable = true;

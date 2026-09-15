@@ -1077,6 +1077,12 @@ impl Config {
         self
     }
 
+    /// Enables the local multiloop extension, permitting branches between
+    /// multiple loop bodies. Disabled by default; supported by Cranelift.
+    pub fn wasm_multiloop(&mut self, enable: bool) -> &mut Self {
+        self.wasm_features(WasmFeatures::MULTILOOP, enable)
+    }
+
     /// Configures whether the [WebAssembly Garbage Collection
     /// proposal][proposal] will be enabled for compilation.
     ///
@@ -2423,6 +2429,7 @@ impl Config {
             | WasmFeatures::COMPONENT_MODEL
             | WasmFeatures::CUSTOM_PAGE_SIZES
             | WasmFeatures::STACK_SWITCHING
+            | WasmFeatures::MULTILOOP
             | WasmFeatures::WIDE_ARITHMETIC
             | WasmFeatures::CM_ASYNC
             | WasmFeatures::CM_ASYNC_STACKFUL
@@ -2471,7 +2478,8 @@ impl Config {
                 }
             }
             Some(Strategy::Winch) => {
-                unsupported |= WasmFeatures::GC
+                unsupported |= WasmFeatures::MULTILOOP
+                    | WasmFeatures::GC
                     | WasmFeatures::FUNCTION_REFERENCES
                     | WasmFeatures::RELAXED_SIMD
                     | WasmFeatures::TAIL_CALL

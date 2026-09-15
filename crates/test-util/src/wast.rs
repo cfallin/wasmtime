@@ -333,6 +333,7 @@ macro_rules! foreach_config_option {
             reference_types
             tail_call
             extended_const
+            multiloop
             wide_arithmetic
             branch_hinting
             hogs_memory
