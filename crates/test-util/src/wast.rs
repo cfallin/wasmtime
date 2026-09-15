@@ -460,7 +460,8 @@ impl Compiler {
             }
 
             Compiler::Winch => {
-                if config.gc()
+                if config.multiloop()
+                    || config.gc()
                     || config.tail_call()
                     || config.function_references()
                     || config.relaxed_simd()
