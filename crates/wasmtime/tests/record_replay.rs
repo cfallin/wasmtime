@@ -626,16 +626,16 @@ async fn asynchronous_recording_and_host_errors() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn host_panic_cannot_be_finished_as_a_complete_trace() -> Result<()> {
-    let engine = engine(RRConfig::Recording)?;
-    let mut store = Store::new(&engine, ());
+#[tokio::test]
+async fn host_panic_ends_the_trace_with_the_call_unfinished() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
     store.start_recording()?;
     let host = Func::wrap(&mut store, || -> () {
         panic!("intentional recording test panic")
     });
     let module = Module::new(
-        &engine,
+        &recording,
         r#"(module
         (import "" "host" (func $host))
         (func (export "run") call $host))"#,
@@ -648,18 +648,11 @@ fn host_panic_cannot_be_finished_as_a_complete_trace() -> Result<()> {
         }))
         .is_err()
     );
-    assert!(store.finish_recording().is_err());
-    // Finalization discarded the failed session, but the store is populated.
-    assert!(
-        store
-            .start_recording()
-            .unwrap_err()
-            .to_string()
-            .contains("empty store")
-    );
-    let mut fresh = Store::new(&engine, ());
-    fresh.start_recording()?;
-    fresh.finish_recording()?;
+    // The trace replays up to the panic, leaving the guest suspended in the
+    // host call.
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    replay.replay(&trace).await?;
     Ok(())
 }
 

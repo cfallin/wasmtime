@@ -356,9 +356,11 @@ impl<T: 'static> Driver<'_, T> {
         }
         match tag {
             codec::END => {
+                // Activations may remain suspended in host calls if the
+                // recording ended while they were unfinished.
                 ensure!(
-                    self.activations.is_empty() && self.observed.is_none(),
-                    "trace ended with outstanding activations"
+                    self.observed.is_none() && self.activations.iter().all(|a| a.host.is_some()),
+                    "trace ended while guest code was running"
                 );
                 body.end()?;
                 self.reader.end()?;

@@ -252,8 +252,12 @@ impl<T: 'static> Store<T> {
     }
 
     /// Finishes a recording, flushing pending memory writes. Returns an error
-    /// for an incomplete or poisoned recording; such a trace cannot be replayed.
-    /// A failed recording is discarded and recording is disabled on the store.
+    /// for a poisoned recording; such a trace cannot be replayed. A failed
+    /// recording is discarded and recording is disabled on the store.
+    ///
+    /// A recording may end while guest calls are unfinished, for example
+    /// with component-model tasks suspended in host calls or after a host
+    /// panic; replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
@@ -263,18 +267,9 @@ impl<T: 'static> Store<T> {
             return Err(e);
         }
         flushed?;
-        let Mode::Recording {
-            mut bytes,
-            outstanding,
-            ..
-        } = session.mode
-        else {
+        let Mode::Recording { mut bytes, .. } = session.mode else {
             unreachable!()
         };
-        ensure!(
-            outstanding.is_empty(),
-            "recording ended with unfinished calls (possibly a host panic)"
-        );
         codec::record(&mut bytes, codec::END, 0)?;
         Ok(Trace { bytes })
     }
@@ -744,6 +739,10 @@ impl StoreOpaque {
         result: &Result<()>,
         host: bool,
     ) -> Result<()> {
+        // The recording may have ended while this call was unfinished.
+        if !self.rr.recording() {
+            return Ok(());
+        }
         self.rr_flush_boundary(host)?;
         let Mode::Recording { outstanding, .. } = &self.rr_session().mode else {
             unreachable!()
