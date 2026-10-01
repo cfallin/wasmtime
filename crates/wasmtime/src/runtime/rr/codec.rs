@@ -23,6 +23,10 @@ pub(super) const GLOBAL: u8 = 10;
 pub(super) const GLOBAL_WRITE: u8 = 11;
 pub(super) const MEMORY: u8 = 12;
 pub(super) const TABLE: u8 = 13;
+/// A failed guest `memory.grow` or `table.grow`: `[kind, id, old size,
+/// delta]`, recorded so that replay fails the same growth.
+pub(super) const GROWTH_FAILED: u8 = 14;
+pub(super) const GROWTH_FAILED_LEN: usize = 21;
 
 // Reference-valued globals carry a nullable flag and a function ID.
 pub(super) const FUNCREF: u8 = Kind::FuncRef as u8;
@@ -195,6 +199,11 @@ impl<'a> Reader<'a> {
 
     pub fn position(&self) -> usize {
         self.position
+    }
+
+    /// The tag of the next record, if any.
+    pub fn peek_tag(&self) -> Option<u8> {
+        self.bytes.get(self.position).copied()
     }
 
     /// All bytes, regardless of what has been read.

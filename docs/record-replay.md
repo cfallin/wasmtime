@@ -79,6 +79,11 @@ In addition to construction, the execution stream contains:
   instance flags are ordinary mutable i32 globals in the core import graph;
   global-write records reproduce the canonical runtime's changes at guest
   entry and host return boundaries.
+* Guest growth failures: a failed `memory.grow` or `table.grow` records the
+  object, its old size, and the delta. Such records directly follow the event
+  that resumed the guest; the driver queues them, and replay fails exactly the
+  matching growth, even where the replaying engine could allocate more. An
+  unrecorded failure, or a recorded one that does not recur, is a divergence.
 
 All component core-callable trampolines and intrinsics are wrapped as ordinary
 opaque host calls. The wrapper includes generated entry checks and resource
@@ -191,8 +196,7 @@ Restrictions:
   funcref globals and abstract funcref tables is supported.
 * Resource limiters, call hooks, custom signal handlers, fuel, epochs, and
   guest debugging are rejected. Installing a limiter, hook, or handler during
-  a recording, or a failed guest memory/table growth (until allocation
-  decisions have a replay policy), poisons the recording.
+  a recording poisons the recording.
 * Host panics leave unmatched calls and cannot be finalized into a complete
   trace. Rust error objects are represented by their root cause's message.
 * Replay requires a native compilation target: Pulley interprets guest code

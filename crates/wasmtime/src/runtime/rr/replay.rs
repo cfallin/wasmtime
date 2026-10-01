@@ -160,7 +160,9 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
     let trampolines = Trampolines::new(store.engine())?;
     store.rr.session = Some(try_new::<Box<_>>(Session {
         objects,
-        mode: Mode::Replaying,
+        mode: Mode::Replaying {
+            growth_failures: Vec::new(),
+        },
         pending: Vec::new(),
         failure: None,
     })?);
@@ -540,6 +542,22 @@ impl<T: 'static> Driver<'_, T> {
     /// Runs the activation at `index` until its next yield and records what it
     /// yielded for. A `pending` error resumes a parked host call as failed.
     fn resume(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
+        // Guest growth failures recorded while the activation ran follow the
+        // event that resumes it; queue them for the growth libcalls.
+        let mut failures = Vec::new();
+        while self.reader.peek_tag() == Some(codec::GROWTH_FAILED) {
+            let (_, mut body) = self.reader.record()?;
+            let record = body.take(codec::GROWTH_FAILED_LEN)?;
+            body.end()?;
+            failures.try_reserve(1)?;
+            failures.push(record.try_into().unwrap());
+        }
+        let Mode::Replaying { growth_failures } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *growth_failures = failures;
+
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
         let fiber = activation.fiber.as_mut().unwrap();
@@ -588,6 +606,13 @@ impl<T: 'static> Driver<'_, T> {
             fiber.stack().range().unwrap(),
         );
         verify_suspended_stack(fiber)?;
+        let Mode::Replaying { growth_failures } = &store.rr.session.as_ref().unwrap().mode else {
+            unreachable!()
+        };
+        ensure!(
+            growth_failures.is_empty(),
+            "replay diverged: a recorded guest growth failure did not occur"
+        );
 
         // SAFETY: the activation has yielded, and this reference does not
         // outlive this function.
