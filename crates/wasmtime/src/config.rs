@@ -128,12 +128,12 @@ impl ModuleVersionStrategy {
 #[non_exhaustive]
 pub enum RRConfig {
     #[cfg(feature = "rr")]
-    /// Recording on store is enabled
+    /// Stores can record with `Store::start_recording`.
     Recording,
     #[cfg(feature = "rr")]
-    /// Replaying on store is enabled
+    /// Stores can replay with `Store::replay`.
     Replaying,
-    /// No record/replay is enabled
+    /// Record/replay is disabled.
     None,
 }
 
@@ -2672,7 +2672,6 @@ impl Config {
         {
             tunables.recording =
                 matches!(self.rr_config, RRConfig::Recording | RRConfig::Replaying);
-            tunables.replaying = matches!(self.rr_config, RRConfig::Replaying);
         }
 
         // If no target is explicitly specified then further refine `tunables`
@@ -3405,17 +3404,12 @@ impl Config {
         Ok(())
     }
 
-    /// Enables execution trace recording or replaying.
+    /// Enables recording (`Store::start_recording`) or replay (`Store::replay`).
     ///
-    /// This feature is experimental. With the `rr` Cargo feature, recording
-    /// includes core and component execution and initialization. Replay uses
-    /// independent async fibers and bypasses the original host implementations.
-    ///
-    /// When either recording/replaying are enabled, validation fails if settings
-    /// that control determinism are not set appropriately. This enables NaN
-    /// canonicalization and deterministic relaxed SIMD when those options have
-    /// not been explicitly configured. Explicitly disabling either option is
-    /// an error when creating the engine.
+    /// This feature is experimental. Unless explicitly configured otherwise,
+    /// this enables NaN canonicalization and deterministic relaxed SIMD;
+    /// explicitly disabling either makes engine creation fail.
+    /// [`RRConfig::Replaying`] requires a native (non-Pulley) target.
     #[inline]
     pub fn rr(&mut self, cfg: RRConfig) -> &mut Self {
         #[cfg(feature = "rr")]

@@ -38,12 +38,11 @@
 //! not something the fiber library can verify by inspecting stack bytes.
 
 use crate::FiberStack;
-#[cfg(any(not(feature = "std"), not(any(miri, windows))))]
 use crate::stackswitch::{
-    SUPPORTED_ARCH, wasmtime_fiber_init, wasmtime_fiber_switch, wasmtime_fiber_switch_,
+    RAW_FIBERS, wasmtime_fiber_init, wasmtime_fiber_switch, wasmtime_fiber_switch_,
 };
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(any(not(feature = "std"), not(any(miri, windows)))))]
 use unsupported::*;
 use wasmtime_environ::error::{Error, Result, bail, ensure};
@@ -76,28 +75,28 @@ pub enum RawFiberState {
 pub struct RawFiber {
     stack: FiberStack,
     state: RawFiberState,
-    id: u64,
+    id: usize,
 }
 
 /// A copy of a stopped [`RawFiber`]'s stack and lifecycle state.
 pub struct RawFiberSnapshot {
-    fiber: u64,
+    fiber: usize,
     sp: usize,
     bytes: Vec<u8>,
     state: RawFiberState,
 }
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl RawFiber {
     /// Whether raw fibers are supported on this platform and configuration.
     ///
     /// Raw fibers require one of the stack-switching routines in this crate
-    /// and are not supported on Windows, under Miri, or with
-    /// AddressSanitizer, whose fiber-switch handshakes would require Rust code
-    /// at every suspension point.
+    /// (not an embedder's `custom` one) and are not supported on Windows,
+    /// under Miri, or with AddressSanitizer, whose fiber-switch handshakes
+    /// would require Rust code at every suspension point.
     pub fn is_supported() -> bool {
-        SUPPORTED_ARCH && !cfg!(asan)
+        RAW_FIBERS && !cfg!(asan)
     }
 
     /// Creates a new raw fiber that calls `entry(arg, switch_arg)` when first
@@ -193,13 +192,9 @@ impl RawFiber {
         );
         let top = self.switch_arg();
         // SAFETY: the saved stack pointer of a stopped fiber is in the
-        // reserved slot, and the other reserved slot is unused by raw fibers.
-        // The switch stores this host continuation in the same slot, so the
-        // fiber always suspends back to here.
-        unsafe {
-            top.cast::<usize>().sub(1).write(0);
-            wasmtime_fiber_switch(top);
-        }
+        // reserved slot. The switch stores this host continuation in the same
+        // slot, so the fiber always suspends back to here.
+        unsafe { wasmtime_fiber_switch(top) };
         self.state = RawFiberState::Suspended;
         Ok(())
     }
@@ -315,28 +310,6 @@ impl RawFiberSnapshot {
     /// The lifecycle state the fiber will have once this is restored.
     pub fn state(&self) -> RawFiberState {
         self.state
-    }
-}
-
-/// Windows fibers are managed by the OS and Miri cannot switch stacks.
-#[cfg(not(any(not(feature = "std"), not(any(miri, windows)))))]
-mod unsupported {
-    pub const SUPPORTED_ARCH: bool = false;
-
-    pub unsafe fn wasmtime_fiber_init(
-        _top_of_stack: *mut u8,
-        _entry: extern "C" fn(*mut u8, *mut u8) -> *mut u8,
-        _entry_arg0: *mut u8,
-    ) {
-        unreachable!()
-    }
-
-    pub unsafe fn wasmtime_fiber_switch(_top_of_stack: *mut u8) {
-        unreachable!()
-    }
-
-    pub unsafe extern "C" fn wasmtime_fiber_switch_(_top_of_stack: *mut u8) {
-        unreachable!()
     }
 }
 
@@ -489,9 +462,6 @@ mod tests {
 
     #[test]
     fn resume_on_another_thread() {
-        struct SendFiber(RawFiber);
-        unsafe impl Send for SendFiber {}
-
         let shared = std::sync::Arc::new(SharedSync::default());
         if !RawFiber::is_supported() {
             return;
@@ -505,7 +475,7 @@ mod tests {
             }
         }
         #[derive(Default)]
-        struct SharedSync(core::sync::atomic::AtomicU64);
+        struct SharedSync(core::sync::atomic::AtomicUsize);
 
         let stack = FiberStack::new(64 * 1024, false).unwrap();
         let arg = std::sync::Arc::as_ptr(&shared).cast_mut().cast();
@@ -514,16 +484,14 @@ mod tests {
             .unwrap();
         unsafe { fiber.resume().unwrap() };
         let snapshot = fiber.snapshot().unwrap();
-        let fiber = SendFiber(fiber);
         let mut fiber = std::thread::spawn(move || {
-            let mut fiber = fiber;
-            unsafe { fiber.0.resume().unwrap() };
+            unsafe { fiber.resume().unwrap() };
             fiber
         })
         .join()
         .unwrap();
-        unsafe { fiber.0.restore(&snapshot).unwrap() };
-        unsafe { fiber.0.resume().unwrap() };
+        unsafe { fiber.restore(&snapshot).unwrap() };
+        unsafe { fiber.resume().unwrap() };
         assert_eq!(shared.0.load(core::sync::atomic::Ordering::Relaxed), 3);
     }
 

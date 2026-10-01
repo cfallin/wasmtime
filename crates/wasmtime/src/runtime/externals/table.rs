@@ -152,9 +152,7 @@ impl Table {
                 table.debug_assert_all_zero();
             }
         } else {
-            for i in 0..ty.minimum() {
-                table.set_untracked(store, i, init.clone())?;
-            }
+            table._fill(store, 0, init.clone(), ty.minimum())?;
         }
         #[cfg(feature = "rr")]
         store.rr_created_table(table, init)?;
@@ -257,16 +255,13 @@ impl Table {
     ///
     /// Panics if `store` does not own this table.
     pub fn set(&self, mut store: impl AsContextMut, index: u64, val: Ref) -> Result<()> {
-        self.set_(store.as_context_mut().0, index, val)
+        let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table mutation")?;
+        self.set_(store, index, val)
     }
 
     pub(crate) fn set_(&self, store: &mut StoreOpaque, index: u64, val: Ref) -> Result<()> {
-        #[cfg(feature = "rr")]
-        store.rr.reject("host table mutation")?;
-        self.set_untracked(store, index, val)
-    }
-
-    fn set_untracked(&self, store: &mut StoreOpaque, index: u64, val: Ref) -> Result<()> {
         let ty = self.ty_(store);
         match element_type(&ty) {
             TableElementType::Func => {
@@ -486,7 +481,10 @@ impl Table {
     ///
     /// Panics if `store` does not own either `dst_table` or `src_table`.
     pub fn fill(&self, mut store: impl AsContextMut, dst: u64, val: Ref, len: u64) -> Result<()> {
-        self._fill(store.as_context_mut().0, dst, val, len)
+        let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table mutation")?;
+        self._fill(store, dst, val, len)
     }
 
     pub(crate) fn _fill(
@@ -496,8 +494,6 @@ impl Table {
         val: Ref,
         len: u64,
     ) -> Result<()> {
-        #[cfg(feature = "rr")]
-        store.rr.reject("host table mutation")?;
         let ty = self.ty_(store);
         val.ensure_matches_ty(store, ty.element())
             .context("type mismatch: value does not match table element type")?;

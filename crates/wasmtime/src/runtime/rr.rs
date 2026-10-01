@@ -9,10 +9,11 @@
 //! Core function boundaries support numbers, vectors, and nullable abstract
 //! function references. GC and typed function references are unsupported.
 //! Shared memory, host table/global mutation, resource limiters, call hooks,
-//! epochs, and fuel are unsupported. Raw-pointer writes are not tracked: use
-//! safe memory APIs or [`Memory::data_mut_tracked`]. Replaying construction
-//! requires a compiler. Guest allocation failures, guest debug hooks, and
-//! snapshot/restore remain future work.
+//! custom signal handlers, Wasm stack switching, guest debugging, epochs, and
+//! fuel are unsupported. Raw-pointer writes are not tracked: use safe memory
+//! APIs or [`Memory::data_mut_tracked`]. Replay requires a compiler and a
+//! native (non-Pulley) target, and is unsupported on Windows, under Miri, and
+//! with AddressSanitizer. Whole-store checkpoints remain future work.
 //!
 //! Traces are private to this Wasmtime version. They contain host-supplied data
 //! and can be large; applications should impose their own storage limits.
@@ -56,35 +57,21 @@ impl Trace {
     }
 
     /// Takes ownership of a serialized trace, checking its framing and version.
-    /// Object construction and execution order are checked during replay.
+    /// Record contents, object construction, and execution order are checked
+    /// during replay.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         let mut reader = Reader::new(&bytes);
         ensure!(
             reader.take(codec::MAGIC.len())? == codec::MAGIC,
             "unsupported record/replay trace version"
         );
+        // Record contents are checked during replay.
         loop {
             let (tag, body) = reader.record()?;
-            match tag {
-                codec::END => {
-                    body.end()?;
-                    reader.end()?;
-                    break;
-                }
-                codec::ENTER_WASM
-                | codec::LEAVE_WASM
-                | codec::ENTER_HOST
-                | codec::LEAVE_HOST
-                | codec::WRITE
-                | codec::RESIZE
-                | codec::HOST
-                | codec::MODULE
-                | codec::INSTANCE
-                | codec::GLOBAL
-                | codec::GLOBAL_WRITE
-                | codec::MEMORY
-                | codec::TABLE => {}
-                _ => bail!("unknown record/replay event {tag}"),
+            if tag == codec::END {
+                body.end()?;
+                reader.end()?;
+                break;
             }
         }
         Ok(Self { bytes })
@@ -110,8 +97,10 @@ fn func_key(func: NonNull<VMFuncRef>) -> (usize, usize) {
 #[derive(Default)]
 pub(crate) struct State {
     session: Option<Box<Session>>,
-    unavailable: Option<&'static str>,
-    passthrough: TryHashMap<(usize, usize), ()>,
+    // Set once a replay ends: replayed host functions only run under the
+    // replay driver, so the store's functions may no longer be called.
+    replayed: bool,
+    passthrough: TryHashSet<(usize, usize)>,
 }
 
 struct Session {
@@ -124,21 +113,14 @@ struct Session {
 enum Mode {
     Recording {
         bytes: Vec<u8>,
-        outstanding: Vec<(bool, usize, usize)>,
+        // `(call, function)` IDs of calls that have not yet returned.
+        outstanding: Vec<(usize, usize)>,
         next_call: u32,
     },
-    Replaying {
-        trampolines: replay::Trampolines,
-    },
+    Replaying,
 }
 
 impl State {
-    pub(crate) fn validate_available(&self) -> Result<()> {
-        if let Some(reason) = self.unavailable {
-            bail!("record/replay does not support {reason}");
-        }
-        Ok(())
-    }
     pub(crate) fn active(&self) -> bool {
         self.session.is_some()
     }
@@ -150,17 +132,38 @@ impl State {
         )
     }
 
-    pub(crate) fn reject(&mut self, operation: &'static str) -> Result<()> {
+    /// Records that an active session cannot represent `operation`, which
+    /// still takes place. The recording can then only be discarded.
+    pub(crate) fn poison(&mut self, operation: &'static str) {
         if let Some(session) = &mut self.session {
-            session.failure = Some(format_err!("record/replay does not support {operation}"));
+            session.fail(format_err!("record/replay does not support {operation}"));
+        }
+    }
+
+    /// Like `poison`, but also fails the operation.
+    pub(crate) fn reject(&mut self, operation: &'static str) -> Result<()> {
+        if self.active() {
+            self.poison(operation);
             bail!("record/replay does not support {operation}");
         }
         Ok(())
     }
+}
 
-    pub(crate) fn mark_unavailable(&mut self, reason: &'static str) -> Result<()> {
-        self.unavailable = Some(reason);
-        self.reject(reason)
+impl Session {
+    /// Keeps the first failure of a session; later ones are its consequences.
+    fn fail(&mut self, error: Error) {
+        self.failure.get_or_insert(error);
+    }
+
+    /// Appends a complete record when recording.
+    fn append(&mut self, tag: u8, body: &[u8]) -> Result<()> {
+        let Mode::Recording { bytes, .. } = &mut self.mode else {
+            return Ok(());
+        };
+        codec::record(bytes, tag, body.len())?;
+        bytes.extend_from_slice(body);
+        Ok(())
     }
 }
 
@@ -222,16 +225,19 @@ impl<T: 'static> Store<T> {
         Ok(Trace { bytes })
     }
 
-    /// Replays a trace on independent async fibers, without calling the original
+    /// Replays a trace on independent fibers, without calling the original
     /// host functions. The store must be empty, as for [`Store::start_recording`].
     /// Modules and initialization come entirely from the trace. The engine must
     /// use [`crate::RRConfig::Replaying`].
     ///
     /// This verifies recorded guest outcomes, including traps. Therefore a
     /// correctly reproduced guest trap is a successful replay. Divergence or
-    /// an invalid trace returns an error. Dropping this future disposes all
+    /// an invalid trace returns an error. Dropping this future frees all
     /// suspended activations before releasing the store. Failed or cancelled
     /// replay does not roll back initialization; retry with a fresh store.
+    ///
+    /// Afterwards the store's state can be inspected, for example through
+    /// [`Replay::instances`], but its functions can no longer be called.
     pub async fn replay(&mut self, trace: &Trace) -> Result<Replay>
     where
         T: Send,
@@ -241,6 +247,31 @@ impl<T: 'static> Store<T> {
 }
 
 impl StoreOpaque {
+    fn rr_session(&mut self) -> &mut Session {
+        self.rr.session.as_deref_mut().unwrap()
+    }
+
+    /// Poisons an active session if recording failed, so that the trace can
+    /// never be finalized with a partial record or a missing effect.
+    fn rr_poison_on_err<R>(&mut self, result: Result<R>) -> Result<R> {
+        if let (Err(e), Some(session)) = (&result, &mut self.rr.session) {
+            session.fail(format_err!("failed to record execution: {e}"));
+        }
+        result
+    }
+
+    /// The ID of a memory written by the host, poisoning the recording if
+    /// the memory was never registered.
+    fn rr_memory_id(&mut self, memory: Memory) -> Option<usize> {
+        let key = memory.rr_key(self);
+        let session = self.rr_session();
+        let id = session.objects.memories_by_key.get(&key).copied();
+        if id.is_none() {
+            session.fail(format_err!("host modified an unregistered memory"));
+        }
+        id
+    }
+
     #[cfg(feature = "component-model")]
     pub(crate) fn rr_track_memory_definition(
         &mut self,
@@ -249,17 +280,19 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return;
         }
-        let objects = &self.rr.session.as_ref().unwrap().objects;
+        let objects = &self.rr_session().objects;
         let memory = objects
             .memories_by_key
             .get(&(definition.as_ptr() as usize))
             .map(|id| objects.memories[*id]);
-        if let Some(memory) = memory {
-            let len = memory.internal_data_size(self);
-            self.rr_track_memory(memory, 0..len);
-        } else {
-            self.rr.session.as_mut().unwrap().failure =
-                Some(format_err!("unregistered component memory"));
+        match memory {
+            Some(memory) => {
+                let len = memory.internal_data_size(self);
+                self.rr_track_memory(memory, 0..len);
+            }
+            None => self
+                .rr_session()
+                .fail(format_err!("unregistered component memory")),
         }
     }
 
@@ -277,11 +310,11 @@ impl StoreOpaque {
                 let offset = address.checked_sub(data.as_ptr() as usize)?;
                 (offset.checked_add(len)? <= data.len()).then_some((m, offset))
             });
-        if let Some((memory, offset)) = memory {
-            self.rr_track_memory(memory, offset..offset + len);
-        } else {
-            self.rr.session.as_mut().unwrap().failure =
-                Some(format_err!("component write outside registered memories"));
+        match memory {
+            Some((memory, offset)) => self.rr_track_memory(memory, offset..offset + len),
+            None => self
+                .rr_session()
+                .fail(format_err!("component write outside registered memories")),
         }
     }
 
@@ -289,33 +322,18 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return Ok(());
         }
-        let key = memory.rr_key(self);
-        let id = self
-            .rr
-            .session
-            .as_ref()
-            .unwrap()
-            .objects
-            .memories_by_key
-            .get(&key)
-            .copied();
-        let new_size = memory.internal_data_size(self);
-        let session = self.rr.session.as_mut().unwrap();
-        let Some(id) = id else {
-            session.failure = Some(format_err!("host grew an unregistered memory"));
+        let Some(id) = self.rr_memory_id(memory) else {
             bail!("host grew an unregistered memory");
         };
-        let Mode::Recording { bytes, .. } = &mut session.mode else {
-            unreachable!()
-        };
-        if let Err(e) = codec::record(bytes, codec::RESIZE, 20) {
-            session.failure = Some(format_err!("failed to record memory growth"));
-            return Err(e);
-        }
-        bytes.extend_from_slice(&u32::try_from(id)?.to_le_bytes());
-        bytes.extend_from_slice(&u64::try_from(old_size)?.to_le_bytes());
-        bytes.extend_from_slice(&u64::try_from(new_size)?.to_le_bytes());
-        Ok(())
+        let new_size = memory.internal_data_size(self);
+        let result = (|| {
+            let mut body = [0; 20];
+            body[..4].copy_from_slice(&u32::try_from(id)?.to_le_bytes());
+            body[4..12].copy_from_slice(&u64::try_from(old_size)?.to_le_bytes());
+            body[12..].copy_from_slice(&u64::try_from(new_size)?.to_le_bytes());
+            self.rr_session().append(codec::RESIZE, &body)
+        })();
+        self.rr_poison_on_err(result)
     }
 
     fn rr_check(&self) -> Result<()> {
@@ -336,53 +354,49 @@ impl StoreOpaque {
 
     fn rr_flush_boundary(&mut self, flags: bool) -> Result<()> {
         self.rr_check()?;
-        let Some(session) = &mut self.rr.session else {
-            return Ok(());
-        };
-        if !matches!(session.mode, Mode::Recording { .. }) {
+        if !self.rr.recording() {
             return Ok(());
         }
-        let pending = core::mem::take(&mut session.pending);
+        let result = self.rr_flush_writes(flags);
+        self.rr_poison_on_err(result)
+    }
+
+    fn rr_flush_writes(&mut self, flags: bool) -> Result<()> {
+        if flags {
+            self.rr_flush_flags()?;
+        }
+        // Detach the pending ranges and the trace while reading memories; this
+        // never runs guest or embedder code.
+        let session = self.rr_session();
+        let mut pending = core::mem::take(&mut session.pending);
+        let Mode::Recording { bytes, .. } = &mut session.mode else {
+            unreachable!()
+        };
+        let mut bytes = core::mem::take(bytes);
         let result = (|| {
-            if flags {
-                self.rr_flush_flags()?;
-            }
             for (id, range) in &pending {
                 let memory = self.rr.session.as_ref().unwrap().objects.memories[*id];
-                // Borrow the memory separately from the recorder. The store is
-                // exclusive, memory cannot grow, and appending only allocates
-                // trace storage; it never calls guest or embedder code.
-                let data = memory.rr_data(self);
-                let data = data
+                let data = memory
+                    .rr_data(self)
                     .get(range.clone())
                     .ok_or_else(|| format_err!("tracked memory range is no longer valid"))?;
-                let ptr = data.as_ptr();
-                let len = data.len();
-                let Mode::Recording { bytes, .. } = &mut self.rr.session.as_mut().unwrap().mode
-                else {
-                    unreachable!()
-                };
-                codec::record(
-                    bytes,
-                    codec::WRITE,
-                    12usize
-                        .checked_add(len)
-                        .ok_or_else(|| format_err!("memory record too large"))?,
-                )?;
+                let len = 12usize
+                    .checked_add(data.len())
+                    .ok_or_else(|| format_err!("memory record too large"))?;
+                codec::record(&mut bytes, codec::WRITE, len)?;
                 bytes.extend_from_slice(&u32::try_from(*id)?.to_le_bytes());
                 bytes.extend_from_slice(&u64::try_from(range.start)?.to_le_bytes());
-                // SAFETY: see the disjoint borrow explanation above.
-                bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(ptr, len) });
+                bytes.extend_from_slice(data);
             }
             Ok(())
         })();
-        let session = self.rr.session.as_mut().unwrap();
-        let mut pending = pending;
         pending.clear();
+        let session = self.rr_session();
         session.pending = pending;
-        if result.is_err() {
-            session.failure = Some(format_err!("failed to record memory writes"));
-        }
+        let Mode::Recording { bytes: trace, .. } = &mut session.mode else {
+            unreachable!()
+        };
+        *trace = bytes;
         result
     }
 
@@ -390,21 +404,10 @@ impl StoreOpaque {
         if !self.rr.recording() || range.is_empty() {
             return;
         }
-        let key = memory.rr_key(self);
-        let id = self
-            .rr
-            .session
-            .as_ref()
-            .unwrap()
-            .objects
-            .memories_by_key
-            .get(&key)
-            .copied();
-        let session = self.rr.session.as_mut().unwrap();
-        let Some(id) = id else {
-            session.failure = Some(format_err!("host wrote an unregistered memory"));
+        let Some(id) = self.rr_memory_id(memory) else {
             return;
         };
+        let session = self.rr_session();
         // Union overlapping ranges only within one uninterrupted host segment.
         for (other, old) in &mut session.pending {
             if *other == id && range.start <= old.end && old.start <= range.end {
@@ -414,8 +417,7 @@ impl StoreOpaque {
             }
         }
         if session.pending.try_reserve(1).is_err() {
-            session.failure =
-                Some(OutOfMemory::new(core::mem::size_of::<(usize, Range<usize>)>()).into());
+            session.fail(OutOfMemory::new(core::mem::size_of::<(usize, Range<usize>)>()).into());
         } else {
             session.pending.push((id, range));
         }
@@ -428,14 +430,14 @@ impl StoreOpaque {
         raw: *const ValRaw,
         results: bool,
     ) -> Result<()> {
-        let bound = &self.rr.session.as_ref().unwrap().objects.funcs[func];
+        let bound = &self.rr_session().objects.funcs[func];
         let count = if results {
             bound.results.len()
         } else {
             bound.params.len()
         };
         for i in 0..count {
-            let bound = &self.rr.session.as_ref().unwrap().objects.funcs[func];
+            let bound = &self.rr_session().objects.funcs[func];
             let kind = if results {
                 bound.results[i]
             } else {
@@ -451,6 +453,30 @@ impl StoreOpaque {
         Ok(())
     }
 
+    /// The host-call boundary of `HostFunc` trampolines. The arguments must
+    /// be initialized values of the callee's signature.
+    pub(crate) unsafe fn rr_enter_host(
+        &mut self,
+        caller: crate::store::InstanceId,
+        callee: NonNull<crate::vm::VMOpaqueContext>,
+        args: *const ValRaw,
+    ) -> Result<Option<usize>> {
+        // Calls from the host or a dummy instance are not guest boundaries.
+        if !self.rr.active() || !self.rr_guest_caller(caller) {
+            return Ok(None);
+        }
+        // SAFETY: `HostFunc` trampolines are called with their own context.
+        let func = unsafe {
+            NonNull::from(
+                &crate::vm::VMArrayCallHostFuncContext::from_opaque(callee)
+                    .as_ref()
+                    .func_ref,
+            )
+        };
+        // SAFETY: inherited from this function's contract.
+        unsafe { self.rr_enter(func, args, true) }
+    }
+
     /// The raw slots must contain initialized values of the callee's signature.
     pub(crate) unsafe fn rr_enter(
         &mut self,
@@ -459,6 +485,10 @@ impl StoreOpaque {
         host: bool,
     ) -> Result<Option<usize>> {
         if !self.rr.active() {
+            ensure!(
+                !self.rr.replayed,
+                "a replayed store's functions can only be inspected, not called"
+            );
             return Ok(None);
         }
         // The replay driver enters Wasm and handles host calls itself.
@@ -466,6 +496,17 @@ impl StoreOpaque {
             self.rr.recording(),
             "replay calls must be driven by Store::replay"
         );
+        // SAFETY: inherited from this function's contract.
+        let result = unsafe { self.rr_record_enter(func, raw, host) };
+        self.rr_poison_on_err(result)
+    }
+
+    unsafe fn rr_record_enter(
+        &mut self,
+        func: NonNull<VMFuncRef>,
+        raw: *const ValRaw,
+        host: bool,
+    ) -> Result<Option<usize>> {
         self.rr_flush_boundary(!host)?;
         // Calling a host Func from host code is not a Wasm boundary. Its
         // effects (writes and any guest callbacks) are recorded normally.
@@ -477,28 +518,16 @@ impl StoreOpaque {
         if !host && is_host {
             return Ok(None);
         }
-        if host && self.rr.passthrough.get(&func_key(func)).is_some() {
+        if host && self.rr.passthrough.contains(&func_key(func)) {
             return Ok(None);
         }
-        let id = match self.rr.session.as_ref().unwrap().objects.find_func(func) {
-            Ok(id) => id,
-            Err(e) => {
-                self.rr.session.as_mut().unwrap().failure = Some(format_err!(
-                    "unregistered function crossed the recording boundary"
-                ));
-                return Err(e);
-            }
-        };
+        let id = self.rr_session().objects.find_func(func)?;
         // SAFETY: inherited from this function's typed-slot contract.
         unsafe {
             self.rr_boundary_refs(id, raw, false)?;
         }
-        let session = self.rr.session.as_mut().unwrap();
+        let session = self.rr_session();
         let bound = &session.objects.funcs[id];
-        ensure!(
-            bound.host == host,
-            "direct host calls are not guest activations"
-        );
         let Mode::Recording {
             bytes,
             outstanding,
@@ -513,16 +542,13 @@ impl StoreOpaque {
             .ok_or_else(|| format_err!("too many recorded calls"))?;
         outstanding
             .try_reserve(1)
-            .map_err(|_| OutOfMemory::new(core::mem::size_of::<(bool, usize, usize)>()))?;
-        codec::record(
-            bytes,
-            if host {
-                codec::ENTER_HOST
-            } else {
-                codec::ENTER_WASM
-            },
-            8 + codec::values_len(&bound.params),
-        )?;
+            .map_err(|_| OutOfMemory::new(core::mem::size_of::<(usize, usize)>()))?;
+        let tag = if host {
+            codec::ENTER_HOST
+        } else {
+            codec::ENTER_WASM
+        };
+        codec::record(bytes, tag, 8 + codec::values_len(&bound.params))?;
         bytes.extend_from_slice(&u32::try_from(id)?.to_le_bytes());
         bytes.extend_from_slice(&u32::try_from(call)?.to_le_bytes());
         // SAFETY: inherited from this function's contract.
@@ -531,64 +557,66 @@ impl StoreOpaque {
                 session.objects.encode_ref(ptr)
             })?
         };
-        outstanding.push((host, call, id));
+        outstanding.push((call, id));
         Ok(Some(call))
     }
 
     /// Result slots are initialized exactly when result is successful.
     pub(crate) unsafe fn rr_leave(
         &mut self,
-        id: Option<usize>,
+        call: Option<usize>,
         raw: *const ValRaw,
         result: &Result<()>,
         host: bool,
     ) -> Result<()> {
-        let Some(id) = id else {
+        let Some(call) = call else {
             return Ok(());
         };
+        // SAFETY: inherited from this function's contract.
+        let recorded = unsafe { self.rr_record_leave(call, raw, result, host) };
+        self.rr_poison_on_err(recorded)
+    }
+
+    unsafe fn rr_record_leave(
+        &mut self,
+        call: usize,
+        raw: *const ValRaw,
+        result: &Result<()>,
+        host: bool,
+    ) -> Result<()> {
         self.rr_flush_boundary(host)?;
+        let Mode::Recording { outstanding, .. } = &self.rr_session().mode else {
+            unreachable!()
+        };
+        let position = outstanding
+            .iter()
+            .position(|(c, _)| *c == call)
+            .ok_or_else(|| format_err!("return without recorded call"))?;
+        let func = outstanding[position].1;
         if result.is_ok() {
-            let Mode::Recording { outstanding, .. } = &self.rr.session.as_ref().unwrap().mode
-            else {
-                unreachable!()
-            };
-            let func = outstanding
-                .iter()
-                .find(|(h, call, _)| *h == host && *call == id)
-                .ok_or_else(|| format_err!("return without recorded call"))?
-                .2;
             // SAFETY: successful calls initialize their result slots.
             unsafe {
                 self.rr_boundary_refs(func, raw, true)?;
             }
         }
-        let session = self.rr.session.as_mut().unwrap();
+        let session = self.rr_session();
         let Mode::Recording {
             bytes, outstanding, ..
         } = &mut session.mode
         else {
             unreachable!()
         };
-        let position = outstanding
-            .iter()
-            .position(|(h, call, _)| *h == host && *call == id)
-            .ok_or_else(|| format_err!("return without recorded call"))?;
-        let func = outstanding[position].2;
+        let tag = if host {
+            codec::LEAVE_HOST
+        } else {
+            codec::LEAVE_WASM
+        };
+        let results = &session.objects.funcs[func].results;
         // SAFETY: inherited from this function's contract.
         unsafe {
-            codec::outcome(
-                bytes,
-                if host {
-                    codec::LEAVE_HOST
-                } else {
-                    codec::LEAVE_WASM
-                },
-                id,
-                result,
-                &session.objects.funcs[func].results,
-                raw,
-                |ptr| session.objects.encode_ref(ptr),
-            )?;
+            codec::outcome(bytes, tag, call, result, results, raw, |ptr| {
+                session.objects.encode_ref(ptr)
+            })?;
         }
         outstanding.swap_remove(position);
         Ok(())

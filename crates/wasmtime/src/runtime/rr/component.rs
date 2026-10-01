@@ -32,16 +32,15 @@ pub(crate) fn wrap<T: 'static>(
             Func::call_unchecked_raw(&mut caller.as_context_mut(), func_ref, raw)
         })
     };
+    // Builtins lifted directly to component exports may have no Wasm caller
+    // and hence no wasm_call trampoline. All modules that can import this
+    // reference were registered before wrapping, so imported ones are filled.
     let (refs, modules) = store.0.func_refs_and_modules();
     refs.fill(modules);
     let raw = wrapper.vm_func_ref(store.0);
     if callback {
-        store.0.rr.passthrough.insert(func_key(raw), ())?;
+        store.0.rr.passthrough.insert(func_key(raw))?;
     }
     // SAFETY: wrapper belongs to this store; all referenced data stays rooted.
-    let result = unsafe { raw.as_ref().clone() };
-    // Builtins lifted directly to component exports may have no Wasm caller
-    // and hence no wasm_call trampoline. All modules that can import this
-    // reference were registered before wrapping, so imported ones are filled.
-    Ok(result)
+    Ok(unsafe { raw.as_ref().clone() })
 }

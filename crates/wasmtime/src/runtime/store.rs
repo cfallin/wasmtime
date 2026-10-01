@@ -452,7 +452,6 @@ impl<T> StoreInner<T> {
             self.component_data().rr_is_empty(),
             "record/replay requires an empty store"
         );
-        self.rr.validate_available()?;
         ensure!(
             self.limiter.is_none(),
             "record/replay does not support resource limiters"
@@ -996,14 +995,7 @@ impl<T> Store<T> {
         mut limiter: impl (FnMut(&mut T) -> &mut dyn crate::ResourceLimiter) + Send + Sync + 'static,
     ) {
         #[cfg(feature = "rr")]
-        if self
-            .inner
-            .rr
-            .reject("installing a resource limiter")
-            .is_err()
-        {
-            return;
-        }
+        self.inner.rr.poison("installing a resource limiter");
         // Apply the limits on instances, tables, and memory given by the limiter:
         let inner = &mut self.inner;
         let (instance_limit, table_limit, memory_limit) = {
@@ -1041,9 +1033,7 @@ impl<T> Store<T> {
         hook: impl FnMut(StoreContextMut<'_, T>, CallHook) -> Result<()> + Send + Sync + 'static,
     ) {
         #[cfg(feature = "rr")]
-        if self.inner.rr.reject("installing a call hook").is_err() {
-            return;
-        }
+        self.inner.rr.poison("installing a call hook");
         self.inner.call_hook = Some(CallHookInner::Sync(Box::new(hook)));
     }
 
@@ -1858,9 +1848,7 @@ impl StoreOpaque {
     #[cfg(all(feature = "std", any(unix, windows)))]
     pub fn set_signal_handler(&mut self, handler: Option<SignalHandler>) {
         #[cfg(feature = "rr")]
-        if self.rr.reject("installing a signal handler").is_err() {
-            return;
-        }
+        self.rr.poison("installing a signal handler");
         self.signal_handler = handler;
     }
 

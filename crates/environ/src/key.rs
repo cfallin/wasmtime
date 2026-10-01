@@ -418,8 +418,8 @@ impl FuncKey {
             #[cfg(feature = "component-model")]
             FuncKey::UnsafeIntrinsic(abi, _) => abi,
             FuncKey::ModuleStartup(abi, _) => abi,
-            // The start trampoline has its own C signature, but like the
-            // array ABI it is only called from the host.
+            // `ReplayHostCall` uses the array ABI. `ReplayStart` has its own
+            // C signature; the tag is nominal since neither is inlined.
             FuncKey::ReplayStart | FuncKey::ReplayHostCall => Abi::Array,
         }
     }

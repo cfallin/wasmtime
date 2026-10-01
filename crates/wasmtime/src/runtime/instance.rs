@@ -299,10 +299,10 @@ impl Instance {
         #[cfg(feature = "rr")]
         {
             if module.env_module().needs_gc_heap {
-                store.rr.mark_unavailable("GC or exception-using modules")?;
+                store.rr.reject("GC or exception-using modules")?;
             }
             if module.env_module().memories.values().any(|m| m.shared) {
-                store.rr.mark_unavailable("shared memories")?;
+                store.rr.reject("shared memories")?;
             }
         }
         if !Engine::same(store.engine(), module.engine()) {

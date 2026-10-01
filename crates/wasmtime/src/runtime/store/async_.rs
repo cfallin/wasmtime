@@ -51,14 +51,7 @@ impl<T> Store<T> {
         + 'static,
     ) {
         #[cfg(feature = "rr")]
-        if self
-            .inner
-            .rr
-            .reject("installing a resource limiter")
-            .is_err()
-        {
-            return;
-        }
+        self.inner.rr.poison("installing a resource limiter");
         // Apply the limits on instances, tables, and memory given by the limiter:
         let inner = &mut self.inner;
         let (instance_limit, table_limit, memory_limit) = {
@@ -95,9 +88,7 @@ impl<T> Store<T> {
     #[cfg(feature = "call-hook")]
     pub fn call_hook_async(&mut self, hook: impl CallHookHandler<T> + Send + Sync + 'static) {
         #[cfg(feature = "rr")]
-        if self.inner.rr.reject("installing a call hook").is_err() {
-            return;
-        }
+        self.inner.rr.poison("installing a call hook");
         self.inner.call_hook = Some(crate::store::CallHookInner::Async(Box::new(hook)));
         self.inner.set_async_required(Asyncness::Yes);
     }

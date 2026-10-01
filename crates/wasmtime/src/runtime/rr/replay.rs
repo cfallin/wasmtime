@@ -20,7 +20,7 @@
 
 use super::*;
 use crate::StoreContextMut;
-use crate::runtime::func::{EntryStoreContext, ParkedStoreContext};
+use crate::runtime::func::EntryStoreContext;
 use crate::runtime::vm::mpk::{self, ProtectionMask};
 use crate::runtime::vm::{
     SendSyncPtr, VMArrayCallHostFuncContext, VMArrayCallNative, VMCommonStackInformation,
@@ -91,8 +91,9 @@ struct Activation {
     // it while running, so the driver only accesses it through raw pointers
     // and never holds a reference across a resume.
     control: SendSyncPtr<VMReplayControl>,
-    // The activation's `VMStoreContext` state while it is not running.
-    context: ParkedStoreContext,
+    // The activation's `VMStoreContext` state while it is not running, and
+    // the store's while it is.
+    context: core::mem::ManuallyDrop<EntryStoreContext>,
     // The stack-switching information `context.stack_chain` points to.
     _stack: Box<VMCommonStackInformation>,
     mpk: Option<ProtectionMask>,
@@ -135,6 +136,7 @@ enum Observed {
 
 struct Driver<'a, T: 'static> {
     store: &'a mut StoreInner<T>,
+    trampolines: Trampolines,
     reader: Reader<'a>,
     activations: Vec<Activation>,
     observed: Option<Observed>,
@@ -152,20 +154,19 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
         "replay requires RRConfig::Replaying"
     );
     let objects = Objects::default();
+    // `Trace` construction checked the version and framing.
     let mut reader = Reader::new(&trace.bytes);
-    ensure!(
-        reader.take(codec::MAGIC.len())? == codec::MAGIC,
-        "unsupported trace version"
-    );
+    reader.take(codec::MAGIC.len())?;
     let trampolines = Trampolines::new(store.engine())?;
     store.rr.session = Some(try_new::<Box<_>>(Session {
         objects,
-        mode: Mode::Replaying { trampolines },
+        mode: Mode::Replaying,
         pending: Vec::new(),
         failure: None,
     })?);
     let mut driver = Driver {
         store,
+        trampolines,
         reader,
         activations: Vec::new(),
         observed: None,
@@ -182,7 +183,7 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
                 Err(e) => {
                     return Poll::Ready(Err(e.context(format!(
                         "replaying trace at byte {}",
-                        driver.reader.position
+                        driver.reader.position()
                     ))));
                 }
             }
@@ -197,6 +198,17 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
 }
 
 impl<T: 'static> Driver<'_, T> {
+    /// Checks that no guest code is running: every activation is parked at a
+    /// matched host call.
+    fn require_idle(&self, unmatched: &str, running: &str) -> Result<()> {
+        ensure!(self.observed.is_none(), "{unmatched}");
+        ensure!(
+            self.activations.iter().all(|a| a.host.is_some()),
+            "{running}"
+        );
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<bool> {
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
@@ -222,30 +234,22 @@ impl<T: 'static> Driver<'_, T> {
             | codec::GLOBAL_WRITE
             | codec::MEMORY
             | codec::TABLE => {
-                ensure!(
-                    self.observed.is_none(),
-                    "initialization before matching guest execution"
-                );
-                ensure!(
-                    self.activations.iter().all(|a| a.host.is_some()),
-                    "initialization while guest is running"
-                );
+                self.require_idle(
+                    "initialization before matching guest execution",
+                    "initialization while guest is running",
+                )?;
                 if let Some((instance, startup)) =
-                    super::init::replay_event(self.store, tag, &mut body)?
+                    super::init::replay_event(self.store, &self.trampolines, tag, &mut body)?
                 {
                     self.instances.push(instance);
                     self.pending_startup = startup;
                 }
             }
             codec::ENTER_WASM => {
-                ensure!(
-                    self.observed.is_none(),
-                    "guest execution diverged before EnterWasm"
-                );
-                ensure!(
-                    self.activations.iter().all(|a| a.host.is_some()),
-                    "nested guest entry without a host boundary"
-                );
+                self.require_idle(
+                    "guest execution diverged before EnterWasm",
+                    "nested guest entry without a host boundary",
+                )?;
                 let id = usize::try_from(body.u32()?)?;
                 let call = usize::try_from(body.u32()?)?;
                 ensure!(
@@ -381,20 +385,16 @@ impl<T: 'static> Driver<'_, T> {
                     )?;
                 }
                 ensure!(
-                    body.bytes == &self.scratch[5..],
+                    body.bytes() == &self.scratch[5..],
                     "guest return values or trap diverged"
                 );
                 self.activations.remove(index).dispose(self.store);
             }
             codec::WRITE => {
-                ensure!(
-                    self.observed.is_none(),
-                    "memory update before matching guest execution"
-                );
-                ensure!(
-                    self.activations.iter().all(|a| a.host.is_some()),
-                    "memory update while guest is running"
-                );
+                self.require_idle(
+                    "memory update before matching guest execution",
+                    "memory update while guest is running",
+                )?;
                 let id = usize::try_from(body.u32()?)?;
                 let offset = usize::try_from(body.u64()?)?;
                 let memory = *self
@@ -407,7 +407,7 @@ impl<T: 'static> Driver<'_, T> {
                     .memories
                     .get(id)
                     .ok_or_else(|| format_err!("unknown memory id"))?;
-                let bytes = body.take(body.bytes.len() - body.position)?;
+                let bytes = body.rest();
                 let end = offset
                     .checked_add(bytes.len())
                     .ok_or_else(|| format_err!("memory range overflow"))?;
@@ -418,14 +418,10 @@ impl<T: 'static> Driver<'_, T> {
                     .copy_from_slice(bytes);
             }
             codec::RESIZE => {
-                ensure!(
-                    self.observed.is_none(),
-                    "memory growth before matching guest execution"
-                );
-                ensure!(
-                    self.activations.iter().all(|a| a.host.is_some()),
-                    "memory growth while guest is running"
-                );
+                self.require_idle(
+                    "memory growth before matching guest execution",
+                    "memory growth while guest is running",
+                )?;
                 let id = usize::try_from(body.u32()?)?;
                 let old = body.u64()?;
                 let new = body.u64()?;
@@ -464,10 +460,7 @@ impl<T: 'static> Driver<'_, T> {
         mut values: Vec<ValRaw>,
     ) -> Result<Activation> {
         let store: &mut StoreOpaque = self.store;
-        let Mode::Replaying { trampolines } = &store.rr.session.as_ref().unwrap().mode else {
-            unreachable!()
-        };
-        let start = trampolines.start.as_ptr();
+        let mut stack_info = try_new::<Box<_>>(VMCommonStackInformation::running_default())?;
         let control = try_new::<Box<_>>(VMReplayControl {
             switch: VmPtr::from(NonNull::new(RawFiber::switch_routine() as *mut u8).unwrap()),
             switch_arg: VmPtr::from(NonNull::<u8>::dangling()),
@@ -481,14 +474,30 @@ impl<T: 'static> Driver<'_, T> {
             host_values: None,
             host_values_len: 0,
         })?;
-        let stack = store.allocate_fiber_stack()?;
         let control = SendSyncPtr::new(NonNull::from(Box::leak(control)));
+        let free_control = || {
+            // SAFETY: no fiber refers to the control block.
+            drop(unsafe { Box::from_raw(control.as_ptr()) })
+        };
+        let stack = match store.allocate_fiber_stack() {
+            Ok(stack) => stack,
+            Err(e) => {
+                free_control();
+                return Err(e);
+            }
+        };
         // SAFETY: the start trampoline follows the raw fiber entry contract,
-        // and `control` outlives the fiber (see `Activation::dispose`).
+        // and `control` outlives the fiber (see `Activation::dispose`). The
+        // control block is not shared until the fiber runs.
         let fiber = unsafe {
+            if let Some(top) = stack.top() {
+                (*control.as_ptr()).switch_arg = VmPtr::from(NonNull::new(top).unwrap());
+            }
             RawFiber::new(
                 stack,
-                core::mem::transmute::<*mut u8, wasmtime_fiber::RawFiberEntry>(start),
+                core::mem::transmute::<*mut u8, wasmtime_fiber::RawFiberEntry>(
+                    self.trampolines.start.as_ptr(),
+                ),
                 control.as_ptr().cast(),
             )
         };
@@ -496,15 +505,15 @@ impl<T: 'static> Driver<'_, T> {
             Ok(fiber) => fiber,
             Err((e, stack)) => {
                 store.deallocate_fiber_stack(stack);
-                // SAFETY: nothing else refers to the control block.
-                drop(unsafe { Box::from_raw(control.as_ptr()) });
+                free_control();
                 return Err(e);
             }
         };
-        // SAFETY: the fiber has not run, so the control block is unshared.
-        unsafe {
-            (*control.as_ptr()).switch_arg = VmPtr::from(NonNull::new(fiber.switch_arg()).unwrap());
-        }
+        debug_assert_eq!(
+            // SAFETY: as above.
+            unsafe { (*control.as_ptr()).switch_arg.as_ptr() },
+            fiber.switch_arg()
+        );
 
         // Like an ordinary async call, Wasm may use `max_wasm_stack` bytes of
         // the fiber's stack and host libcalls the remainder.
@@ -513,8 +522,8 @@ impl<T: 'static> Driver<'_, T> {
             .end
             .saturating_sub(store.engine().config().max_wasm_stack)
             .max(range.start);
-        let mut stack_info = try_new::<Box<_>>(VMCommonStackInformation::running_default())?;
-        let context = ParkedStoreContext::new(stack_limit, NonNull::from(&mut *stack_info));
+        let context =
+            EntryStoreContext::rr_initial(store, stack_limit, NonNull::from(&mut *stack_info));
         Ok(Activation {
             fiber: Some(fiber),
             control,
@@ -555,17 +564,18 @@ impl<T: 'static> Driver<'_, T> {
             mpk::allow(mask);
             current
         });
-        let mut entry = EntryStoreContext::resume_parked(store, &activation.context);
-        let result = crate::runtime::vm::catch_replay_traps(store, &mut entry, pending, || {
+        activation.context.rr_swap();
+        let context = &mut *activation.context;
+        let result = crate::runtime::vm::catch_replay_traps(store, context, pending, || {
             // SAFETY: the fiber's control block and buffers are live, and the
-            // driver installed its runtime state above.
+            // driver installed its runtime state above. Only parked
+            // activations are resumed, never terminal ones.
             let resumed = unsafe { fiber.resume() };
-            debug_assert!(resumed.is_ok(), "replay resumed a finished activation");
+            debug_assert!(resumed.is_ok());
             // SAFETY: the activation has yielded.
             unsafe { (*control).reason != VM_REPLAY_TRAPPED }
         });
-        activation.context = entry.park();
-        drop(entry);
+        activation.context.rr_swap();
         if let Some(mask) = mpk {
             activation.mpk = Some(mpk::current_mask());
             mpk::allow(mask);
@@ -636,6 +646,8 @@ impl<T: 'static> Drop for Driver<'_, T> {
             activation.dispose(self.store);
         }
         self.store.rr.session = None;
+        // Replayed host functions can only run under the driver.
+        self.store.rr.replayed = true;
     }
 }
 

@@ -15,9 +15,18 @@ use core::ptr::NonNull;
 use core::slice;
 use wasmtime_environ::component::*;
 
-#[cfg(feature = "rr")]
-fn pointee_size<T>(_: *mut T) -> usize {
-    core::mem::size_of::<T>()
+/// Creates a transcoder's destination slice. Record/replay tracks it as a
+/// host write to guest memory.
+///
+/// # Safety
+///
+/// Same as `slice::from_raw_parts_mut`.
+unsafe fn dst_slice<'a, T>(_store: &mut dyn VMStore, dst: *mut T, len: usize) -> &'a mut [T] {
+    #[cfg(feature = "rr")]
+    _store
+        .store_opaque_mut()
+        .rr_track_raw_memory(dst.cast(), len * size_of::<T>());
+    unsafe { slice::from_raw_parts_mut(dst, len) }
 }
 
 const UTF16_TAG: usize = 1 << 31;
@@ -189,18 +198,14 @@ fn assert_no_overlap<T, U>(a: &[T], b: &[U]) {
 /// buffers. No value is returned other than whether an invalid string was
 /// found.
 unsafe fn utf8_to_utf8(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     len: usize,
     dst: *mut u8,
 ) -> Result<()> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     log::trace!("utf8-to-utf8 {len}");
     let src = core::str::from_utf8(src).map_err(|_| format_err!("invalid utf8 encoding"))?;
@@ -214,18 +219,14 @@ unsafe fn utf8_to_utf8(
 /// buffers. No value is returned other than whether an invalid string was
 /// found.
 unsafe fn utf16_to_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u16,
     len: usize,
     dst: *mut u16,
 ) -> Result<()> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     log::trace!("utf16-to-utf16 {len}");
     run_utf16_to_utf16(src, dst)?;
@@ -254,18 +255,14 @@ fn run_utf16_to_utf16(src: &[u16], mut dst: &mut [u16]) -> Result<bool> {
 /// Given that all byte sequences are valid latin1 strings this is simply a
 /// memory copy.
 unsafe fn latin1_to_latin1(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     len: usize,
     dst: *mut u8,
 ) -> Result<()> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     log::trace!("latin1-to-latin1 {len}");
     dst.copy_from_slice(src);
@@ -277,18 +274,14 @@ unsafe fn latin1_to_latin1(
 /// This simply inflates the latin1 characters to the u16 code points. The
 /// length provided is the same length of the source and destination buffers.
 unsafe fn latin1_to_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     len: usize,
     dst: *mut u16,
 ) -> Result<()> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     for (src, dst) in src.iter().zip(dst) {
         *dst = u16::from(*src).to_le();
@@ -312,18 +305,14 @@ unsafe impl HostResultHasUnwindSentinel for CopySizeReturn {
 /// The length provided is the same unit length of both buffers, and the
 /// returned value from this function is how many u16 units were written.
 unsafe fn utf8_to_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     len: usize,
     dst: *mut u16,
 ) -> Result<CopySizeReturn> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
 
     let result = run_utf8_to_utf16(src, dst)?;
@@ -361,7 +350,7 @@ unsafe impl HostResultHasUnwindSentinel for SizePair {
 /// a partial transcode if the destination buffer is not large enough to hold
 /// the entire contents.
 unsafe fn utf16_to_utf8(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u16,
     src_len: usize,
@@ -370,11 +359,7 @@ unsafe fn utf16_to_utf8(
     first_pass: u32,
 ) -> Result<SizePair> {
     let src = unsafe { slice::from_raw_parts(src, src_len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), dst_len * pointee_size(dst));
-    let mut dst = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let mut dst = unsafe { dst_slice(store, dst, dst_len) };
     assert_no_overlap(src, dst);
 
     // This iterator will convert to native endianness and additionally count
@@ -427,7 +412,7 @@ unsafe fn utf16_to_utf8(
 ///
 /// This may perform a partial encoding if the destination is not large enough.
 unsafe fn latin1_to_utf8(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     src_len: usize,
@@ -436,11 +421,7 @@ unsafe fn latin1_to_utf8(
     first_pass: u32,
 ) -> Result<SizePair> {
     let src = unsafe { slice::from_raw_parts(src, src_len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), dst_len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let dst = unsafe { dst_slice(store, dst, dst_len) };
     assert_no_overlap(src, dst);
     // The spec mandates that this transcoding in the first pass halts when a
     // multi-byte utf8 code point is encountered, so handle that here.
@@ -465,18 +446,14 @@ unsafe fn latin1_to_utf8(
 /// returned. Otherwise the string is "deflated" from a utf16 string to a latin1
 /// string and the latin1 length is returned.
 unsafe fn utf16_to_compact_probably_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u16,
     len: usize,
     dst: *mut u16,
 ) -> Result<CopySizeReturn> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     let all_latin1 = run_utf16_to_utf16(src, dst)?;
     if all_latin1 {
@@ -505,18 +482,14 @@ unsafe fn utf16_to_compact_probably_utf16(
 /// Note that this may not convert the entire source into the destination if the
 /// original utf8 string has usvs not representable in latin1.
 unsafe fn utf8_to_latin1(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     len: usize,
     dst: *mut u8,
 ) -> Result<SizePair> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
     let read = encoding_rs::mem::utf8_latin1_up_to(src);
     let written = encoding_rs::mem::convert_utf8_to_latin1_lossy(&src[..read], dst);
@@ -531,18 +504,14 @@ unsafe fn utf8_to_latin1(
 ///
 /// This is the same as `utf8_to_latin1` in terms of parameters/results.
 unsafe fn utf16_to_latin1(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u16,
     len: usize,
     dst: *mut u8,
 ) -> Result<SizePair> {
     let src = unsafe { slice::from_raw_parts(src, len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, len) };
+    let dst = unsafe { dst_slice(store, dst, len) };
     assert_no_overlap(src, dst);
 
     let mut size = 0;
@@ -577,7 +546,7 @@ unsafe fn utf16_to_latin1(
 /// After the initial latin1 code units have been inflated the entirety of `src`
 /// is then transcoded into the remaining space within `dst`.
 unsafe fn utf8_to_compact_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u8,
     src_len: usize,
@@ -586,11 +555,7 @@ unsafe fn utf8_to_compact_utf16(
     latin1_bytes_so_far: usize,
 ) -> Result<CopySizeReturn> {
     let src = unsafe { slice::from_raw_parts(src, src_len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), dst_len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let dst = unsafe { dst_slice(store, dst, dst_len) };
     assert_no_overlap(src, dst);
 
     let dst = inflate_latin1_bytes(dst, latin1_bytes_so_far);
@@ -601,7 +566,7 @@ unsafe fn utf8_to_compact_utf16(
 
 /// Same as `utf8_to_compact_utf16` but for utf16 source strings.
 unsafe fn utf16_to_compact_utf16(
-    _store: &mut dyn VMStore,
+    store: &mut dyn VMStore,
     _: Instance,
     src: *mut u16,
     src_len: usize,
@@ -610,11 +575,7 @@ unsafe fn utf16_to_compact_utf16(
     latin1_bytes_so_far: usize,
 ) -> Result<CopySizeReturn> {
     let src = unsafe { slice::from_raw_parts(src, src_len) };
-    #[cfg(feature = "rr")]
-    _store
-        .store_opaque_mut()
-        .rr_track_raw_memory(dst.cast(), dst_len * pointee_size(dst));
-    let dst = unsafe { slice::from_raw_parts_mut(dst, dst_len) };
+    let dst = unsafe { dst_slice(store, dst, dst_len) };
     assert_no_overlap(src, dst);
 
     let dst = inflate_latin1_bytes(dst, latin1_bytes_so_far);

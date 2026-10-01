@@ -21,5 +21,12 @@ unsafe extern "C" {
     pub(crate) fn wasmtime_fiber_switch(top_of_stack: *mut u8);
 }
 
-// Raw fibers call the embedder's routine directly; there is no Rust wrapper.
-pub(crate) use self::wasmtime_fiber_switch as wasmtime_fiber_switch_;
+pub(crate) const SUPPORTED_ARCH: bool = true;
+
+// The embedder's routines need not use the stack layout that raw fiber
+// snapshots depend on.
+pub(crate) const RAW_FIBERS: bool = false;
+
+pub(crate) unsafe extern "C" fn wasmtime_fiber_switch_(_top_of_stack: *mut u8) {
+    unreachable!()
+}

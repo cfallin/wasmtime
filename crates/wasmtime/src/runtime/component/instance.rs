@@ -695,10 +695,12 @@ impl<'a> Instantiator<'a> {
         imports: &'a Arc<PrimaryMap<RuntimeImportIndex, RuntimeImport>>,
     ) -> Result<Instantiator<'a>> {
         let env_component = component.env_component();
+        #[cfg(feature = "rr")]
+        let recording = store.rr.recording();
         let (modules, engine, breakpoints) = store.modules_and_engine_and_breakpoints_mut();
         modules.register_component(component, engine, breakpoints)?;
         #[cfg(feature = "rr")]
-        if engine.tunables().recording {
+        if recording {
             // RR wrappers need the component's wasm-to-array trampolines
             // before any core instance is constructed.
             let imported_modules = imports.values().filter_map(|import| match import {
@@ -771,7 +773,7 @@ impl<'a> Instantiator<'a> {
                 signature,
             );
             #[cfg(feature = "rr")]
-            if store.engine().tunables().recording {
+            if store.0.rr.recording() {
                 let original = self.instance_mut(store.0).trampoline_func_ref(idx);
                 let wrapper = crate::rr::component::wrap(store, original)?;
                 self.instance_mut(store.0).rr_set_trampoline(idx, wrapper);
@@ -802,7 +804,7 @@ impl<'a> Instantiator<'a> {
                 shared_ty,
             );
             #[cfg(feature = "rr")]
-            if store.engine().tunables().recording {
+            if store.0.rr.recording() {
                 let original = self
                     .instance_mut(store.0)
                     .unsafe_intrinsic_func_ref(intrinsic);
@@ -966,7 +968,7 @@ impl<'a> Instantiator<'a> {
             _ => unreachable!(),
         });
         #[cfg(feature = "rr")]
-        let dtor = if context.engine().tunables().recording {
+        let dtor = if context.0.rr.recording() {
             match dtor {
                 Some(dtor) => {
                     let wrapper = crate::rr::component::wrap(context, dtor)?;

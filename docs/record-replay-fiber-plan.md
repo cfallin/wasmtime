@@ -1,5 +1,5 @@
-Record/replay fibers: kickoff plan
-=================================
+Record/replay fibers: plan
+==========================
 
 **Status (2026-10-01).** Steps 1–5 and 7 are implemented; step 6 is deferred.
 [record-replay.md](record-replay.md) describes the result.
@@ -15,8 +15,8 @@ Record/replay fibers: kickoff plan
   were not run here. Windows, Miri, and AddressSanitizer report raw fibers as
   unsupported.
 - `FuncKey::ReplayStart` and `FuncKey::ReplayHostCall` are compiled into every
-  module of a replaying engine (`Tunables::replaying`); the driver compiles an
-  empty module for them. They reach the switch routine through a function
+  module of a record/replay engine for a native target (`Tunables::recording`);
+  the driver takes them from an empty module that it compiles. They reach the switch routine through a function
   pointer in `VMReplayControl`, so no process address is serialized. A test
   compiles them for x86-64, aarch64 (Linux and macOS), s390x, and riscv64.
 - Traps, recorded host errors, and synchronous libcalls run through the
@@ -32,11 +32,9 @@ Record/replay fibers: kickoff plan
   are specified in record-replay.md but not implemented.
 
 
-This document is the implementation brief for the next session. It records the
-agreed design as of 2026-09-21 and supersedes the fiber/snapshot direction in
-[record-replay.md](record-replay.md). It describes planned work; the existing
-replay implementation still suspends Rust frames. Follow the repository's
-AGENTS.md. Preserve the existing RR changes and unrelated workspace files.
+The rest of this document is the design brief agreed on 2026-09-21, before
+implementation. References to the "current" or "existing" implementation
+describe the closure-based replay fibers that it replaced.
 
 The objective is to make replay guest fibers contain zero Rust frames at every
 permitted snapshot point. Replace the Rust entry closure and replay hostcall
@@ -75,7 +73,7 @@ component, and initialization replay behavior.
 
 **Where the implementation stands**
 
-These paths were checked in this checkout when writing this plan:
+Code layout when this plan was written (since replaced):
 
 | Location | Relevant current behavior / planned work |
 | --- | --- |
@@ -283,8 +281,3 @@ cargo check -p wasmtime --no-default-features --features runtime,std,cranelift
 cargo clippy -p wasmtime --features rr --test record_replay -- -D warnings
 cargo fmt --all -- --check
 ```
-
-At handoff, report which milestones and platform checks are complete, identify
-any deferred debug/ordinary-async integration precisely, and distinguish fiber
-snapshot support from whole-store checkpoint support. Do not weaken the
-zero-Rust-frames-at-snapshot-points invariant to accommodate the existing APIs.

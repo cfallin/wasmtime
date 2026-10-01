@@ -114,7 +114,7 @@ impl FuncRefs {
     }
 
     /// Root a copy of a complete function reference without changing its ABI.
-    #[cfg(feature = "rr")]
+    #[cfg(all(feature = "rr", feature = "component-model"))]
     pub(crate) fn rr_copy(&mut self, func: VMFuncRef) -> Result<NonNull<VMFuncRef>, OutOfMemory> {
         self.bump
             .get_mut()

@@ -1948,14 +1948,16 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // If we statically know the imported function (e.g. this is a
         // component-to-component call where we statically know both components)
         // then we can avoid doing an indirect call.
-        // RR routes component builtins through store-local wrappers. A direct
-        // call or inline lowering would bypass the recorded boundary (and
-        // could also interpret the wrapper's host context as a component one).
-        let known = if self.env.tunables.recording {
-            None
-        } else {
-            self.env.translation.known_imported_functions[callee_index].as_ref()
-        };
+        //
+        // Record/replay routes component builtins through store-local
+        // wrappers, which a direct call or inline lowering would bypass, so
+        // only guest-to-guest calls are known when recording.
+        let known = self.env.translation.known_imported_functions[callee_index]
+            .as_ref()
+            .filter(|known| {
+                !self.env.tunables.recording
+                    || matches!(known, KnownFunc::FuncKey(FuncKey::DefinedWasmFunction(..)))
+            });
         match known {
             // The import is always a compile-time builtin intrinsic. Make a
             // direct call to that function (presumably it will eventually be

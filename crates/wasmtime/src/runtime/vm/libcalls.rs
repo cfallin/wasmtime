@@ -261,7 +261,7 @@ fn memory_grow(
 
         #[cfg(feature = "rr")]
         if result.is_none() {
-            store.rr.reject("failed guest memory growth")?;
+            store.rr.poison("failed guest memory growth");
         }
 
         Ok(result)
@@ -323,7 +323,7 @@ unsafe fn table_grow(
             .map(AllocationSize);
         #[cfg(feature = "rr")]
         if result.is_none() {
-            store.rr.reject("failed guest table growth")?;
+            store.rr.poison("failed guest table growth");
         }
         Ok(result)
     })?

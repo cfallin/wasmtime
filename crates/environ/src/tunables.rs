@@ -152,12 +152,9 @@ define_tunables! {
         pub concurrency_support: bool,
 
         /// Whether record/replay compilation is enabled. Retains core Wasm
-        /// bytecode and preserves component builtin calls for interception.
+        /// bytecode, preserves component builtin calls for interception, and
+        /// (for native targets) includes the replay trampolines.
         pub recording: bool,
-
-        /// Whether compiled modules include the record/replay trampolines
-        /// (`FuncKey::ReplayStart` and `FuncKey::ReplayHostCall`).
-        pub replaying: bool,
 
         /// An allocation counter that triggers GC when it reaches zero.
         ///
@@ -211,6 +208,12 @@ define_tunables! {
 }
 
 impl Tunables {
+    /// Whether compiled artifacts retain the original Wasm bytecode, which
+    /// guest debugging and record/replay need.
+    pub fn retain_wasm_bytecode(&self) -> bool {
+        self.debug_guest || self.recording
+    }
+
     /// Returns a `Tunables` configuration assumed for running code on the host.
     pub fn default_host() -> Self {
         if cfg!(miri) {
@@ -281,7 +284,6 @@ impl Tunables {
             debug_guest: false,
             concurrency_support: true,
             recording: false,
-            replaying: false,
             gc_zeal_alloc_counter: None,
             gc_heap_reservation: 0,
             gc_heap_guard_size: 0,

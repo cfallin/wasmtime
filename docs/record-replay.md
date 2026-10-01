@@ -1,7 +1,4 @@
-This document describes the current implementation. Replay activations run
-on raw fibers as described in the
-[replay fiber plan](record-replay-fiber-plan.md); its status section lists
-what remains.
+# Record and replay
 
 The `wasmtime/rr` feature records core Wasm execution for a whole
 store and replays it with a top-level driver of independent Wasm activations.
@@ -10,8 +7,9 @@ startup. Components replay as their constituent core modules; replay does not
 reconstruct the component runtime or require a component linker. Suspended
 replay activations contain no Rust frames, and the fiber library can snapshot
 and restore them; whole-store checkpoints remain implementation work.
-Reversible guest debugging is an intended consumer of this design; its current
-runtime guard is temporary.
+Reversible guest debugging is an intended consumer of this design, but engines
+with guest debugging are rejected until debug events yield to the driver (see
+the remaining work below).
 
 The entrypoints are `Store::start_recording()`,
 `Store::finish_recording() -> Result<rr::Trace>`, and
@@ -19,8 +17,7 @@ The entrypoints are `Store::start_recording()`,
 `Config::rr(RRConfig::Recording)` or `Config::rr(RRConfig::Replaying)`.
 Recording can use synchronous or asynchronous calls; replay always uses fibers.
 The feature does not require component-model support. Replay requires a
-native (non-Pulley) compilation target and a compiler, and is not supported
-on Windows, under Miri, or with AddressSanitizer: see below.
+compiler; see the restrictions below.
 
 ```rust,ignore
 // Recording begins with an empty store, before imports or instances exist.
@@ -33,7 +30,8 @@ std::fs::write("execution.rr", trace.as_bytes())?;
 
 // Replay requires an empty store with an RRConfig::Replaying engine.
 let replay = replay_store.replay(&trace).await?;
-// Core instance exports are available for inspection, in construction order.
+// Core instances are available for inspection (not calls), in construction
+// order.
 let core_instances = replay.instances();
 ```
 
@@ -140,8 +138,10 @@ fiber start (asm) -> ReplayStart -> array-to-Wasm -> guest
 ```
 
 `ReplayStart` and `ReplayHostCall` are signature-independent trampolines
-(`FuncKey`s of their own) compiled into an otherwise empty module when replay
-starts; that module keeps their code alive. Replay host stubs are typed
+(`FuncKey`s of their own). Engines configured for record/replay compile them
+into every module for a native target; the driver takes them from an
+otherwise empty module that it compiles when replay starts and that keeps
+their code alive. Replay host stubs are typed
 `VMArrayCallHostFuncContext`s whose array-call entry is `ReplayHostCall`, so
 a guest call to a host import never enters Rust: the trampoline publishes the
 callee and its array-call buffer in the activation's `VMReplayControl` and
@@ -178,23 +178,27 @@ number of trace events. An activation that never reaches a boundary does not
 yield; deterministic interruption is not implemented. Failed or cancelled
 replay does not roll back guest state; retry with a fresh store.
 
-Replay is limited to configurations where this invariant holds. Pulley
-interprets guest code in Rust, so replaying engines reject Pulley targets.
-Raw fibers require this crate's own stack switching, which Windows (OS fibers)
-and Miri lack; AddressSanitizer's fiber handshake would require Rust code at
-every switch. These report an error when replay starts rather than falling
-back to closure-based fibers.
+Restrictions:
 
-Current explicit restrictions include GC and typed function references in
-core signatures, GC-using modules, shared memories, guest stack switching, resource
-limiters, call hooks, custom signal handlers, fuel, and epochs. Component-level
-resources, futures, and streams cross these boundaries as numeric core handles
-and are supported. Guest debug events are temporarily disabled pending the
-integration below. Host table/global mutation is rejected; construction of
-numeric or abstract funcref globals and abstract funcref tables is supported.
-Failed guest memory/table growth invalidates a recording until allocation decisions have a replay policy. Host panics leave
-unmatched calls and cannot be finalized into a complete trace. Arbitrary Rust
-error objects are represented by messages, not recreated.
+* Core signatures may not contain GC or typed function references, and
+  modules may not use GC, exceptions, shared memories, or stack switching.
+  Component-level resources, futures, and streams cross the boundary as
+  numeric core handles and are supported.
+* Hosts may not mutate tables or globals; constructing numeric or abstract
+  funcref globals and abstract funcref tables is supported.
+* Resource limiters, call hooks, custom signal handlers, fuel, epochs, and
+  guest debugging are rejected. Installing a limiter, hook, or handler during
+  a recording, or a failed guest memory/table growth (until allocation
+  decisions have a replay policy), poisons the recording.
+* Host panics leave unmatched calls and cannot be finalized into a complete
+  trace. Rust error objects are represented by their root cause's message.
+* Replay requires a native compilation target: Pulley interprets guest code
+  in Rust. Raw fibers require this crate's own stack switching, which Windows
+  (OS fibers) and Miri lack, and AddressSanitizer's fiber handshake would
+  require Rust code at every switch. These report an error rather than
+  falling back to closure-based fibers.
+* After a replay, the store can be inspected but not called: its host
+  functions are replay stubs.
 
 The remaining implementation work is:
 
@@ -262,20 +266,8 @@ The remaining implementation work is:
    platform coverage (Windows, sanitizers), verify suspended stacks on the
    remaining architectures, and measure append overhead and trace volume.
 
-The integration tests are in `crates/wasmtime/tests/record_replay.rs`. They
-cover nested callbacks, private table callbacks and Linker imports, memory
-aliases, writes around callbacks, forgotten guards, growth, numeric/vector
-bits, caught traps, async host errors, malformed traces, cancellation, direct
-host calls, rejection of nonempty stores, segment drops, and restrictions. The
-initialization tests replay from empty stores, including start-function host
-calls and traps, imported host objects, component strings and post-return,
-resource destructors, cross-component transcoding, concurrent activations,
-asynchronous canonical callbacks and lowering, future transfers, subtask
-cancellation, stream wait results, and function references across boundaries.
-Further tests cover trapping and failing activations that finish by yielding,
-the rejection of Pulley, and compiling the replay trampolines for each native
-target. Raw fiber lifecycle and snapshots are tested in
-`crates/fiber/src/raw.rs`.
+Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
+behavior) and `crates/fiber/src/raw.rs` (raw fiber lifecycle and snapshots):
 
 ```sh
 cargo test -p wasmtime-internal-fiber
@@ -285,3 +277,6 @@ cargo test -p wasmtime --release --no-default-features \
   --features cranelift,runtime,std,rr,wat,component-model-async --test record_replay
 cargo check -p wasmtime --no-default-features --features runtime,rr
 ```
+
+The raw-fiber design and its rationale are described in the
+[replay fiber plan](record-replay-fiber-plan.md).

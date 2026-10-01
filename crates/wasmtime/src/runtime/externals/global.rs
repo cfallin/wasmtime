@@ -234,12 +234,13 @@ impl Global {
     ///
     /// Panics if `store` does not own this global.
     pub fn set(&self, mut store: impl AsContextMut, val: Val) -> Result<()> {
-        self._set(store.as_context_mut().0, val)
+        let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host global mutation")?;
+        self._set(store, val)
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, val: Val) -> Result<()> {
-        #[cfg(feature = "rr")]
-        store.rr.reject("host global mutation")?;
         let global_ty = self._ty(&store);
         if global_ty.mutability() != Mutability::Var {
             bail!("immutable global cannot be set");
@@ -366,20 +367,6 @@ impl Global {
     #[cfg(feature = "rr")]
     pub(crate) fn rr_read(&self, store: &mut StoreOpaque) -> Val {
         self._get(&mut AutoAssertNoGc::new(store))
-    }
-
-    #[cfg(feature = "rr")]
-    pub(crate) fn rr_set_flag(&self, store: &mut StoreOpaque, value: i32) -> Result<()> {
-        let ty = self._ty(store);
-        ensure!(
-            matches!(ty.content(), ValType::I32) && ty.mutability() == Mutability::Var,
-            "invalid replay flag global"
-        );
-        // SAFETY: store is exclusive and the type was checked above.
-        unsafe {
-            *self.definition(store).as_mut().as_i32_mut() = value;
-        }
-        Ok(())
     }
 
     #[cfg(feature = "rr")]

@@ -426,5 +426,6 @@ debug = [
 # Enables support for defining compile-time builtins.
 compile-time-builtins = ['anyhow', 'dep:wasm-compose', 'dep:tempfile']
 
-# Experimental core-Wasm recording and async replay.
+# Experimental record/replay of core Wasm and (with `component-model`)
+# component execution.
 rr = ["async"]

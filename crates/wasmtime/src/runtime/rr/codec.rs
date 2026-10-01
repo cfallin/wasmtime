@@ -169,7 +169,10 @@ pub(super) unsafe fn outcome(
                 bytes.extend_from_slice(&call);
                 bytes.extend_from_slice(&[1, *trap as u8]);
             } else {
-                let message = e.to_string();
+                // Context, such as a Wasm backtrace, depends on the activation's
+                // callers and runtime configuration, so only the root cause of
+                // an error is reproduced.
+                let message = e.root_cause().to_string();
                 record(bytes, tag, 5 + message.len())?;
                 bytes.extend_from_slice(&call);
                 bytes.push(2);
@@ -181,13 +184,29 @@ pub(super) unsafe fn outcome(
 }
 
 pub(super) struct Reader<'a> {
-    pub bytes: &'a [u8],
-    pub position: usize,
+    bytes: &'a [u8],
+    position: usize,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// All bytes, regardless of what has been read.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Reads all remaining bytes.
+    pub fn rest(&mut self) -> &'a [u8] {
+        let rest = &self.bytes[self.position..];
+        self.position = self.bytes.len();
+        rest
     }
 
     pub fn take(&mut self, len: usize) -> Result<&'a [u8]> {

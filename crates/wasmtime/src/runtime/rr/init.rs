@@ -9,15 +9,6 @@ use wasmtime_environ::packed_option::ReservedValue;
 use wasmtime_environ::{DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, EntityIndex};
 
 impl Session {
-    fn append(&mut self, tag: u8, body: &[u8]) -> Result<()> {
-        let Mode::Recording { bytes, .. } = &mut self.mode else {
-            return Ok(());
-        };
-        codec::record(bytes, tag, body.len())?;
-        bytes.extend_from_slice(body);
-        Ok(())
-    }
-
     fn import_func(&mut self, store: &StoreOpaque, func: Func) -> Result<usize> {
         if let Ok(id) = self.objects.find_func(func.vm_func_ref(store)) {
             return Ok(id);
@@ -101,7 +92,7 @@ impl StoreOpaque {
         let mut session = self.rr.session.take().unwrap();
         let result = f(self, &mut session);
         if result.is_err() {
-            session.failure = Some(format_err!("failed to record object construction"));
+            session.fail(format_err!("failed to record object construction"));
         }
         self.rr.session = Some(session);
         result
@@ -188,12 +179,7 @@ impl StoreOpaque {
         instance: Instance,
         module: &Module,
     ) -> Result<()> {
-        if !self.rr.active() {
-            return Ok(());
-        }
-        self.rr_flush()?;
-        let mut session = self.rr.session.take().unwrap();
-        let result = (|| {
+        self.rr_register(|store, session| {
             if matches!(session.mode, Mode::Recording { .. }) {
                 let wasm = module.debug_bytecode().ok_or_else(|| {
                     format_err!("module has no retained bytecode for initialization replay")
@@ -219,25 +205,25 @@ impl StoreOpaque {
                     let wasmtime_environ::Initializer::Import { index: ty, .. } = *initializer;
                     let object = match ty {
                         EntityIndex::Function(index) => {
-                            let store_id = self.id();
-                            let (inst, registry) = instance.id.get_mut_and_module_registry(self);
-                            // SAFETY: the new instance and its imports belong to self.
+                            let store_id = store.id();
+                            let (inst, registry) = instance.id.get_mut_and_module_registry(store);
+                            // SAFETY: the new instance and its imports belong to store.
                             let func = unsafe { inst.get_exported_func(registry, store_id, index) };
-                            session.import_func(self, func)?
+                            session.import_func(store, func)?
                         }
                         EntityIndex::Memory(index) => {
-                            let memory = self[instance.id]
-                                .get_exported_memory(self.id(), index)
+                            let memory = store[instance.id]
+                                .get_exported_memory(store.id(), index)
                                 .unshared()
                                 .ok_or_else(|| format_err!("shared memory import in recording"))?;
                             *session
                                 .objects
                                 .memories_by_key
-                                .get(&memory.rr_key(self))
+                                .get(&memory.rr_key(store))
                                 .ok_or_else(|| format_err!("unregistered imported memory"))?
                         }
                         EntityIndex::Table(index) => {
-                            let table = self[instance.id].get_exported_table(self.id(), index);
+                            let table = store[instance.id].get_exported_table(store.id(), index);
                             *session
                                 .objects
                                 .tables_by_key
@@ -245,8 +231,8 @@ impl StoreOpaque {
                                 .ok_or_else(|| format_err!("unregistered imported table"))?
                         }
                         EntityIndex::Global(index) => {
-                            let global = self[instance.id].get_exported_global(self.id(), index);
-                            session.import_global(self, global)?
+                            let global = store[instance.id].get_exported_global(store.id(), index);
+                            session.import_global(store, global)?
                         }
                         _ => bail!("unsupported record/replay import"),
                     };
@@ -254,14 +240,9 @@ impl StoreOpaque {
                 }
                 session.append(codec::INSTANCE, &body)?;
             }
-            session.objects.register_instance(self, instance)?;
+            session.objects.register_instance(store, instance)?;
             Ok(())
-        })();
-        if result.is_err() {
-            session.failure = Some(format_err!("failed to record instance construction"));
-        }
-        self.rr.session = Some(session);
-        result
+        })
     }
 
     /// Component instance flags are ordinary imported i32 globals. Host-side
@@ -357,6 +338,7 @@ impl Objects {
 
 pub(super) fn replay_event<T: 'static>(
     store: &mut StoreInner<T>,
+    trampolines: &super::replay::Trampolines,
     tag: u8,
     body: &mut Reader<'_>,
 ) -> Result<Option<(Instance, Option<usize>)>> {
@@ -379,17 +361,8 @@ pub(super) fn replay_event<T: 'static>(
                 "invalid host function id"
             );
             let ty = crate::FuncType::new(store.engine(), params, results);
+            let func = trampolines.host_stub(store, ty)?;
             let mut session = store.rr.session.take().unwrap();
-            let Mode::Replaying { trampolines } = &session.mode else {
-                unreachable!()
-            };
-            let func = match trampolines.host_stub(store, ty) {
-                Ok(func) => func,
-                Err(e) => {
-                    store.rr.session = Some(session);
-                    return Err(e);
-                }
-            };
             let added = session.objects.add_func(store, func);
             store.rr.session = Some(session);
             ensure!(added? == id, "duplicate replay host");
@@ -578,7 +551,7 @@ pub(super) fn replay_event<T: 'static>(
                 .globals
                 .get(id)
                 .ok_or_else(|| format_err!("invalid global write"))?;
-            global.rr_set_flag(store, value)?;
+            global._set(store, crate::Val::I32(value))?;
         }
         _ => unreachable!(),
     }

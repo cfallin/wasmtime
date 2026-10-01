@@ -19,13 +19,13 @@ use core::ops::Range;
 use wasmtime_environ::error::Error;
 
 mod raw;
+mod stackswitch;
 pub use raw::{RawFiber, RawFiberEntry, RawFiberSnapshot, RawFiberState};
 
 cfg_select! {
     not(feature = "std") => {
         mod nostd;
         use nostd as imp;
-        mod stackswitch;
     }
     miri => {
         mod miri;
@@ -38,12 +38,10 @@ cfg_select! {
     unix => {
         mod unix;
         use unix as imp;
-        mod stackswitch;
     }
     _ => {
         mod nostd;
         use nostd as imp;
-        mod stackswitch;
     }
 }
 

@@ -8,6 +8,33 @@ fn engine(mode: RRConfig) -> Result<Engine> {
     Engine::new(&config)
 }
 
+// Trace frame tags, for tests that edit traces (see `rr/codec.rs`).
+const ENTER_WASM: u8 = 1;
+const LEAVE_HOST: u8 = 4;
+const MODULE: u8 = 8;
+
+/// The `(tag, body offset)` of each frame of a serialized trace.
+fn frames(bytes: &[u8]) -> Vec<(u8, usize)> {
+    let mut frames = Vec::new();
+    // Skip the version magic.
+    let mut offset = 8;
+    while offset < bytes.len() {
+        let len = u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap());
+        frames.push((bytes[offset], offset + 5));
+        offset += 5 + len as usize;
+    }
+    frames
+}
+
+/// The body offset of the first frame with `tag`.
+fn first_frame(bytes: &[u8], tag: u8) -> usize {
+    frames(bytes)
+        .into_iter()
+        .find(|(t, _)| *t == tag)
+        .expect("trace frame")
+        .1
+}
+
 const NESTED: &str = r#"
 (module
   (import "" "host" (func $host (result i32)))
@@ -81,6 +108,12 @@ async fn nested_callbacks_memory_and_caught_trap() -> Result<()> {
         .unwrap();
     assert_eq!(memory.data(&replay), expected);
     assert_eq!(*replay.data(), 0);
+
+    // Replayed host functions only run under the replay driver, so a replayed
+    // store can be inspected but not called.
+    let run = output.instances()[0].get_typed_func::<(), i32>(&mut replay, "run")?;
+    let error = run.call(&mut replay, ()).unwrap_err();
+    assert!(error.to_string().contains("inspected"), "{error:#}");
     Ok(())
 }
 
@@ -208,14 +241,6 @@ async fn recording_and_replay_require_empty_stores() -> Result<()> {
 }
 
 #[test]
-fn all_memories_are_tracked_automatically() -> Result<()> {
-    let (mut store, _, memory) = identity()?;
-    memory.write(&mut store, 0, &[1])?;
-    store.finish_recording()?;
-    Ok(())
-}
-
-#[test]
 fn forbidden_mutation_poisons_even_if_error_is_caught() -> Result<()> {
     let (mut store, _, _) = identity()?;
     let global = Global::new(
@@ -224,6 +249,15 @@ fn forbidden_mutation_poisons_even_if_error_is_caught() -> Result<()> {
         Val::I32(0),
     )?;
     assert!(global.set(&mut store, Val::I32(1)).is_err());
+    assert!(store.finish_recording().is_err());
+
+    let (mut store, _, _) = identity()?;
+    let table = Table::new(
+        &mut store,
+        TableType::new(RefType::FUNCREF, 1, None),
+        Ref::Func(None),
+    )?;
+    assert!(table.set(&mut store, 0, Ref::Func(None)).is_err());
     assert!(store.finish_recording().is_err());
     Ok(())
 }
@@ -266,16 +300,10 @@ async fn malformed_host_result_disposes_nested_activations() -> Result<()> {
     let (mut store, run, _) = nested()?;
     run.typed::<(), i32>(&store)?.call(&mut store, ())?;
     let mut bytes = store.finish_recording()?.as_bytes().to_vec();
-    let mut offset = 8;
-    loop {
-        let len = u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
-        if bytes[offset] == 4 {
-            // LeaveHost, while two activations are parked.
-            bytes[offset + 9] = 0xff;
-            break;
-        }
-        offset += 5 + len;
-    }
+    // An invalid outcome for the first LeaveHost, while two activations are
+    // parked.
+    let body = first_frame(&bytes, LEAVE_HOST);
+    bytes[body + 4] = 0xff;
     let trace = Trace::from_bytes(bytes)?;
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, 0_usize);
     assert!(replay.replay(&trace).await.is_err());
@@ -310,11 +338,10 @@ async fn trapping_and_failing_activations_finish_by_yielding() -> Result<()> {
     let run = instance.get_typed_func::<i32, i32>(&mut store, "run")?;
     // Guest traps before and after host calls, host errors, and returns, each
     // in a fresh activation whose fiber finishes with its final yield.
-    let mut outcomes = Vec::new();
-    for i in 0..100 {
-        outcomes.push(run.call(&mut store, i).is_ok());
-    }
-    assert!(outcomes.contains(&true) && outcomes.contains(&false));
+    let outcomes = (0..6)
+        .map(|i| run.call(&mut store, i).is_ok())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, [false, true, false, false, false, true]);
     let trace = store.finish_recording()?;
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     replay.replay(&trace).await?;
@@ -348,6 +375,45 @@ fn replay_requires_a_native_target() -> Result<()> {
     config.target("pulley64")?.rr(RRConfig::Replaying);
     let error = Engine::new(&config).unwrap_err();
     assert!(error.to_string().contains("native"), "{error:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_detects_divergent_results() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let host = Func::wrap(&mut store, || 1_i32);
+    let module = Module::new(
+        &recording,
+        r#"(module
+        (import "" "host" (func $host (result i32)))
+        (func (export "run") (result i32) (i32.add (call $host) (i32.const 1))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[host.into()])?;
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ())?, 2);
+    let mut bytes = store.finish_recording()?.as_bytes().to_vec();
+    // The host result, after the call ID and the success tag.
+    let body = first_frame(&bytes, LEAVE_HOST);
+    bytes[body + 5..body + 9].copy_from_slice(&5_i32.to_le_bytes());
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let error = replay.replay(&Trace::from_bytes(bytes)?).await.unwrap_err();
+    assert!(format!("{error:#}").contains("diverged"), "{error:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn sessions_require_matching_engine_modes() -> Result<()> {
+    let mut replaying = Store::new(&engine(RRConfig::Replaying)?, ());
+    assert!(replaying.start_recording().is_err());
+    assert!(replaying.finish_recording().is_err());
+    let mut recording = Store::new(&engine(RRConfig::Recording)?, ());
+    recording.start_recording()?;
+    let trace = recording.finish_recording()?;
+    let mut recording = Store::new(recording.engine(), ());
+    assert!(recording.replay(&trace).await.is_err());
+    Store::new(replaying.engine(), ()).replay(&trace).await?;
     Ok(())
 }
 
@@ -1341,12 +1407,8 @@ async fn initialization_requires_exactly_one_startup() -> Result<()> {
     )?;
     Instance::new(&mut store, &module, &[])?;
     let bytes = store.finish_recording()?.as_bytes().to_vec();
-    let mut offset = 8;
-    while bytes[offset] != 1 {
-        offset +=
-            5 + u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
-    }
-    let startup = offset;
+    // The start of the frame (not its body) of the startup activation.
+    let startup = first_frame(&bytes, ENTER_WASM) - 5;
     // Truncate the complete startup activation, retaining a valid End frame.
     let mut missing = bytes[..startup].to_vec();
     missing.extend_from_slice(&[0; 5]);
@@ -1529,12 +1591,9 @@ async fn function_references_cross_boundaries_by_id() -> Result<()> {
     // Raw pointers never enter the trace, and an invalid ID must fail before
     // entering guest code with a fabricated function reference.
     let mut bytes = trace.as_bytes().to_vec();
-    let mut offset = 8;
-    while bytes[offset] != 1 {
-        offset +=
-            5 + u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
-    }
-    bytes[offset + 13..offset + 17].copy_from_slice(&u32::MAX.to_le_bytes());
+    // The first argument of the first EnterWasm, after the callee and call IDs.
+    let body = first_frame(&bytes, ENTER_WASM);
+    bytes[body + 8..body + 12].copy_from_slice(&u32::MAX.to_le_bytes());
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     let error = replay.replay(&Trace::from_bytes(bytes)?).await.unwrap_err();
     assert!(format!("{error:#}").contains("invalid function id"));
@@ -1572,16 +1631,10 @@ async fn initialization_tracks_module_identity() -> Result<()> {
         );
     }
     let trace = store.finish_recording()?;
-    let bytes = trace.as_bytes();
-    let mut offset = 8;
-    let mut definitions = 0;
-    while offset < bytes.len() {
-        if bytes[offset] == 8 {
-            definitions += 1;
-        } // Module definition.
-        offset +=
-            5 + u32::from_le_bytes(bytes[offset + 1..offset + 5].try_into().unwrap()) as usize;
-    }
+    let definitions = frames(trace.as_bytes())
+        .iter()
+        .filter(|(tag, _)| *tag == MODULE)
+        .count();
     // A clone shares a definition; separately compiled modules have their own
     // trace entries even when they contain identical bytecode.
     assert_eq!(definitions, 3);

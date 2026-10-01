@@ -89,7 +89,8 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
     let functions = mem::take(&mut translation.function_body_inputs);
 
     let mut compile_inputs = CompileInputs::for_module(&types, &translation, functions);
-    if tunables.replaying {
+    // Replay suspends guest code on raw fibers, which requires native code.
+    if tunables.recording && !engine.is_pulley() {
         compile_inputs.push_replay_trampolines(&types);
     }
     let unlinked_compile_outputs = compile_inputs.compile(engine, &types)?;
@@ -123,7 +124,7 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
         dwarf_package,
     )?;
 
-    if tunables.debug_guest || tunables.recording {
+    if tunables.retain_wasm_bytecode() {
         object.append_wasm_bytecode(std::iter::once(wasm));
     }
 
@@ -201,7 +202,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
     }
 
     // Collect bytecode slices here before moving `module_translations` below.
-    let module_wasms = if tunables.debug_guest || tunables.recording {
+    let module_wasms = if tunables.retain_wasm_bytecode() {
         module_translations
             .values()
             .map(|t| t.wasm)
@@ -222,7 +223,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
         None, // TODO: Support dwarf packages for components.
     )?;
 
-    if tunables.debug_guest || tunables.recording {
+    if tunables.retain_wasm_bytecode() {
         object.append_wasm_bytecode(module_wasms);
     }
 

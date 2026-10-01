@@ -1652,88 +1652,53 @@ impl Drop for EntryStoreContext {
     }
 }
 
-/// The `VMStoreContext` state of a parked record/replay activation: the state
-/// that an `EntryStoreContext` saves around an ordinary call into Wasm.
 #[cfg(feature = "rr")]
-pub(crate) struct ParkedStoreContext {
-    stack_limit: usize,
-    last_wasm_exit_pc: usize,
-    last_wasm_exit_trampoline_fp: usize,
-    last_wasm_entry_fp: usize,
-    last_wasm_entry_sp: usize,
-    last_wasm_entry_trap_handler: usize,
-    stack_chain: VMStackChain,
-}
-
-#[cfg(feature = "rr")]
-impl ParkedStoreContext {
-    /// The state of an activation that has not yet entered Wasm.
-    pub(crate) fn new(stack_limit: usize, stack: NonNull<VMCommonStackInformation>) -> Self {
-        Self {
-            stack_limit,
+impl EntryStoreContext {
+    /// The saved state of a record/replay activation that has not entered
+    /// Wasm yet. The replay driver exchanges it with the store's state around
+    /// each resumption using `rr_swap`, rather than restoring it on drop, so
+    /// it must never be dropped.
+    pub(crate) fn rr_initial(
+        store: &StoreOpaque,
+        stack_limit: usize,
+        stack: NonNull<VMCommonStackInformation>,
+    ) -> mem::ManuallyDrop<Self> {
+        mem::ManuallyDrop::new(Self {
+            stack_limit: Some(stack_limit),
             last_wasm_exit_pc: 0,
             last_wasm_exit_trampoline_fp: 0,
             last_wasm_entry_fp: 0,
             last_wasm_entry_sp: 0,
             last_wasm_entry_trap_handler: 0,
             stack_chain: VMStackChain::InitialStack(stack.as_ptr()),
-        }
-    }
-}
-
-#[cfg(feature = "rr")]
-impl EntryStoreContext {
-    /// Installs a parked activation's state in `store`. The returned value
-    /// restores the current state when dropped, like `enter_wasm`'s.
-    pub(crate) fn resume_parked(store: &mut StoreOpaque, parked: &ParkedStoreContext) -> Self {
-        let cx = store.vm_store_context();
-        // SAFETY: the store is exclusively borrowed, so nothing else accesses
-        // these fields, and they are all plain data.
-        unsafe {
-            Self {
-                stack_limit: Some(mem::replace(&mut *cx.stack_limit.get(), parked.stack_limit)),
-                last_wasm_exit_pc: mem::replace(
-                    &mut *cx.last_wasm_exit_pc.get(),
-                    parked.last_wasm_exit_pc,
-                ),
-                last_wasm_exit_trampoline_fp: mem::replace(
-                    &mut *cx.last_wasm_exit_trampoline_fp.get(),
-                    parked.last_wasm_exit_trampoline_fp,
-                ),
-                last_wasm_entry_fp: mem::replace(
-                    &mut *cx.last_wasm_entry_fp.get(),
-                    parked.last_wasm_entry_fp,
-                ),
-                last_wasm_entry_sp: mem::replace(
-                    &mut *cx.last_wasm_entry_sp.get(),
-                    parked.last_wasm_entry_sp,
-                ),
-                last_wasm_entry_trap_handler: mem::replace(
-                    &mut *cx.last_wasm_entry_trap_handler.get(),
-                    parked.last_wasm_entry_trap_handler,
-                ),
-                stack_chain: mem::replace(&mut *cx.stack_chain.get(), parked.stack_chain.clone()),
-                vm_store_context: cx,
-            }
-        }
+            vm_store_context: store.vm_store_context(),
+        })
     }
 
-    /// Reads back the state of the activation installed by `resume_parked`
-    /// once it has yielded.
-    pub(crate) fn park(&self) -> ParkedStoreContext {
-        // SAFETY: see `resume_parked`.
-        unsafe {
-            let cx = &*self.vm_store_context;
-            ParkedStoreContext {
-                stack_limit: *cx.stack_limit.get(),
-                last_wasm_exit_pc: *cx.last_wasm_exit_pc.get(),
-                last_wasm_exit_trampoline_fp: *cx.last_wasm_exit_trampoline_fp.get(),
-                last_wasm_entry_fp: *cx.last_wasm_entry_fp.get(),
-                last_wasm_entry_sp: *cx.last_wasm_entry_sp.get(),
-                last_wasm_entry_trap_handler: *cx.last_wasm_entry_trap_handler.get(),
-                stack_chain: (*cx.stack_chain.get()).clone(),
-            }
+    /// Exchanges this saved state with the store's current state.
+    pub(crate) fn rr_swap(&mut self) {
+        fn swap<T>(a: &core::cell::UnsafeCell<T>, b: &mut T) {
+            // SAFETY: the replay driver exclusively borrows the store, so
+            // nothing else accesses these fields.
+            unsafe { mem::swap(&mut *a.get(), b) }
         }
+        // SAFETY: the store outlives the activation this state belongs to.
+        let cx = unsafe { &*self.vm_store_context };
+        if let Some(limit) = &mut self.stack_limit {
+            swap(&cx.stack_limit, limit);
+        }
+        swap(&cx.last_wasm_exit_pc, &mut self.last_wasm_exit_pc);
+        swap(
+            &cx.last_wasm_exit_trampoline_fp,
+            &mut self.last_wasm_exit_trampoline_fp,
+        );
+        swap(&cx.last_wasm_entry_fp, &mut self.last_wasm_entry_fp);
+        swap(&cx.last_wasm_entry_sp, &mut self.last_wasm_entry_sp);
+        swap(
+            &cx.last_wasm_entry_trap_handler,
+            &mut self.last_wasm_entry_trap_handler,
+        );
+        swap(&cx.stack_chain, &mut self.stack_chain);
     }
 }
 
@@ -2527,14 +2492,9 @@ impl HostFunc {
             // SAFETY: callee_vmctx is the live host context, and args contains
             // the initialized parameters specified by that context's type.
             let rr = unsafe {
-                let ctx = VMArrayCallHostFuncContext::from_opaque(callee_vmctx);
-                if store.0.rr_guest_caller(instance) {
-                    store
-                        .0
-                        .rr_enter(NonNull::from(&ctx.as_ref().func_ref), args.as_ptr(), true)?
-                } else {
-                    None
-                }
+                store
+                    .0
+                    .rr_enter_host(instance, callee_vmctx, args.as_ptr())?
             };
 
             let (gc_lifo_scope, ret) = {
