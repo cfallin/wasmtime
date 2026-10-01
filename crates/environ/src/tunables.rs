@@ -155,6 +155,10 @@ define_tunables! {
         /// bytecode and preserves component builtin calls for interception.
         pub recording: bool,
 
+        /// Whether compiled modules include the record/replay trampolines
+        /// (`FuncKey::ReplayStart` and `FuncKey::ReplayHostCall`).
+        pub replaying: bool,
+
         /// An allocation counter that triggers GC when it reaches zero.
         ///
         /// Decremented on every allocation and when it hits zero, a GC is
@@ -277,6 +281,7 @@ impl Tunables {
             debug_guest: false,
             concurrency_support: true,
             recording: false,
+            replaying: false,
             gc_zeal_alloc_counter: None,
             gc_heap_reservation: 0,
             gc_heap_guard_size: 0,

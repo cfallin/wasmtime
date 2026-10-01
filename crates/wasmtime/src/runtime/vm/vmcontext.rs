@@ -839,6 +839,7 @@ impl Default for VMStoreContext {
             store_data: VmPtr::dangling(),
             component_context: UnsafeCell::new([0; NUM_COMPONENT_CONTEXT_SLOTS]),
             current_thread: UnsafeCell::new(VMLazyThread::none()),
+            replay_control: None,
         }
     }
 }

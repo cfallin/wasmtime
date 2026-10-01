@@ -2651,6 +2651,13 @@ impl Config {
             #[cfg(feature = "rr")]
             RRConfig::Recording | RRConfig::Replaying => {
                 self.validate_rr_determinism_conflicts()?;
+                // Replay suspends guest code on raw fibers containing only
+                // native generated code; the interpreter is Rust code.
+                if matches!(self.rr_config, RRConfig::Replaying)
+                    && self.compiler_target().is_pulley()
+                {
+                    bail!("record/replay replay requires a native compilation target");
+                }
             }
             RRConfig::None => {}
         };
@@ -2665,6 +2672,7 @@ impl Config {
         {
             tunables.recording =
                 matches!(self.rr_config, RRConfig::Recording | RRConfig::Replaying);
+            tunables.replaying = matches!(self.rr_config, RRConfig::Replaying);
         }
 
         // If no target is explicitly specified then further refine `tunables`

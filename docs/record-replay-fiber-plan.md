@@ -1,6 +1,37 @@
 Record/replay fibers: kickoff plan
 =================================
 
+**Status (2026-10-01).** Steps 1–5 and 7 are implemented; step 6 is deferred.
+[record-replay.md](record-replay.md) describes the result.
+
+- Raw fibers (`wasmtime_fiber::RawFiber`): entry point plus context, no Rust
+  closure, explicit `Initial`/`Suspended`/`Terminal` lifecycle, terminal resume
+  rejected, destruction without unwinding. Fiber-owned snapshots restore at
+  the original address, are bound to their fiber by identity, and always
+  return to the current resume's caller. Tested on x86-64 Linux: multiple
+  yields, repeated rewind from different host frames, rewind after the final
+  yield and to the initial state, cross-thread resume, and snapshot ownership.
+  Other Unix architectures share the reserved-slot layout and compile, but
+  were not run here. Windows, Miri, and AddressSanitizer report raw fibers as
+  unsupported.
+- `FuncKey::ReplayStart` and `FuncKey::ReplayHostCall` are compiled into every
+  module of a replaying engine (`Tunables::replaying`); the driver compiles an
+  empty module for them. They reach the switch routine through a function
+  pointer in `VMReplayControl`, so no process address is serialized. A test
+  compiles them for x86-64, aarch64 (Linux and macOS), s390x, and riscv64.
+- Traps, recorded host errors, and synchronous libcalls run through the
+  existing array-to-Wasm landing pad and `raise`; the driver installs a
+  `CallThreadState` and the activation's `VMStoreContext` state around each
+  resume. After every yield the driver verifies (x86-64 and aarch64, debug
+  and release) that the suspended stack contains only generated code.
+- Replay host stubs, the old Rust interception in `HostFunc`,
+  `StoreFiberYield::ReplayHost`, and `resume_replay_fiber` are replaced or
+  removed. The trace format is unchanged. Pulley engines reject replay.
+- Deferred: step 6 (debug events and ordinary asynchronous execution through
+  the yield contract); the guest-debug guard remains. Whole-store checkpoints
+  are specified in record-replay.md but not implemented.
+
+
 This document is the implementation brief for the next session. It records the
 agreed design as of 2026-09-21 and supersedes the fiber/snapshot direction in
 [record-replay.md](record-replay.md). It describes planned work; the existing

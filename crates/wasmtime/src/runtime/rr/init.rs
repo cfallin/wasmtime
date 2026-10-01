@@ -379,10 +379,17 @@ pub(super) fn replay_event<T: 'static>(
                 "invalid host function id"
             );
             let ty = crate::FuncType::new(store.engine(), params, results);
-            let func = Func::new(StoreContextMut(&mut *store), ty, |_, _, _| {
-                bail!("replay stub executed")
-            });
             let mut session = store.rr.session.take().unwrap();
+            let Mode::Replaying { trampolines } = &session.mode else {
+                unreachable!()
+            };
+            let func = match trampolines.host_stub(store, ty) {
+                Ok(func) => func,
+                Err(e) => {
+                    store.rr.session = Some(session);
+                    return Err(e);
+                }
+            };
             let added = session.objects.add_func(store, func);
             store.rr.session = Some(session);
             ensure!(added? == id, "duplicate replay host");

@@ -286,6 +286,71 @@ async fn malformed_host_result_disposes_nested_activations() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn trapping_and_failing_activations_finish_by_yielding() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let host = Func::wrap(&mut store, |x: i32| -> Result<i32> {
+        if x % 2 == 0 {
+            wasmtime::bail!("even argument {x}")
+        }
+        Ok(x)
+    });
+    let module = Module::new(
+        &recording,
+        r#"(module
+        (import "" "host" (func $host (param i32) (result i32)))
+        (func (export "run") (param i32) (result i32)
+            (if (i32.eqz (i32.rem_u (local.get 0) (i32.const 3)))
+                (then unreachable))
+            (call $host (local.get 0))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[host.into()])?;
+    let run = instance.get_typed_func::<i32, i32>(&mut store, "run")?;
+    // Guest traps before and after host calls, host errors, and returns, each
+    // in a fresh activation whose fiber finishes with its final yield.
+    let mut outcomes = Vec::new();
+    for i in 0..100 {
+        outcomes.push(run.call(&mut store, i).is_ok());
+    }
+    assert!(outcomes.contains(&true) && outcomes.contains(&false));
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    replay.replay(&trace).await?;
+    // Every activation's state was released.
+    let memory = Memory::new(&mut replay, MemoryType::new(1, None))?;
+    memory.write(&mut replay, 0, &[1])?;
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "all-arch")]
+fn replay_trampolines_compile_for_native_targets() -> Result<()> {
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "s390x-unknown-linux-gnu",
+        "riscv64gc-unknown-linux-gnu",
+    ] {
+        let mut config = Config::new();
+        config.target(target)?.rr(RRConfig::Replaying);
+        Engine::new(&config)?.precompile_module(b"\0asm\x01\0\0\0")?;
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "pulley")]
+fn replay_requires_a_native_target() -> Result<()> {
+    let mut config = Config::new();
+    config.target("pulley64")?.rr(RRConfig::Replaying);
+    let error = Engine::new(&config).unwrap_err();
+    assert!(error.to_string().contains("native"), "{error:?}");
+    Ok(())
+}
+
 fn many_calls() -> Result<(Store<()>, Func, Func)> {
     let engine = engine(RRConfig::Recording)?;
     let mut store = Store::new(&engine, ());

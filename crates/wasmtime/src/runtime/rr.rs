@@ -128,10 +128,7 @@ enum Mode {
         next_call: u32,
     },
     Replaying {
-        yielded: Option<replay::HostCall>,
-        response: Option<Result<()>>,
-        completed: Option<Result<()>>,
-        entering: bool,
+        trampolines: replay::Trampolines,
     },
 }
 
@@ -150,13 +147,6 @@ impl State {
         matches!(
             self.session.as_deref().map(|s| &s.mode),
             Some(Mode::Recording { .. })
-        )
-    }
-
-    pub(crate) fn replaying(&self) -> bool {
-        matches!(
-            self.session.as_deref().map(|s| &s.mode),
-            Some(Mode::Replaying { .. })
         )
     }
 
@@ -471,13 +461,11 @@ impl StoreOpaque {
         if !self.rr.active() {
             return Ok(None);
         }
-        if let Mode::Replaying { entering, .. } = &mut self.rr.session.as_mut().unwrap().mode {
-            ensure!(
-                !host && core::mem::take(entering),
-                "replay calls must be driven by Store::replay"
-            );
-            return Ok(None);
-        }
+        // The replay driver enters Wasm and handles host calls itself.
+        ensure!(
+            self.rr.recording(),
+            "replay calls must be driven by Store::replay"
+        );
         self.rr_flush_boundary(!host)?;
         // Calling a host Func from host code is not a Wasm boundary. Its
         // effects (writes and any guest callbacks) are recorded normally.

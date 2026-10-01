@@ -91,4 +91,8 @@ mod unsupported {
     pub(crate) unsafe fn wasmtime_fiber_switch(_top_of_stack: *mut u8) {
         unreachable!();
     }
+
+    pub(crate) unsafe extern "C" fn wasmtime_fiber_switch_(_top_of_stack: *mut u8) {
+        unreachable!();
+    }
 }

@@ -1,22 +1,26 @@
-The next implementation step is described in the
-[replay fiber kickoff plan](record-replay-fiber-plan.md). Its agreed design
-supersedes the fiber/snapshot roadmap below; this document describes the current
-implementation.
+This document describes the current implementation. Replay activations run
+on raw fibers as described in the
+[replay fiber plan](record-replay-fiber-plan.md); its status section lists
+what remains.
 
 The `wasmtime/rr` feature records core Wasm execution for a whole
 store and replays it with a top-level driver of independent Wasm activations.
 Recording includes core and component execution, object construction, and
 startup. Components replay as their constituent core modules; replay does not
-reconstruct the component runtime or require a component linker. Snapshot-ready
-fiber images remain implementation work. Reversible guest debugging is an
-intended consumer of this design; its current runtime guard is temporary.
+reconstruct the component runtime or require a component linker. Suspended
+replay activations contain no Rust frames, and the fiber library can snapshot
+and restore them; whole-store checkpoints remain implementation work.
+Reversible guest debugging is an intended consumer of this design; its current
+runtime guard is temporary.
 
 The entrypoints are `Store::start_recording()`,
 `Store::finish_recording() -> Result<rr::Trace>`, and
 `Store::replay(&rr::Trace).await -> Result<rr::Replay>`. An engine uses
 `Config::rr(RRConfig::Recording)` or `Config::rr(RRConfig::Replaying)`.
 Recording can use synchronous or asynchronous calls; replay always uses fibers.
-The feature does not require component-model support.
+The feature does not require component-model support. Replay requires a
+native (non-Pulley) compilation target and a compiler, and is not supported
+on Windows, under Miri, or with AddressSanitizer: see below.
 
 ```rust,ignore
 // Recording begins with an empty store, before imports or instances exist.
@@ -126,24 +130,60 @@ supported contract. A pointer obtained through a tracked guard may be used
 only within the guard's borrowing rules. Shared/external concurrent writes
 cannot be represented by the current serial trace.
 
-The replay driver owns all activations and resumes one at a time. A guest call
-to a host import yields before constructing `Caller`, entering the host GC
-scope, or invoking the host closure/future. The driver matches `EnterHost`,
-applies memory effects, and starts callbacks on separate fibers. `LeaveHost`
-decodes results directly into the parked activation's array-call slots and
-resumes it. These slots are treated as potentially uninitialized storage.
-The entry value buffers belong to the driver, with stable addresses for the
-entire activation lifetime. Suspended entry/host-boundary frames don't own
-these allocations; the driver reuses scratch storage for comparisons. Guest
-return values and traps are checked against the trace; a correctly reproduced
-guest trap is a successful replay.
+The replay driver owns all activations and resumes one at a time. Each guest
+activation runs on a raw fiber (`wasmtime_fiber::RawFiber`) whose stack, while
+suspended, holds only generated code and the fiber library's audited assembly:
+
+```text
+fiber start (asm) -> ReplayStart -> array-to-Wasm -> guest
+    -> Wasm-to-array -> ReplayHostCall -> fiber switch (asm)
+```
+
+`ReplayStart` and `ReplayHostCall` are signature-independent trampolines
+(`FuncKey`s of their own) compiled into an otherwise empty module when replay
+starts; that module keeps their code alive. Replay host stubs are typed
+`VMArrayCallHostFuncContext`s whose array-call entry is `ReplayHostCall`, so
+a guest call to a host import never enters Rust: the trampoline publishes the
+callee and its array-call buffer in the activation's `VMReplayControl` and
+calls the fiber switch routine directly. Each activation owns its control
+block at a fixed address; `VMStoreContext::replay_control` points at the
+running activation's. The driver identifies and validates the callee, matches
+`EnterHost`, applies memory effects, and starts callbacks as separate
+activations. `LeaveHost` decodes results directly into the parked activation's
+array-call slots (treated as potentially uninitialized storage) and resumes
+it, or records the host error for the Wasm-to-array trampoline to raise.
+
+`ReplayStart` calls the activation's entry function with the array calling
+convention. A return or a trap (which lands in the array-to-Wasm trampoline)
+is reported by a final yield; the driver records the fiber as terminal and
+destroys it without resuming it. The entry value buffers belong to the driver,
+with stable addresses for the entire activation lifetime; the driver reuses
+scratch storage for comparisons. Guest return values and traps are checked
+against the trace; a correctly reproduced guest trap is a successful replay.
+
+State that an ordinary call keeps on the host stack is installed by the driver
+around each resumption instead: the `CallThreadState` that signal handlers and
+`raise` use, the activation's entry/exit registers and stack chain, its stack
+limit and guard range, and its protection-key mask. Synchronous libcalls,
+including trap raising, still run Rust code on the guest stack, but always
+finish before the next yield. After every yield the driver walks the
+suspended frame-pointer chain and fails replay if any frame is not generated
+code (x86-64 and aarch64). The driver accesses control blocks only through raw
+pointers and holds no borrow of them, or of a fiber stack, across a resume.
 
 Dropping the replay future, including after a decoding/divergence error,
-disposes activations in reverse order before freeing their buffers or releasing
-the store. Replay yields to the async executor after a bounded number of trace
-events. An activation that never reaches a boundary does not yield;
-deterministic interruption is not implemented. Failed or cancelled replay
-does not roll back guest state; retry with a fresh store.
+frees activations in reverse order before releasing the store; nothing runs or
+unwinds on their fibers. Replay yields to the async executor after a bounded
+number of trace events. An activation that never reaches a boundary does not
+yield; deterministic interruption is not implemented. Failed or cancelled
+replay does not roll back guest state; retry with a fresh store.
+
+Replay is limited to configurations where this invariant holds. Pulley
+interprets guest code in Rust, so replaying engines reject Pulley targets.
+Raw fibers require this crate's own stack switching, which Windows (OS fibers)
+and Miri lack; AddressSanitizer's fiber handshake would require Rust code at
+every switch. These report an error when replay starts rather than falling
+back to closure-based fibers.
 
 Current explicit restrictions include GC and typed function references in
 core signatures, GC-using modules, shared memories, guest stack switching, resource
@@ -158,52 +198,69 @@ error objects are represented by messages, not recreated.
 
 The remaining implementation work is:
 
-1. Complete the replay fiber image contract. `StoreFiber` keeps
-   `FiberResumeState` (saved TLS, stack limit, and protection-key state) and a
-   completion bit outside its stack. A future fiber snapshot primitive must
-   preserve or reconstruct these alongside the stack, with stable addresses.
-   Activation descriptors and entry arguments can be reconstructed from the
-   trace's call IDs and entry records, but their backing allocations must
-   survive while snapshots refer to them. Generic trap/catch-unwind entry and
-   exit frames also need an ownership audit and a minimal replay-specific path
-   where required. The current implementation is not safe to restore by
-   copying stack bytes alone. No snapshot API or stack-copy primitive is
-   introduced here. Guest memory/table/global snapshots remain separate from
-   control-stack restoration.
+1. Whole-store checkpoints. The fiber library snapshots and restores one raw
+   fiber's stack and register context (`RawFiber::snapshot`/`restore`) and
+   always resumes into the current host continuation; this is tested at the
+   fiber layer. It is not whole-store restoration. A replay checkpoint must
+   also capture, and restore consistently:
+
+   * the trace cursor, dynamic call IDs, the set of activations with their
+     lifecycle states, parked host calls, and pending startup/observed state;
+   * each activation's `VMReplayControl`, parked `VMStoreContext` state, and
+     protection-key mask, and the driver-owned entry/result buffers;
+   * guest store state: memories (including size), tables, globals, and
+     component instance flags.
+
+   Everything a snapshot can dereference must be live at the same address on
+   restore: module code, contexts, control blocks, value buffers, and fiber
+   stacks. The driver currently frees an activation once it completes, so a
+   checkpoint-capable driver must instead retain completed activations while
+   a checkpoint refers to them. Objects constructed after a checkpoint are not
+   removed by restoring bytes; restoring must truncate the identity tables to
+   the checkpoint's contents and leave the store-owned objects unreachable, or
+   reject restoring across construction. Checkpoints are taken between trace
+   events with no unmatched observation, so at a host call the `EnterHost`
+   record has been matched.
 
 2. Integrate async debug hooks with the driver as an observation/control path.
    Breakpoints, single-step stops, traps, and hostcall errors must pause the
    current replay activation without consuming or inventing host-call records.
-   The replay debug trampoline should yield a debug stop to the driver; the
-   driver should run/poll the async `DebugHandler` outside the guest fiber,
-   then resume that same activation. No arbitrary debugger future may remain
-   on a stack that is snapshotted. Borrowed error payloads need driver-owned
-   storage or a stable borrow of the parked activation. Exception events will
-   additionally require the currently unsupported GC/exception policy.
+   A debug stop is an asynchronous call: generated code must yield it through
+   the activation's control block (a new `VMReplayControl::reason`) like a
+   host call, and the driver must run/poll the async `DebugHandler` outside
+   the guest fiber, then resume that same activation. No debugger future or
+   Rust adapter may remain on the guest stack. Borrowed error payloads need
+   driver-owned storage. Trap stops are currently raised from the synchronous
+   `raise` libcall, which would need to yield instead of running the handler
+   in place. Exception events additionally require the currently unsupported
+   GC/exception policy.
 
    Debug inspection must explicitly select the parked activation and use its
-   saved stack/TLS context: the existing API walks the currently entered Wasm
-   stack and cannot simply be called after yielding without this adaptation.
-   Nested activations should be exposed in logical call order even though
-   their stacks are separate. The ordinary runtime context-switch discipline
-   must still apply across every await and executor thread migration.
+   saved stack metadata (its parked `VMStoreContext` state): the existing API
+   walks the currently entered Wasm stack and cannot simply be called after
+   yielding. Nested activations should be exposed in logical call order even
+   though their stacks are separate.
 
-   A debug stop can occur between trace events, so a snapshot checkpoint must
-   preserve that paused PC and the cursor of the next expected event. At a
-   host stop, matching the observed host call must precede a checkpoint.
+   A debug stop can occur between trace events, so a checkpoint there must
+   also preserve the paused PC and the cursor of the next expected event.
    Restoring should discard any in-progress debugger future and produce a
    fresh stop notification. Breakpoint configuration and debugger/controller
    state are outside the reproduced execution. Read-only inspection can
    continue replay unchanged; state edits and debugger-invoked guest calls
-   need an explicit fork/new-recording policy (or rejection), since silently
-   modifying state would invalidate deterministic replay. Tests must cover
+   need an explicit fork/new-recording policy (or rejection). Tests must cover
    async hook yields, nested activations, changing breakpoints, cancellation,
-   trap stops, and eventually repeated backward/forward restoration. Remove
-   the temporary debug guard when this path and its inspection semantics are
-   implemented, not merely when generic async hooks can be polled.
+   trap stops, and repeated backward/forward restoration. Remove the temporary
+   debug guard when this path and its inspection semantics are implemented.
 
-3. Specify allocation failure and deterministic interruption behavior, extend
-   backend/platform coverage, and measure append overhead and trace volume.
+3. Ordinary (non-replay) asynchronous execution does not use raw fibers. To
+   participate in snapshots, asynchronous host work would run on an owned
+   child fiber whose Rust frames are never copied as guest snapshots;
+   ownership, cancellation, nested guest entry, and teardown of that child
+   are not yet defined.
+
+4. Specify allocation failure and deterministic interruption behavior, extend
+   platform coverage (Windows, sanitizers), verify suspended stacks on the
+   remaining architectures, and measure append overhead and trace volume.
 
 The integration tests are in `crates/wasmtime/tests/record_replay.rs`. They
 cover nested callbacks, private table callbacks and Linker imports, memory
@@ -215,9 +272,15 @@ calls and traps, imported host objects, component strings and post-return,
 resource destructors, cross-component transcoding, concurrent activations,
 asynchronous canonical callbacks and lowering, future transfers, subtask
 cancellation, stream wait results, and function references across boundaries.
+Further tests cover trapping and failing activations that finish by yielding,
+the rejection of Pulley, and compiling the replay trampolines for each native
+target. Raw fiber lifecycle and snapshots are tested in
+`crates/fiber/src/raw.rs`.
 
 ```sh
+cargo test -p wasmtime-internal-fiber
 cargo test -p wasmtime --features rr --test record_replay
+cargo test -p wasmtime --features rr,all-arch,pulley --test record_replay replay_
 cargo test -p wasmtime --release --no-default-features \
   --features cranelift,runtime,std,rr,wat,component-model-async --test record_replay
 cargo check -p wasmtime --no-default-features --features runtime,rr

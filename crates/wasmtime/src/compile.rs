@@ -88,7 +88,10 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
     prepare_translation(engine, compiler, &mut translation, &mut types);
     let functions = mem::take(&mut translation.function_body_inputs);
 
-    let compile_inputs = CompileInputs::for_module(&types, &translation, functions);
+    let mut compile_inputs = CompileInputs::for_module(&types, &translation, functions);
+    if tunables.replaying {
+        compile_inputs.push_replay_trampolines(&types);
+    }
     let unlinked_compile_outputs = compile_inputs.compile(engine, &types)?;
     let PreLinkOutput {
         needs_gc_heap,
@@ -315,6 +318,28 @@ impl<'a> CompileInputs<'a> {
         ret.collect_inputs_in_translations(types, [(module_index, translation, functions)]);
 
         ret
+    }
+
+    /// Add the signature-independent trampolines used by replay activations.
+    fn push_replay_trampolines(&mut self, types: &'a ModuleTypesBuilder) {
+        for (key, symbol) in [
+            (FuncKey::ReplayStart, "replay_start_trampoline"),
+            (FuncKey::ReplayHostCall, "replay_host_call_trampoline"),
+        ] {
+            self.push_input(move |compiler| {
+                let function = compiler
+                    .compile_trampoline(None, key, types, symbol)
+                    .with_context(|| format!("failed to compile: {symbol}"))?;
+                Ok(CompileOutput {
+                    key,
+                    function,
+                    symbol: symbol.to_string(),
+                    start_srcloc: FilePos::default(),
+                    translation: None,
+                    func_body: None,
+                })
+            });
+        }
     }
 
     /// Create a `CompileInputs` for a component.
@@ -968,7 +993,9 @@ fn is_inlining_function(key: FuncKey) -> bool {
         | FuncKey::WasmToArrayTrampoline(..)
         | FuncKey::WasmToBuiltinTrampoline(..)
         | FuncKey::PatchableToBuiltinTrampoline(..)
-        | FuncKey::ModuleStartup(..) => false,
+        | FuncKey::ModuleStartup(..)
+        | FuncKey::ReplayStart
+        | FuncKey::ReplayHostCall => false,
         FuncKey::ComponentTrampoline(..) | FuncKey::ResourceDropTrampoline => false,
 
         FuncKey::PulleyHostCall(_) => {

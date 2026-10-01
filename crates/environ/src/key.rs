@@ -50,6 +50,9 @@ pub enum FuncKeyKind {
     /// Initialization function for a module, such as initializing "complicated"
     /// globals and passive element segments.
     ModuleStartup = FuncKey::new_kind(0b1001),
+
+    /// A trampoline used by record/replay's guest activations.
+    ReplayTrampoline = FuncKey::new_kind(0b1010),
 }
 
 impl From<FuncKeyKind> for u32 {
@@ -78,6 +81,7 @@ impl FuncKeyKind {
             }
             x if x == Self::PulleyHostCall.into() => Self::PulleyHostCall,
             x if x == Self::ModuleStartup.into() => Self::ModuleStartup,
+            x if x == Self::ReplayTrampoline.into() => Self::ReplayTrampoline,
 
             #[cfg(feature = "component-model")]
             x if x == Self::ComponentTrampoline.into() => Self::ComponentTrampoline,
@@ -136,7 +140,8 @@ impl FuncKeyNamespace {
             FuncKeyKind::WasmToArrayTrampoline
             | FuncKeyKind::WasmToBuiltinTrampoline
             | FuncKeyKind::PatchableToBuiltinTrampoline
-            | FuncKeyKind::PulleyHostCall => {
+            | FuncKeyKind::PulleyHostCall
+            | FuncKeyKind::ReplayTrampoline => {
                 assert_eq!(raw & FuncKey::MODULE_MASK, 0);
                 Self(raw)
             }
@@ -267,6 +272,20 @@ pub enum FuncKey {
     /// This function has the `Abi` specified and will initialize the module
     /// specified.
     ModuleStartup(Abi, StaticModuleIndex),
+
+    /// The entry point of a replay activation's raw fiber.
+    ///
+    /// It calls the activation's entry function with the array calling
+    /// convention and then performs the activation's final yield. It is
+    /// signature-independent and never returns. See `VMReplayControl`.
+    ReplayStart,
+
+    /// The array-call implementation of every host function during replay.
+    ///
+    /// It publishes the call to the activation's `VMReplayControl` and yields
+    /// to the replay driver, which supplies the recorded results. It is
+    /// signature-independent.
+    ReplayHostCall,
 }
 
 impl Ord for FuncKey {
@@ -362,6 +381,8 @@ impl FuncKey {
                 let index = abi.into_raw();
                 (namespace, index)
             }
+            FuncKey::ReplayStart => (FuncKeyKind::ReplayTrampoline.into_raw(), 0),
+            FuncKey::ReplayHostCall => (FuncKeyKind::ReplayTrampoline.into_raw(), 1),
         };
         (FuncKeyNamespace(namespace), FuncKeyIndex(index))
     }
@@ -397,6 +418,9 @@ impl FuncKey {
             #[cfg(feature = "component-model")]
             FuncKey::UnsafeIntrinsic(abi, _) => abi,
             FuncKey::ModuleStartup(abi, _) => abi,
+            // The start trampoline has its own C signature, but like the
+            // array ABI it is only called from the host.
+            FuncKey::ReplayStart | FuncKey::ReplayHostCall => Abi::Array,
         }
     }
 
@@ -488,6 +512,14 @@ impl FuncKey {
                 let module = StaticModuleIndex::from_u32(a & Self::MODULE_MASK);
                 let abi = Abi::from_raw(b);
                 Self::ModuleStartup(abi, module)
+            }
+            FuncKeyKind::ReplayTrampoline => {
+                assert_eq!(a & Self::MODULE_MASK, 0);
+                match b {
+                    0 => Self::ReplayStart,
+                    1 => Self::ReplayHostCall,
+                    _ => panic!("invalid replay trampoline index: {b}"),
+                }
             }
         }
     }
@@ -589,11 +621,30 @@ impl FuncKey {
             Self::WasmToArrayTrampoline(..)
             | Self::WasmToBuiltinTrampoline(..)
             | Self::PatchableToBuiltinTrampoline(..)
-            | Self::PulleyHostCall(..) => true,
+            | Self::PulleyHostCall(..)
+            | Self::ReplayStart
+            | Self::ReplayHostCall => true,
             #[cfg(feature = "component-model")]
             Self::ComponentTrampoline(..)
             | Self::ResourceDropTrampoline
             | Self::UnsafeIntrinsic(..) => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_trampoline_keys_round_trip() {
+        for key in [FuncKey::ReplayStart, FuncKey::ReplayHostCall] {
+            let (namespace, index) = key.into_raw_parts();
+            assert_eq!(FuncKey::from_raw_parts(namespace, index), key);
+            assert_eq!(FuncKey::from_raw_u64(key.into_raw_u64()), key);
+            assert_eq!(key.kind(), FuncKeyKind::ReplayTrampoline);
+            assert!(key.is_store_invariant());
+        }
+        assert!(FuncKey::ReplayStart < FuncKey::ReplayHostCall);
     }
 }

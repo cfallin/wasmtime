@@ -20,3 +20,6 @@ unsafe extern "C" {
 
     pub(crate) fn wasmtime_fiber_switch(top_of_stack: *mut u8);
 }
+
+// Raw fibers call the embedder's routine directly; there is no Rust wrapper.
+pub(crate) use self::wasmtime_fiber_switch as wasmtime_fiber_switch_;

@@ -18,6 +18,9 @@ use core::marker::PhantomData;
 use core::ops::Range;
 use wasmtime_environ::error::Error;
 
+mod raw;
+pub use raw::{RawFiber, RawFiberEntry, RawFiberSnapshot, RawFiberState};
+
 cfg_select! {
     not(feature = "std") => {
         mod nostd;

@@ -1,21 +1,101 @@
 //! The only driver of replay activations. Host boundaries yield control here;
 //! no host callback recursively runs another activation.
 //!
-//! This first runner uses StoreFiber for its TLS/trap/stack-limit discipline.
-//! It is NOT yet stack-copyable: StoreFiber's resume state and completion bit,
-//! must be included in a replay activation image before implementing snapshots.
-//! Value buffers belong to the driver; suspended entry and exit frames borrow
-//! them and do not own allocations.
+//! Each guest activation runs on a raw fiber whose only frames, whenever it is
+//! suspended, are generated code and the fiber library's audited switch and
+//! start routines:
+//!
+//! ```text
+//! fiber start (asm) -> ReplayStart -> array-to-Wasm -> guest ...
+//!     -> Wasm-to-array -> ReplayHostCall -> fiber switch (asm)
+//! ```
+//!
+//! The activation's generated code communicates with this driver only through
+//! its `VMReplayControl`. A guest return or trap is reported by a final yield
+//! from `ReplayStart`, after which the fiber is destroyed without resuming it.
+//! Runtime state that an ordinary call keeps on the host stack, such as the
+//! `CallThreadState` and the store's entry/exit registers, is installed by
+//! this driver around each resumption instead. Value buffers belong to the
+//! driver; suspended trampolines only borrow them.
 
 use super::*;
 use crate::StoreContextMut;
-use crate::runtime::fiber::{self, StoreFiber, StoreFiberYield};
-use crate::runtime::vm::{SendSyncPtr, VMArrayCallHostFuncContext, VMOpaqueContext};
+use crate::runtime::func::{EntryStoreContext, ParkedStoreContext};
+use crate::runtime::vm::mpk::{self, ProtectionMask};
+use crate::runtime::vm::{
+    SendSyncPtr, VMArrayCallHostFuncContext, VMArrayCallNative, VMCommonStackInformation,
+    VMOpaqueContext, VMReplayControl, VmPtr,
+};
 use core::mem::MaybeUninit;
-use core::task::{Context, Poll};
+use core::task::Poll;
+use wasmtime_environ::{FuncKey, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED};
+use wasmtime_fiber::RawFiber;
 
+/// The generated code that replay activations run. It is compiled into an
+/// otherwise empty module, which keeps it alive.
+pub(super) struct Trampolines {
+    module: crate::Module,
+    start: SendSyncPtr<u8>,
+    host_call: SendSyncPtr<u8>,
+}
+
+impl Trampolines {
+    fn new(engine: &crate::Engine) -> Result<Self> {
+        ensure!(
+            RawFiber::is_supported(),
+            "replay is not supported on this platform"
+        );
+        #[cfg(any(feature = "cranelift", feature = "winch"))]
+        {
+            let module = crate::Module::new(engine, b"\0asm\x01\0\0\0")?;
+            let code = module.compiled_module();
+            let get = |key| {
+                code.replay_trampoline(key)
+                    .map(SendSyncPtr::new)
+                    .ok_or_else(|| format_err!("engine is not configured for replay"))
+            };
+            Ok(Trampolines {
+                start: get(FuncKey::ReplayStart)?,
+                host_call: get(FuncKey::ReplayHostCall)?,
+                module,
+            })
+        }
+        #[cfg(not(any(feature = "cranelift", feature = "winch")))]
+        {
+            let _ = engine;
+            bail!("replay requires a compiler")
+        }
+    }
+
+    /// Creates a replay stub for a recorded host function. Its array-call
+    /// entry is the generated host-call trampoline.
+    pub(super) fn host_stub(&self, store: &mut StoreOpaque, ty: crate::FuncType) -> Result<Func> {
+        // SAFETY: the host-call trampoline has the array calling convention
+        // for every signature, and the stub keeps the module owning it alive.
+        unsafe {
+            Func::rr_replay_stub(
+                store,
+                ty,
+                core::mem::transmute::<*mut u8, VMArrayCallNative>(self.host_call.as_ptr()),
+                try_new::<Box<_>>(self.module.clone())?,
+            )
+        }
+    }
+}
+
+/// A guest activation and everything its suspended fiber refers to. All of
+/// it has a stable address until the activation is disposed.
 struct Activation {
-    fiber: StoreFiber<'static>,
+    fiber: Option<RawFiber>,
+    // An owned allocation (from `Box`). The fiber's generated code writes to
+    // it while running, so the driver only accesses it through raw pointers
+    // and never holds a reference across a resume.
+    control: SendSyncPtr<VMReplayControl>,
+    // The activation's `VMStoreContext` state while it is not running.
+    context: ParkedStoreContext,
+    // The stack-switching information `context.stack_chain` points to.
+    _stack: Box<VMCommonStackInformation>,
+    mpk: Option<ProtectionMask>,
     func: usize,
     call: usize,
     host: Option<HostCall>,
@@ -23,9 +103,26 @@ struct Activation {
     values: Vec<ValRaw>,
 }
 
+// SAFETY: the raw pointers in an activation only refer to its own boxed
+// storage, its fiber stack, and code and contexts rooted in the store that
+// the driver exclusively borrows. No thread-local state refers to the fiber
+// while it is suspended, and only the driver resumes it.
+unsafe impl Send for Activation {}
+
+impl Activation {
+    fn dispose(mut self, store: &mut StoreOpaque) {
+        // Nothing on a raw fiber's stack needs to be run or unwound.
+        if let Some(fiber) = self.fiber.take() {
+            store.deallocate_fiber_stack(fiber.into_stack());
+        }
+        // SAFETY: the fiber that referred to the control block is gone.
+        drop(unsafe { Box::from_raw(self.control.as_ptr()) });
+    }
+}
+
 /// A borrowed array-call buffer on a suspended activation's stack. Only the
 /// driver accesses it, and only before resuming or disposing that activation.
-pub(super) struct HostCall {
+struct HostCall {
     func: usize,
     call: usize,
     values: SendSyncPtr<[MaybeUninit<ValRaw>]>,
@@ -60,14 +157,10 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
         reader.take(codec::MAGIC.len())? == codec::MAGIC,
         "unsupported trace version"
     );
+    let trampolines = Trampolines::new(store.engine())?;
     store.rr.session = Some(try_new::<Box<_>>(Session {
         objects,
-        mode: Mode::Replaying {
-            yielded: None,
-            response: None,
-            completed: None,
-            entering: false,
-        },
+        mode: Mode::Replaying { trampolines },
         pending: Vec::new(),
         failure: None,
     })?);
@@ -83,7 +176,7 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
     core::future::poll_fn(|cx| {
         // Give the executor a chance to cancel long traces between events.
         for _ in 0..256 {
-            match driver.step(cx) {
+            match driver.step() {
                 Ok(true) => return Poll::Ready(Ok(())),
                 Ok(false) => {}
                 Err(e) => {
@@ -104,7 +197,7 @@ pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Re
 }
 
 impl<T: 'static> Driver<'_, T> {
-    fn step(&mut self, cx: &mut Context<'_>) -> Result<bool> {
+    fn step(&mut self) -> Result<bool> {
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
             ensure!(
@@ -175,48 +268,13 @@ impl<T: 'static> Driver<'_, T> {
                     session.objects.decode_ref(self.store, id)
                 })?;
                 body.end()?;
-                let func = bound.func;
+                let func = bound.func.vm_func_ref(self.store);
                 self.activations
                     .try_reserve(1)
                     .map_err(|_| OutOfMemory::new(core::mem::size_of::<Activation>()))?;
-                let raw = SendSyncPtr::from(NonNull::from(values.as_mut_slice()));
-                // SAFETY: the driver owns the argument buffer, which is never
-                // resized or released until the fiber finishes or is disposed.
-                // Driver exclusively borrows this store until
-                // Drop disposes every fiber, including on error/cancellation.
-                // T is Send at the public entrypoint; no user T is touched by
-                // the replay boundary trampoline in any case.
-                let fiber = unsafe {
-                    fiber::make_fiber_unchecked(self.store, move |store| {
-                        let func_ref = func.vm_func_ref(store);
-                        let result = Func::call_unchecked_raw(
-                            &mut StoreContextMut(store),
-                            func_ref,
-                            raw.as_non_null(),
-                        );
-                        let Mode::Replaying { completed, .. } =
-                            &mut store.rr.session.as_mut().unwrap().mode
-                        else {
-                            unreachable!()
-                        };
-                        *completed = Some(result);
-                        Ok(())
-                    })?
-                };
-                self.activations.push(Activation {
-                    fiber,
-                    func: id,
-                    call,
-                    host: None,
-                    values,
-                });
-                let Mode::Replaying { entering, .. } =
-                    &mut self.store.rr.session.as_mut().unwrap().mode
-                else {
-                    unreachable!()
-                };
-                *entering = true;
-                self.resume(self.activations.len() - 1, cx)?;
+                let activation = self.activate(func, id, call, values)?;
+                self.activations.push(activation);
+                self.resume(self.activations.len() - 1, None)?;
             }
             codec::ENTER_HOST => {
                 let Some(Observed::Host(activation, mut call)) = self.observed.take() else {
@@ -286,12 +344,7 @@ impl<T: 'static> Driver<'_, T> {
                 let outcome = body.outcome(&bound.results, values, |id| {
                     session.objects.decode_ref(self.store, id)
                 })?;
-                let session = self.store.rr.session.as_mut().unwrap();
-                let Mode::Replaying { response, .. } = &mut session.mode else {
-                    unreachable!()
-                };
-                *response = Some(outcome);
-                self.resume(index, cx)?;
+                self.resume(index, outcome.err())?;
             }
             codec::LEAVE_WASM => {
                 let Some(Observed::Complete(actual_call, result)) = self.observed.take() else {
@@ -331,7 +384,7 @@ impl<T: 'static> Driver<'_, T> {
                     body.bytes == &self.scratch[5..],
                     "guest return values or trap diverged"
                 );
-                self.activations.remove(index);
+                self.activations.remove(index).dispose(self.store);
             }
             codec::WRITE => {
                 ensure!(
@@ -401,33 +454,174 @@ impl<T: 'static> Driver<'_, T> {
         Ok(false)
     }
 
-    fn resume(&mut self, index: usize, cx: &mut Context<'_>) -> Result<()> {
+    /// Creates the raw fiber and state for a new activation of `func`. Its
+    /// arguments are in `values`, which also receives its results.
+    fn activate(
+        &mut self,
+        func: NonNull<VMFuncRef>,
+        id: usize,
+        call: usize,
+        mut values: Vec<ValRaw>,
+    ) -> Result<Activation> {
+        let store: &mut StoreOpaque = self.store;
+        let Mode::Replaying { trampolines } = &store.rr.session.as_ref().unwrap().mode else {
+            unreachable!()
+        };
+        let start = trampolines.start.as_ptr();
+        let control = try_new::<Box<_>>(VMReplayControl {
+            switch: VmPtr::from(NonNull::new(RawFiber::switch_routine() as *mut u8).unwrap()),
+            switch_arg: VmPtr::from(NonNull::<u8>::dangling()),
+            entry: VmPtr::from(func),
+            entry_caller: VmPtr::from(VMOpaqueContext::from_vmcontext(store.default_caller())),
+            entry_values: VmPtr::from(NonNull::from(values.as_mut_slice()).cast()),
+            entry_values_len: values.len(),
+            reason: 0,
+            host_succeeded: 0,
+            host_callee: None,
+            host_values: None,
+            host_values_len: 0,
+        })?;
+        let stack = store.allocate_fiber_stack()?;
+        let control = SendSyncPtr::new(NonNull::from(Box::leak(control)));
+        // SAFETY: the start trampoline follows the raw fiber entry contract,
+        // and `control` outlives the fiber (see `Activation::dispose`).
+        let fiber = unsafe {
+            RawFiber::new(
+                stack,
+                core::mem::transmute::<*mut u8, wasmtime_fiber::RawFiberEntry>(start),
+                control.as_ptr().cast(),
+            )
+        };
+        let fiber = match fiber {
+            Ok(fiber) => fiber,
+            Err((e, stack)) => {
+                store.deallocate_fiber_stack(stack);
+                // SAFETY: nothing else refers to the control block.
+                drop(unsafe { Box::from_raw(control.as_ptr()) });
+                return Err(e);
+            }
+        };
+        // SAFETY: the fiber has not run, so the control block is unshared.
+        unsafe {
+            (*control.as_ptr()).switch_arg = VmPtr::from(NonNull::new(fiber.switch_arg()).unwrap());
+        }
+
+        // Like an ordinary async call, Wasm may use `max_wasm_stack` bytes of
+        // the fiber's stack and host libcalls the remainder.
+        let range = fiber.stack().range().unwrap();
+        let stack_limit = range
+            .end
+            .saturating_sub(store.engine().config().max_wasm_stack)
+            .max(range.start);
+        let mut stack_info = try_new::<Box<_>>(VMCommonStackInformation::running_default())?;
+        let context = ParkedStoreContext::new(stack_limit, NonNull::from(&mut *stack_info));
+        Ok(Activation {
+            fiber: Some(fiber),
+            control,
+            context,
+            _stack: stack_info,
+            mpk: store.has_pkey().then(ProtectionMask::all),
+            func: id,
+            call,
+            host: None,
+            values,
+        })
+    }
+
+    /// Runs the activation at `index` until its next yield and records what it
+    /// yielded for. A `pending` error resumes a parked host call as failed.
+    fn resume(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
+        let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
-        match fiber::resume_replay_fiber(self.store, &mut activation.fiber, cx) {
-            Ok(result) => {
-                result?;
-                let Mode::Replaying { completed, .. } =
-                    &mut self.store.rr.session.as_mut().unwrap().mode
-                else {
-                    unreachable!()
+        let fiber = activation.fiber.as_mut().unwrap();
+        let control = activation.control.as_ptr();
+        // SAFETY: the activation is not running.
+        unsafe { (*control).host_succeeded = u32::from(pending.is_none()) };
+
+        // Install this activation's runtime state. Everything installed here
+        // is restored before returning, so nothing refers to the fiber while
+        // it is suspended.
+        let cx = store.vm_store_context_mut();
+        cx.replay_control = Some(VmPtr::from(activation.control.as_non_null()));
+        let guard_range = core::mem::replace(
+            &mut cx.async_guard_range,
+            fiber
+                .stack()
+                .guard_range()
+                .unwrap_or(core::ptr::null_mut()..core::ptr::null_mut()),
+        );
+        let mpk = activation.mpk.map(|mask| {
+            let current = mpk::current_mask();
+            mpk::allow(mask);
+            current
+        });
+        let mut entry = EntryStoreContext::resume_parked(store, &activation.context);
+        let result = crate::runtime::vm::catch_replay_traps(store, &mut entry, pending, || {
+            // SAFETY: the fiber's control block and buffers are live, and the
+            // driver installed its runtime state above.
+            let resumed = unsafe { fiber.resume() };
+            debug_assert!(resumed.is_ok(), "replay resumed a finished activation");
+            // SAFETY: the activation has yielded.
+            unsafe { (*control).reason != VM_REPLAY_TRAPPED }
+        });
+        activation.context = entry.park();
+        drop(entry);
+        if let Some(mask) = mpk {
+            activation.mpk = Some(mpk::current_mask());
+            mpk::allow(mask);
+        }
+        let cx = store.vm_store_context_mut();
+        cx.async_guard_range = guard_range;
+        cx.replay_control = None;
+        #[cfg(feature = "std")]
+        crate::runtime::vm::AsyncWasmCallState::assert_current_state_not_in_range(
+            fiber.stack().range().unwrap(),
+        );
+        verify_suspended_stack(fiber)?;
+
+        // SAFETY: the activation has yielded, and this reference does not
+        // outlive this function.
+        let control = unsafe { &*control };
+        match control.reason {
+            VM_REPLAY_HOST_CALL => {
+                let callee = control.host_callee.unwrap().as_non_null();
+                let values = control.host_values.unwrap().as_non_null();
+                let values_len = control.host_values_len;
+                // SAFETY: replay host calls are only reachable through stubs
+                // whose context is a `VMArrayCallHostFuncContext`.
+                let func = unsafe {
+                    NonNull::from(
+                        &VMArrayCallHostFuncContext::from_opaque(callee)
+                            .as_ref()
+                            .func_ref,
+                    )
                 };
-                let result = completed
-                    .take()
-                    .ok_or_else(|| format_err!("replay activation did not report completion"))?;
+                let objects = &store.rr.session.as_ref().unwrap().objects;
+                let id = objects.find_func(func)?;
+                let bound = &objects.funcs[id];
+                ensure!(bound.host, "replay boundary is not a host function");
+                ensure!(
+                    values_len >= bound.params.len().max(bound.results.len()),
+                    "invalid replay value storage"
+                );
+                let values = SendSyncPtr::from(NonNull::slice_from_raw_parts(
+                    values.cast::<MaybeUninit<ValRaw>>(),
+                    values_len,
+                ));
+                self.observed = Some(Observed::Host(
+                    activation.call,
+                    HostCall {
+                        func: id,
+                        call: 0,
+                        values,
+                    },
+                ));
+            }
+            VM_REPLAY_RETURNED | VM_REPLAY_TRAPPED => {
+                fiber.finish()?;
                 self.observed = Some(Observed::Complete(activation.call, result));
             }
-            Err(StoreFiberYield::ReplayHost) => {
-                let Mode::Replaying { yielded, .. } =
-                    &mut self.store.rr.session.as_mut().unwrap().mode
-                else {
-                    unreachable!()
-                };
-                let call = yielded.take().ok_or_else(|| {
-                    format_err!("replay activation did not report its host boundary")
-                })?;
-                self.observed = Some(Observed::Host(activation.call, call));
-            }
-            Err(_) => bail!("unsupported suspension during replay"),
+            reason => bail!("replay activation yielded with unknown reason {reason}"),
         }
         Ok(())
     }
@@ -435,10 +629,11 @@ impl<T: 'static> Driver<'_, T> {
 
 impl<T: 'static> Drop for Driver<'_, T> {
     fn drop(&mut self) {
-        // Unwind in reverse activation order while the store and session still
-        // exist. No original host implementation runs during cancellation.
-        while let Some(mut activation) = self.activations.pop() {
-            activation.fiber.dispose(self.store);
+        // Free activations in reverse order while the store and session still
+        // exist. Nothing runs on their fibers, and no original host
+        // implementation runs during cancellation.
+        while let Some(activation) = self.activations.pop() {
+            activation.dispose(self.store);
         }
         self.store.rr.session = None;
     }
@@ -454,55 +649,44 @@ fn value_slots(bound: &RecordedFunc) -> Result<Vec<ValRaw>> {
     Ok(values)
 }
 
-/// The replay-only host boundary. The caller guarantees the context/signature
-/// and raw slots came from a live, correctly typed Wasm-to-host trampoline.
-pub(crate) unsafe fn host_call(
-    store: &mut StoreOpaque,
-    callee: NonNull<VMOpaqueContext>,
-    args: NonNull<ValRaw>,
-    args_len: usize,
-) -> Result<()> {
-    // SAFETY: this is the context type of the calling array-call trampoline.
-    let func = unsafe {
-        NonNull::from(
-            &VMArrayCallHostFuncContext::from_opaque(callee)
-                .as_ref()
-                .func_ref,
-        )
+/// Checks that a suspended activation's stack contains only generated code,
+/// beneath the switch routine and above the fiber's start routine. This walks
+/// the frame-pointer chain, which all generated code maintains.
+#[cfg(has_host_compiler_backend)]
+fn verify_suspended_stack(fiber: &RawFiber) -> Result<()> {
+    use crate::runtime::vm::Unwind;
+    let Some((mut pc, mut fp)) = fiber.suspended_frame() else {
+        return Ok(());
     };
-    let session = store.rr.session.as_ref().unwrap();
-    let id = session.objects.find_func(func)?;
-    let bound = &session.objects.funcs[id];
-    ensure!(bound.host, "replay boundary is not a host function");
-    ensure!(
-        args_len >= bound.params.len().max(bound.results.len()),
-        "invalid replay value storage"
-    );
-    let values = SendSyncPtr::from(NonNull::slice_from_raw_parts(
-        args.cast::<MaybeUninit<ValRaw>>(),
-        args_len,
-    ));
-    let Mode::Replaying { yielded, .. } = &mut store.rr.session.as_mut().unwrap().mode else {
-        unreachable!()
-    };
-    *yielded = Some(HostCall {
-        func: id,
-        call: 0,
-        values,
-    });
+    let range = fiber.stack().range().unwrap();
+    let unwind = &crate::runtime::vm::UnwindHost;
+    loop {
+        ensure!(
+            crate::module::lookup_code(pc).is_some(),
+            "replay activation suspended with a host frame at {pc:#x}"
+        );
+        ensure!(
+            range.contains(&fp),
+            "replay activation has an invalid frame chain"
+        );
+        // SAFETY: `fp` is a frame pointer of generated code on this stack.
+        let (older_pc, older_fp) = unsafe {
+            (
+                unwind.get_next_older_pc_from_fp(fp),
+                *(fp as *const usize).byte_add(unwind.next_older_fp_from_fp_offset()),
+            )
+        };
+        // The start trampoline's caller is the fiber's start routine, whose
+        // frame pointer is the initial one rather than a frame on the stack.
+        if !range.contains(&older_fp) || older_fp <= fp {
+            return Ok(());
+        }
+        (pc, fp) = (older_pc, older_fp);
+    }
+}
 
-    // No references into Store or its session survive this yield. The store
-    // itself is !Unpin, like the existing ReleaseStore suspension mechanism.
-    // This suspends directly, without a user future or callback on the stack.
-    store.with_blocking(|_, cx| cx.suspend(StoreFiberYield::ReplayHost))?;
-
-    let session = store.rr.session.as_mut().unwrap();
-    let Mode::Replaying { response, .. } = &mut session.mode else {
-        unreachable!()
-    };
-    // The driver has already filled result slots in this activation's array
-    // buffer. No result allocation or user-owned value lives in this frame.
-    response
-        .take()
-        .ok_or_else(|| format_err!("replay resumed without host results"))?
+// Replay requires native code, so there is nothing to verify.
+#[cfg(not(has_host_compiler_backend))]
+fn verify_suspended_stack(_: &RawFiber) -> Result<()> {
+    Ok(())
 }

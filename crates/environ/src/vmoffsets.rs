@@ -934,6 +934,15 @@ pub const VMCONTEXT_MAGIC: u32 = u32::from_le_bytes(*b"core");
 /// and double-checked on `VMArrayCallHostFuncContext::from_opaque`.
 pub const VM_ARRAY_CALL_HOST_FUNC_MAGIC: u32 = u32::from_le_bytes(*b"ACHF");
 
+/// `VMReplayControl::reason`: the activation is calling a host function.
+pub const VM_REPLAY_HOST_CALL: u32 = 1;
+
+/// `VMReplayControl::reason`: the activation's entry function returned.
+pub const VM_REPLAY_RETURNED: u32 = 2;
+
+/// `VMReplayControl::reason`: the activation's entry function trapped.
+pub const VM_REPLAY_TRAPPED: u32 = 3;
+
 #[cfg(test)]
 mod tests {
     use crate::vmoffsets::align;

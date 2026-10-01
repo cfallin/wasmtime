@@ -1652,6 +1652,91 @@ impl Drop for EntryStoreContext {
     }
 }
 
+/// The `VMStoreContext` state of a parked record/replay activation: the state
+/// that an `EntryStoreContext` saves around an ordinary call into Wasm.
+#[cfg(feature = "rr")]
+pub(crate) struct ParkedStoreContext {
+    stack_limit: usize,
+    last_wasm_exit_pc: usize,
+    last_wasm_exit_trampoline_fp: usize,
+    last_wasm_entry_fp: usize,
+    last_wasm_entry_sp: usize,
+    last_wasm_entry_trap_handler: usize,
+    stack_chain: VMStackChain,
+}
+
+#[cfg(feature = "rr")]
+impl ParkedStoreContext {
+    /// The state of an activation that has not yet entered Wasm.
+    pub(crate) fn new(stack_limit: usize, stack: NonNull<VMCommonStackInformation>) -> Self {
+        Self {
+            stack_limit,
+            last_wasm_exit_pc: 0,
+            last_wasm_exit_trampoline_fp: 0,
+            last_wasm_entry_fp: 0,
+            last_wasm_entry_sp: 0,
+            last_wasm_entry_trap_handler: 0,
+            stack_chain: VMStackChain::InitialStack(stack.as_ptr()),
+        }
+    }
+}
+
+#[cfg(feature = "rr")]
+impl EntryStoreContext {
+    /// Installs a parked activation's state in `store`. The returned value
+    /// restores the current state when dropped, like `enter_wasm`'s.
+    pub(crate) fn resume_parked(store: &mut StoreOpaque, parked: &ParkedStoreContext) -> Self {
+        let cx = store.vm_store_context();
+        // SAFETY: the store is exclusively borrowed, so nothing else accesses
+        // these fields, and they are all plain data.
+        unsafe {
+            Self {
+                stack_limit: Some(mem::replace(&mut *cx.stack_limit.get(), parked.stack_limit)),
+                last_wasm_exit_pc: mem::replace(
+                    &mut *cx.last_wasm_exit_pc.get(),
+                    parked.last_wasm_exit_pc,
+                ),
+                last_wasm_exit_trampoline_fp: mem::replace(
+                    &mut *cx.last_wasm_exit_trampoline_fp.get(),
+                    parked.last_wasm_exit_trampoline_fp,
+                ),
+                last_wasm_entry_fp: mem::replace(
+                    &mut *cx.last_wasm_entry_fp.get(),
+                    parked.last_wasm_entry_fp,
+                ),
+                last_wasm_entry_sp: mem::replace(
+                    &mut *cx.last_wasm_entry_sp.get(),
+                    parked.last_wasm_entry_sp,
+                ),
+                last_wasm_entry_trap_handler: mem::replace(
+                    &mut *cx.last_wasm_entry_trap_handler.get(),
+                    parked.last_wasm_entry_trap_handler,
+                ),
+                stack_chain: mem::replace(&mut *cx.stack_chain.get(), parked.stack_chain.clone()),
+                vm_store_context: cx,
+            }
+        }
+    }
+
+    /// Reads back the state of the activation installed by `resume_parked`
+    /// once it has yielded.
+    pub(crate) fn park(&self) -> ParkedStoreContext {
+        // SAFETY: see `resume_parked`.
+        unsafe {
+            let cx = &*self.vm_store_context;
+            ParkedStoreContext {
+                stack_limit: *cx.stack_limit.get(),
+                last_wasm_exit_pc: *cx.last_wasm_exit_pc.get(),
+                last_wasm_exit_trampoline_fp: *cx.last_wasm_exit_trampoline_fp.get(),
+                last_wasm_entry_fp: *cx.last_wasm_entry_fp.get(),
+                last_wasm_entry_sp: *cx.last_wasm_entry_sp.get(),
+                last_wasm_entry_trap_handler: *cx.last_wasm_entry_trap_handler.get(),
+                stack_chain: (*cx.stack_chain.get()).clone(),
+            }
+        }
+    }
+}
+
 /// A trait implemented for types which can be returned from closures passed to
 /// [`Func::wrap`] and friends.
 ///
@@ -2266,6 +2351,39 @@ impl core::fmt::Debug for HostFunc {
     }
 }
 
+#[cfg(feature = "rr")]
+impl Func {
+    /// Creates a host function whose array-call entry point is `array_call`,
+    /// with `host_state` owned by its context. This is used for replay stubs
+    /// implemented by generated code.
+    ///
+    /// # Safety
+    ///
+    /// `array_call` must implement `ty`'s signature with the array calling
+    /// convention and must remain valid while `host_state` is alive.
+    pub(crate) unsafe fn rr_replay_stub(
+        store: &mut StoreOpaque,
+        ty: FuncType,
+        array_call: vm::VMArrayCallNative,
+        host_state: Box<dyn core::any::Any + Send + Sync>,
+    ) -> Result<Func> {
+        let engine = store.engine().clone();
+        assert!(ty.comes_from_same_engine(&engine));
+        // SAFETY: the caller guarantees `array_call`'s validity; the context
+        // keeps the function's type registered.
+        let ctx = unsafe {
+            VMArrayCallHostFuncContext::new(
+                array_call,
+                ty.type_index(),
+                try_new::<Box<_>>((ty.into_registered_type(), host_state))?,
+            )?
+        };
+        let func = HostFunc::new_raw(&engine, ctx, Asyncness::No);
+        // SAFETY: the stub never accesses the store's `T`.
+        Ok(unsafe { func.into_func(store)? })
+    }
+}
+
 impl HostFunc {
     /// Requires that the signature in `ctx` is already registered
     /// within `Engine`, which is done by [`Self::vmctx_sync`] and
@@ -2384,21 +2502,6 @@ impl HostFunc {
         T: 'static,
     {
         let run = |store: &mut dyn crate::vm::VMStore, instance: InstanceId| {
-            #[cfg(feature = "rr")]
-            if store.store_opaque().rr.replaying() {
-                // Replay stops before constructing Caller, entering a GC scope,
-                // or invoking any user closure/future.
-                // SAFETY: this trampoline's contract establishes both the
-                // host context's kind and the signature/capacity of args.
-                return unsafe {
-                    crate::rr::replay::host_call(
-                        store.store_opaque_mut(),
-                        callee_vmctx,
-                        args,
-                        args_len,
-                    )
-                };
-            }
             // SAFETY: correct usage of this trampoline requires correct
             // ascription of `T`, so it's the caller's responsibility to line
             // this up.
