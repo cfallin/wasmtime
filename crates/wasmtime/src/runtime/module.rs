@@ -20,7 +20,7 @@ use std::{fs::File, path::Path};
 use wasmparser::{Parser, ValidPayload, Validator};
 use wasmtime_environ::{
     CompiledFunctionsTable, CompiledModuleInfo, EntityIndex, FuncKey, HostPtr, ModuleTypes,
-    ObjectKind, StaticModuleIndex, TypeTrace, VMOffsets, VMSharedTypeIndex, WasmChecksum,
+    ObjectKind, StaticModuleIndex, TypeTrace, VMOffsets, VMSharedTypeIndex,
 };
 mod registry;
 
@@ -170,9 +170,6 @@ struct ModuleInner {
 
     /// Runtime offset information for `VMContext`.
     offsets: VMOffsets<HostPtr>,
-
-    /// The checksum of the source binary from which this module was compiled.
-    checksum: WasmChecksum,
 }
 
 impl fmt::Debug for Module {
@@ -550,7 +547,6 @@ impl Module {
         index: Arc<CompiledFunctionsTable>,
         serializable: bool,
     ) -> Result<Self> {
-        let checksum = info.checksum;
         let module = CompiledModule::from_artifacts(code.clone(), info, index, engine.profiler())?;
 
         // Validate the module can be used with the current instance allocator.
@@ -570,7 +566,6 @@ impl Module {
                 #[cfg(any(feature = "cranelift", feature = "winch"))]
                 serializable,
                 offsets,
-                checksum,
             })?,
         })
     }
@@ -711,8 +706,9 @@ impl Module {
     /// available.
     ///
     /// Bytecode is only retained when the [`Engine`] was configured with
-    /// `guest-debug` support enabled (see [`Config::guest_debug`]). Returns
-    /// `None` when the module was compiled without that option.
+    /// guest debugging or record/replay enabled (see [`Config::guest_debug`]
+    /// and [`Config::rr`](crate::Config::rr)). Returns `None` when neither
+    /// option retained the bytecode.
     ///
     /// [`Config::guest_debug`]: crate::Config::guest_debug
     pub fn debug_bytecode(&self) -> Option<&[u8]> {
@@ -924,15 +920,6 @@ impl Module {
     /// Returns the [`Engine`] that this [`Module`] was compiled by.
     pub fn engine(&self) -> &Engine {
         &self.inner.engine
-    }
-
-    #[allow(
-        unused,
-        reason = "used only for verification with wasmtime `rr` feature \
-        and requires a lot of unnecessary gating across crates"
-    )]
-    pub(crate) fn checksum(&self) -> &WasmChecksum {
-        &self.inner.checksum
     }
 
     /// Returns a summary of the resources required to instantiate this

@@ -22,7 +22,7 @@ use wasmtime_environ::component::{
     GlobalInitializer, InstantiateModule, NameMapNoIntern, OptionsIndex, StaticModuleIndex,
     TrampolineIndex, TypeComponentIndex, TypeFuncIndex, UnsafeIntrinsic, VMComponentOffsets,
 };
-use wasmtime_environ::{Abi, CompiledFunctionsTable, FuncKey, TypeTrace, WasmChecksum};
+use wasmtime_environ::{Abi, CompiledFunctionsTable, FuncKey, TypeTrace};
 use wasmtime_environ::{FunctionLoc, HostPtr, ObjectKind, PrimaryMap};
 
 /// A compiled WebAssembly Component.
@@ -109,9 +109,6 @@ struct ComponentInner {
     /// `realloc`, to avoid the need to look up types in the registry and take
     /// locks when calling `realloc` via `TypedFunc::call_raw`.
     realloc_func_type: Arc<FuncType>,
-
-    /// The checksum of the source binary from which the module was compiled.
-    checksum: WasmChecksum,
 }
 
 impl fmt::Debug for Component {
@@ -439,7 +436,6 @@ impl Component {
             table: index,
             mut types,
             mut static_modules,
-            checksum,
         } = match artifacts {
             Some(artifacts) => artifacts,
             None => postcard::from_bytes(code_memory.wasmtime_info())?,
@@ -494,7 +490,6 @@ impl Component {
                 info,
                 index,
                 realloc_func_type,
-                checksum,
             }),
         })
     }
@@ -511,7 +506,7 @@ impl Component {
         &self.inner.static_modules[idx]
     }
 
-    #[cfg(any(feature = "profiling", feature = "debug"))]
+    #[cfg(any(feature = "profiling", feature = "debug", feature = "rr"))]
     pub(crate) fn static_modules(&self) -> impl Iterator<Item = &Module> {
         self.inner.static_modules.values()
     }
@@ -936,15 +931,6 @@ impl Component {
 
     pub(crate) fn realloc_func_ty(&self) -> &Arc<FuncType> {
         &self.inner.realloc_func_type
-    }
-
-    #[allow(
-        unused,
-        reason = "used only for verification with wasmtime `rr` feature \
-        and requires a lot of unnecessary gating across crates"
-    )]
-    pub(crate) fn checksum(&self) -> &WasmChecksum {
-        &self.inner.checksum
     }
 
     /// Returns the `Export::LiftedFunction` metadata associated with `export`.

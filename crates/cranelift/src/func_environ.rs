@@ -1948,7 +1948,15 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // If we statically know the imported function (e.g. this is a
         // component-to-component call where we statically know both components)
         // then we can avoid doing an indirect call.
-        match self.env.translation.known_imported_functions[callee_index].as_ref() {
+        // RR routes component builtins through store-local wrappers. A direct
+        // call or inline lowering would bypass the recorded boundary (and
+        // could also interpret the wrapper's host context as a component one).
+        let known = if self.env.tunables.recording {
+            None
+        } else {
+            self.env.translation.known_imported_functions[callee_index].as_ref()
+        };
+        match known {
             // The import is always a compile-time builtin intrinsic. Make a
             // direct call to that function (presumably it will eventually be
             // inlined).

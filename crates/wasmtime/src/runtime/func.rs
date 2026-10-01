@@ -1026,11 +1026,26 @@ impl Func {
         func_ref: NonNull<VMFuncRef>,
         params_and_returns: NonNull<[ValRaw]>,
     ) -> Result<()> {
+        #[cfg(feature = "rr")]
+        // SAFETY: the caller supplies initialized arguments of func_ref's type.
+        let rr = unsafe {
+            store
+                .0
+                .rr_enter(func_ref, params_and_returns.as_ptr().cast(), false)?
+        };
         // SAFETY: the safety of this function call is the same as the contract
         // of this function.
-        invoke_wasm_and_catch_traps(store, |caller, vm| unsafe {
+        let result = invoke_wasm_and_catch_traps(store, |caller, vm| unsafe {
             VMFuncRef::array_call(func_ref, vm, caller, params_and_returns)
-        })
+        });
+        #[cfg(feature = "rr")]
+        // SAFETY: successful array calls initialize the signature's results.
+        unsafe {
+            store
+                .0
+                .rr_leave(rr, params_and_returns.as_ptr().cast(), &result, false)?;
+        }
+        result
     }
 
     /// Converts the raw representation of a `funcref` into an `Option<Func>`
@@ -2369,6 +2384,21 @@ impl HostFunc {
         T: 'static,
     {
         let run = |store: &mut dyn crate::vm::VMStore, instance: InstanceId| {
+            #[cfg(feature = "rr")]
+            if store.store_opaque().rr.replaying() {
+                // Replay stops before constructing Caller, entering a GC scope,
+                // or invoking any user closure/future.
+                // SAFETY: this trampoline's contract establishes both the
+                // host context's kind and the signature/capacity of args.
+                return unsafe {
+                    crate::rr::replay::host_call(
+                        store.store_opaque_mut(),
+                        callee_vmctx,
+                        args,
+                        args_len,
+                    )
+                };
+            }
             // SAFETY: correct usage of this trampoline requires correct
             // ascription of `T`, so it's the caller's responsibility to line
             // this up.
@@ -2388,6 +2418,20 @@ impl HostFunc {
             let state = unsafe {
                 debug_assert!(state.is::<HostFuncState<F>>());
                 &*(state as *const _ as *const HostFuncState<F>)
+            };
+
+            #[cfg(feature = "rr")]
+            // SAFETY: callee_vmctx is the live host context, and args contains
+            // the initialized parameters specified by that context's type.
+            let rr = unsafe {
+                let ctx = VMArrayCallHostFuncContext::from_opaque(callee_vmctx);
+                if store.0.rr_guest_caller(instance) {
+                    store
+                        .0
+                        .rr_enter(NonNull::from(&ctx.as_ref().func_ref), args.as_ptr(), true)?
+                } else {
+                    None
+                }
             };
 
             let (gc_lifo_scope, ret) = {
@@ -2410,6 +2454,13 @@ impl HostFunc {
             };
 
             store.0.exit_gc_lifo_scope(gc_lifo_scope);
+
+            #[cfg(feature = "rr")]
+            // SAFETY: successful host functions initialize their results;
+            // unsuccessful ones do not cause rr_leave to read any slots.
+            unsafe {
+                store.0.rr_leave(rr, args.as_ptr(), &ret, true)?;
+            }
 
             ret
         };

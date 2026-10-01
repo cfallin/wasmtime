@@ -79,6 +79,11 @@ enum Storage {
 }
 
 impl FuncRefs {
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
     /// Push the given `VMFuncRef` into this arena, returning a
     /// pinned pointer to it.
     ///
@@ -106,6 +111,16 @@ impl FuncRefs {
             self.with_holes.push(unpatched)?;
         }
         Ok(unpatched.as_non_null())
+    }
+
+    /// Root a copy of a complete function reference without changing its ABI.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_copy(&mut self, func: VMFuncRef) -> Result<NonNull<VMFuncRef>, OutOfMemory> {
+        self.bump
+            .get_mut()
+            .try_alloc(func)
+            .map(NonNull::from)
+            .map_err(|_| OutOfMemory::new(size_of::<VMFuncRef>()))
     }
 
     /// Patch any `VMFuncRef::wasm_call`s that need filling in.

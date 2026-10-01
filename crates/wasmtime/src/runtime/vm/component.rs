@@ -624,6 +624,23 @@ impl ComponentInstance {
         }
     }
 
+    /// Replace an initialized trampoline with its record/replay boundary.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_set_trampoline(self: Pin<&mut Self>, idx: TrampolineIndex, func: VMFuncRef) {
+        let offset = self.offsets.trampoline_func_refs().at(idx);
+        unsafe {
+            *self.vmctx_plus_offset_mut(offset) = func;
+        }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_set_intrinsic(self: Pin<&mut Self>, idx: UnsafeIntrinsic, func: VMFuncRef) {
+        let offset = self.offsets.intrinsic_func_refs().at(idx);
+        unsafe {
+            *self.vmctx_plus_offset_mut(offset) = func;
+        }
+    }
+
     /// Same as `set_trampoline` but for intrinsic functions.
     pub fn set_intrinsic(
         self: Pin<&mut Self>,

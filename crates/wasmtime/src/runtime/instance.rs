@@ -208,7 +208,7 @@ impl Instance {
         unsafe { Instance::new_started(&mut store, module, imports.as_ref(), Asyncness::Yes).await }
     }
 
-    fn typecheck_externs(
+    pub(crate) fn typecheck_externs(
         store: &mut StoreOpaque,
         module: &Module,
         imports: &[Extern],
@@ -296,6 +296,15 @@ impl Instance {
         module: &Module,
         imports: Imports<'_>,
     ) -> Result<(Instance, bool)> {
+        #[cfg(feature = "rr")]
+        {
+            if module.env_module().needs_gc_heap {
+                store.rr.mark_unavailable("GC or exception-using modules")?;
+            }
+            if module.env_module().memories.values().any(|m| m.shared) {
+                store.rr.mark_unavailable("shared memories")?;
+            }
+        }
         if !Engine::same(store.engine(), module.engine()) {
             bail!("cross-`Engine` instantiation is not currently supported");
         }
@@ -331,12 +340,19 @@ impl Instance {
         let instance = Instance::from_wasmtime(id, store);
 
         let needs_startup = instance.id.get_mut(store).needs_startup();
+        // Always record an available startup function, even if memory images
+        // made it redundant here. Replay may use different memory images.
+        #[cfg(feature = "rr")]
+        let needs_startup =
+            needs_startup || (store.rr.active() && !module.env_module().startup.is_none());
 
         // At this point the instance is created and stored within the store,
         // but it's also not quite usable just yet. Initialization hasn't
         // completed (e.g. active data/element segments) and the `start`
         // function additionally has not yet been invoked. That's the
         // responsibility of the caller to handle, however.
+        #[cfg(feature = "rr")]
+        store.rr_created_instance(instance, module)?;
         Ok((instance, needs_startup))
     }
 
@@ -360,13 +376,31 @@ impl Instance {
                 .expect("should have a startup function")
         };
         let caller_vmctx = instance.vmctx();
-        unsafe {
+        #[cfg(feature = "rr")]
+        let rr = unsafe {
+            let funcref = f.vm_func_ref(store.0);
+            store.0.rr_enter(
+                funcref,
+                core::ptr::NonNull::<crate::ValRaw>::dangling().as_ptr(),
+                false,
+            )?
+        };
+        let result = unsafe {
             let funcref = f.vm_func_ref(store.0);
             super::func::invoke_wasm_and_catch_traps(store, |_default_caller, vm| {
                 VMFuncRef::array_call(funcref, vm, caller_vmctx, NonNull::from(&mut []))
-            })?;
+            })
+        };
+        #[cfg(feature = "rr")]
+        unsafe {
+            store.0.rr_leave(
+                rr,
+                core::ptr::NonNull::<crate::ValRaw>::dangling().as_ptr(),
+                &result,
+                false,
+            )?;
         }
-        Ok(())
+        result
     }
 
     /// Get this instance's module.

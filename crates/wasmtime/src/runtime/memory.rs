@@ -303,10 +303,13 @@ impl Memory {
         if ty.is_shared() {
             bail!("shared memories must be created through `SharedMemory`")
         }
-        Ok(generate_memory_export(store, limiter, &ty, None)
+        let memory = generate_memory_export(store, limiter, &ty, None)
             .await?
             .unshared()
-            .unwrap())
+            .unwrap();
+        #[cfg(feature = "rr")]
+        store.rr_created_memory(memory)?;
+        Ok(memory)
     }
 
     /// Returns the underlying type of this memory.
@@ -389,6 +392,18 @@ impl Memory {
         buffer: &[u8],
     ) -> Result<(), MemoryAccessError> {
         let mut context = store.as_context_mut();
+        #[cfg(feature = "rr")]
+        if context.0.rr.recording() {
+            let end = offset
+                .checked_add(buffer.len())
+                .ok_or(MemoryAccessError { _private: () })?;
+            self.rr_data(context.0)
+                .get(offset..end)
+                .ok_or(MemoryAccessError { _private: () })?;
+            context.0.rr_track_memory(*self, offset..end);
+            self.rr_data_mut(context.0)[offset..end].copy_from_slice(buffer);
+            return Ok(());
+        }
         self.data_mut(&mut context)
             .get_mut(offset..)
             .and_then(|s| s.get_mut(..buffer.len()))
@@ -428,6 +443,11 @@ impl Memory {
     ) -> &'a mut [u8] {
         unsafe {
             let store = store.into();
+            #[cfg(feature = "rr")]
+            {
+                let len = self.internal_data_size(store.0);
+                store.0.rr_track_memory(*self, 0..len);
+            }
             let definition = store[self.instance].memory(self.index);
             debug_assert!(!self.ty(store).is_shared());
             slice::from_raw_parts_mut(definition.base.as_ptr(), definition.current_length())
@@ -666,6 +686,10 @@ impl Memory {
         limiter: Option<&mut StoreResourceLimiter<'_>>,
         delta: u64,
     ) -> Result<u64> {
+        #[cfg(feature = "rr")]
+        store.rr_flush()?;
+        #[cfg(feature = "rr")]
+        let old_size = self.internal_data_size(store);
         let result = self
             .instance
             .get_mut(store)
@@ -673,6 +697,8 @@ impl Memory {
             .await?;
         match result {
             Some(size) => {
+                #[cfg(feature = "rr")]
+                store.rr_memory_grown(*self, old_size)?;
                 let page_size = self.wasmtime_ty(store).page_size();
                 Ok(u64::try_from(size).unwrap() / page_size)
             }
@@ -703,6 +729,25 @@ impl Memory {
 
     pub(crate) fn comes_from_same_store(&self, store: &StoreOpaque) -> bool {
         store.id() == self.instance.store_id()
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_key(&self, store: &StoreOpaque) -> usize {
+        store[self.instance].memory_ptr(self.index).as_ptr().addr()
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_data<'a>(&self, store: &'a StoreOpaque) -> &'a [u8] {
+        let definition = store[self.instance].memory(self.index);
+        // SAFETY: the store owns this non-shared memory for the borrow duration.
+        unsafe { slice::from_raw_parts(definition.base.as_ptr(), definition.current_length()) }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_data_mut<'a>(&self, store: &'a mut StoreOpaque) -> &'a mut [u8] {
+        let definition = store[self.instance].memory(self.index);
+        // SAFETY: exclusive store access also excludes access to this memory.
+        unsafe { slice::from_raw_parts_mut(definition.base.as_ptr(), definition.current_length()) }
     }
 
     /// Returns a stable identifier for this memory within its store.

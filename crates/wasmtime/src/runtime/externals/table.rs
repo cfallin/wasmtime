@@ -151,9 +151,13 @@ impl Table {
                 let (table, _) = table.wasmtime_table(store, None);
                 table.debug_assert_all_zero();
             }
-            return Ok(table);
+        } else {
+            for i in 0..ty.minimum() {
+                table.set_untracked(store, i, init.clone())?;
+            }
         }
-        table._fill(store, 0, init, ty.minimum())?;
+        #[cfg(feature = "rr")]
+        store.rr_created_table(table, init)?;
         Ok(table)
     }
 
@@ -257,6 +261,12 @@ impl Table {
     }
 
     pub(crate) fn set_(&self, store: &mut StoreOpaque, index: u64, val: Ref) -> Result<()> {
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table mutation")?;
+        self.set_untracked(store, index, val)
+    }
+
+    fn set_untracked(&self, store: &mut StoreOpaque, index: u64, val: Ref) -> Result<()> {
         let ty = self.ty_(store);
         match element_type(&ty) {
             TableElementType::Func => {
@@ -329,6 +339,8 @@ impl Table {
 
     async fn _grow<T>(&self, store: StoreContextMut<'_, T>, delta: u64, init: Ref) -> Result<u64> {
         let store = store.0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table growth")?;
         let (mut limiter, store) = store.resource_limiter_and_store_opaque();
         let limiter = limiter.as_mut();
 
@@ -410,6 +422,8 @@ impl Table {
         len: u64,
     ) -> Result<()> {
         let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table mutation")?;
 
         let src_range = src_index..src_index.checked_add(len).ok_or(Trap::TableOutOfBounds)?;
         let dst_range = dst_index..dst_index.checked_add(len).ok_or(Trap::TableOutOfBounds)?;
@@ -482,6 +496,8 @@ impl Table {
         val: Ref,
         len: u64,
     ) -> Result<()> {
+        #[cfg(feature = "rr")]
+        store.rr.reject("host table mutation")?;
         let ty = self.ty_(store);
         val.ensure_matches_ty(store, ty.element())
             .context("type mismatch: value does not match table element type")?;
@@ -517,6 +533,11 @@ impl Table {
 
     pub(crate) fn from_raw(instance: StoreInstanceId, index: DefinedTableIndex) -> Table {
         Table { instance, index }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_key(&self) -> (u32, u32) {
+        (self.instance.instance().as_u32(), self.index.as_u32())
     }
 
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Table {

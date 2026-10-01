@@ -123,7 +123,7 @@ impl ModuleVersionStrategy {
     }
 }
 
-/// Configuration for record/replay
+/// Configuration for record/replay.
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum RRConfig {
@@ -2663,7 +2663,8 @@ impl Config {
 
         #[cfg(feature = "rr")]
         {
-            tunables.recording = matches!(self.rr_config, RRConfig::Recording);
+            tunables.recording =
+                matches!(self.rr_config, RRConfig::Recording | RRConfig::Replaying);
         }
 
         // If no target is explicitly specified then further refine `tunables`
@@ -3374,7 +3375,7 @@ impl Config {
     /// Validate if the current configuration has conflicting overrides that prevent
     /// execution determinism. Returns an error if a conflict exists.
     ///
-    /// Note: Keep this in sync with [`Config::enforce_determinism`].
+    /// Note: Keep this in sync with [`Config::rr`].
     #[inline]
     #[cfg(feature = "rr")]
     pub(crate) fn validate_rr_determinism_conflicts(&self) -> Result<()> {
@@ -3396,15 +3397,30 @@ impl Config {
         Ok(())
     }
 
-    /// Enable execution trace recording or replaying to the configuration.
+    /// Enables execution trace recording or replaying.
+    ///
+    /// This feature is experimental. With the `rr` Cargo feature, recording
+    /// includes core and component execution and initialization. Replay uses
+    /// independent async fibers and bypasses the original host implementations.
     ///
     /// When either recording/replaying are enabled, validation fails if settings
-    /// that control determinism are not set appropriately. In particular, RR requires
-    /// doing the following:
-    /// * Enabling NaN canonicalization with [`Config::cranelift_nan_canonicalization`].
-    /// * Enabling deterministic relaxed SIMD with [`Config::relaxed_simd_deterministic`].
+    /// that control determinism are not set appropriately. This enables NaN
+    /// canonicalization and deterministic relaxed SIMD when those options have
+    /// not been explicitly configured. Explicitly disabling either option is
+    /// an error when creating the engine.
     #[inline]
     pub fn rr(&mut self, cfg: RRConfig) -> &mut Self {
+        #[cfg(feature = "rr")]
+        if !matches!(cfg, RRConfig::None) {
+            self.tunables.relaxed_simd_deterministic.get_or_insert(true);
+            #[cfg(any(feature = "cranelift", feature = "winch"))]
+            if let Some(compiler) = &mut self.compiler_config {
+                compiler
+                    .settings
+                    .entry("enable_nan_canonicalization".to_string())
+                    .or_insert_with(|| ("true".to_string(), UserSpecified::No));
+            }
+        }
         self.rr_config = cfg;
         self
     }

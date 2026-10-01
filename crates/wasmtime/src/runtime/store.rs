@@ -430,6 +430,65 @@ impl<T> DerefMut for StoreInner<T> {
     }
 }
 
+#[cfg(feature = "rr")]
+impl<T> StoreInner<T> {
+    pub(crate) fn rr_validate(&self) -> Result<()> {
+        ensure!(
+            !self.rr.active(),
+            "store already has an active record/replay session"
+        );
+        // Every store owns one internal dummy instance for the default caller.
+        // Host memories/tables add further dummy instances; globals and host
+        // functions have separate storage. Store data T is unrestricted.
+        ensure!(
+            self.instances.len() == 1
+                && self.host_globals.is_empty()
+                && self.func_refs.rr_is_empty()
+                && self.gc_store.is_none(),
+            "record/replay requires an empty store"
+        );
+        #[cfg(feature = "component-model")]
+        ensure!(
+            self.component_data().rr_is_empty(),
+            "record/replay requires an empty store"
+        );
+        self.rr.validate_available()?;
+        ensure!(
+            self.limiter.is_none(),
+            "record/replay does not support resource limiters"
+        );
+        ensure!(
+            self.call_hook.is_none(),
+            "record/replay does not support call hooks"
+        );
+        ensure!(
+            self.signal_handler.is_none(),
+            "record/replay does not support custom signal handlers"
+        );
+        let tunables = self.engine().tunables();
+        ensure!(
+            !tunables.consume_fuel && !tunables.epoch_interruption,
+            "record/replay does not support fuel or epoch interruption"
+        );
+        ensure!(
+            !self
+                .engine()
+                .features()
+                .contains(wasmparser::WasmFeatures::STACK_SWITCHING),
+            "record/replay does not support Wasm stack switching"
+        );
+        // Temporary until debug events yield to the replay driver. Reversible
+        // debugging is an intended consumer of RR: the ordinary async hook
+        // retains an arbitrary future on the guest fiber, which would violate
+        // the snapshot contract. See docs/record-replay.md.
+        ensure!(
+            !tunables.debug_guest,
+            "record/replay guest debug event integration is not implemented yet"
+        );
+        Ok(())
+    }
+}
+
 /// Monomorphic storage for a `Store<T>`.
 ///
 /// This structure contains the bulk of the metadata about a `Store`. This is
@@ -462,6 +521,9 @@ pub struct StoreOpaque {
 
     engine: Engine,
     vm_store_context: VMStoreContext,
+
+    #[cfg(feature = "rr")]
+    pub(crate) rr: crate::rr::State,
 
     // Contains all continuations ever allocated throughout the lifetime of this
     // store.
@@ -728,6 +790,8 @@ impl<T> Store<T> {
             _marker: marker::PhantomPinned,
             engine: engine.clone(),
             vm_store_context: Default::default(),
+            #[cfg(feature = "rr")]
+            rr: Default::default(),
             #[cfg(feature = "stack-switching")]
             continuations: Vec::new(),
             instances: TryPrimaryMap::new(),
@@ -931,6 +995,15 @@ impl<T> Store<T> {
         &mut self,
         mut limiter: impl (FnMut(&mut T) -> &mut dyn crate::ResourceLimiter) + Send + Sync + 'static,
     ) {
+        #[cfg(feature = "rr")]
+        if self
+            .inner
+            .rr
+            .reject("installing a resource limiter")
+            .is_err()
+        {
+            return;
+        }
         // Apply the limits on instances, tables, and memory given by the limiter:
         let inner = &mut self.inner;
         let (instance_limit, table_limit, memory_limit) = {
@@ -967,6 +1040,10 @@ impl<T> Store<T> {
         &mut self,
         hook: impl FnMut(StoreContextMut<'_, T>, CallHook) -> Result<()> + Send + Sync + 'static,
     ) {
+        #[cfg(feature = "rr")]
+        if self.inner.rr.reject("installing a call hook").is_err() {
+            return;
+        }
         self.inner.call_hook = Some(CallHookInner::Sync(Box::new(hook)));
     }
 
@@ -1712,6 +1789,11 @@ impl StoreOpaque {
         )
     }
 
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_guest_caller(&self, id: InstanceId) -> bool {
+        matches!(self.instances[id].kind, StoreInstanceKind::Real { .. })
+    }
+
     /// Get all instances (ignoring dummy instances) within this store.
     pub fn all_instances<'a>(&'a mut self) -> impl ExactSizeIterator<Item = Instance> + 'a {
         let instances = self
@@ -1775,6 +1857,10 @@ impl StoreOpaque {
 
     #[cfg(all(feature = "std", any(unix, windows)))]
     pub fn set_signal_handler(&mut self, handler: Option<SignalHandler>) {
+        #[cfg(feature = "rr")]
+        if self.rr.reject("installing a signal handler").is_err() {
+            return;
+        }
         self.signal_handler = handler;
     }
 

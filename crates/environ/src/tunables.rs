@@ -151,8 +151,8 @@ define_tunables! {
         /// enabled.
         pub concurrency_support: bool,
 
-        /// Whether recording in RR is enabled or not. This is used primarily
-        /// to signal checksum computation for compiled artifacts.
+        /// Whether record/replay compilation is enabled. Retains core Wasm
+        /// bytecode and preserves component builtin calls for interception.
         pub recording: bool,
 
         /// An allocation counter that triggers GC when it reaches zero.

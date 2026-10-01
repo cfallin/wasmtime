@@ -40,7 +40,6 @@ wasmtime-component-util = { workspace = true, optional = true }
 wasmtime-core = { workspace = true, features = ['serde'] }
 semver = { workspace = true, optional = true, features = ['serde'] }
 smallvec = { workspace = true, features = ['serde'] }
-sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 clap = { workspace = true, features = ['default'] }
@@ -93,8 +92,4 @@ std = [
   'wasmtime-core/std',
   'cpp_demangle?/std',
   'rustc-demangle?/std',
-]
-rr = [
-  "component-model",
-  "dep:sha2",
 ]

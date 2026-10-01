@@ -104,7 +104,10 @@ impl Global {
         val.ensure_matches_ty(store, ty.content()).context(
             "type mismatch: initial value provided does not match the type of this global",
         )?;
-        generate_global_export(store, ty, val)
+        let global = generate_global_export(store, ty, val)?;
+        #[cfg(feature = "rr")]
+        store.rr_created_global(global)?;
+        Ok(global)
     }
 
     pub(crate) fn new_host(store: &StoreOpaque, index: DefinedGlobalIndex) -> Global {
@@ -235,6 +238,8 @@ impl Global {
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, val: Val) -> Result<()> {
+        #[cfg(feature = "rr")]
+        store.rr.reject("host global mutation")?;
         let global_ty = self._ty(&store);
         if global_ty.mutability() != Mutability::Var {
             bail!("immutable global cannot be set");
@@ -347,6 +352,39 @@ impl Global {
             instance: instance.instance().as_u32(),
             kind: VMGlobalKind::ComponentFlags(index),
         }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_is_component_flag(&self) -> bool {
+        #[cfg(feature = "component-model")]
+        if matches!(self.kind, VMGlobalKind::ComponentFlags(_)) {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_read(&self, store: &mut StoreOpaque) -> Val {
+        self._get(&mut AutoAssertNoGc::new(store))
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_set_flag(&self, store: &mut StoreOpaque, value: i32) -> Result<()> {
+        let ty = self._ty(store);
+        ensure!(
+            matches!(ty.content(), ValType::I32) && ty.mutability() == Mutability::Var,
+            "invalid replay flag global"
+        );
+        // SAFETY: store is exclusive and the type was checked above.
+        unsafe {
+            *self.definition(store).as_mut().as_i32_mut() = value;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_key(&self, store: &StoreOpaque) -> usize {
+        self.definition(store).as_ptr() as usize
     }
 
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Global {

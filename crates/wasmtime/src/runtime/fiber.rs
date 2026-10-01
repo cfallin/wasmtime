@@ -405,6 +405,10 @@ pub(crate) enum StoreFiberYield {
     /// should not be used outside of the fiber until after the fiber either
     /// suspends with `ReleaseStore` or resolves.
     KeepStore,
+    /// A core replay boundary. The replay trampoline has released the store,
+    /// and only the top-level replay driver may resume this activation.
+    #[cfg(feature = "rr")]
+    ReplayHost,
     /// Indicates the fiber does _not_ need exclusive access across the
     /// suspend/resume interval, meaning the store may be used as needed until
     /// the fiber is resumed.
@@ -789,6 +793,19 @@ fn resume_fiber<'a>(
     result
 }
 
+/// Resume one replay activation without recursively driving any other one.
+#[cfg(feature = "rr")]
+pub(crate) fn resume_replay_fiber(
+    store: &mut StoreOpaque,
+    fiber: &mut StoreFiber<'_>,
+    cx: &mut Context<'_>,
+) -> Result<Result<()>, StoreFiberYield> {
+    // SAFETY: resume_fiber does not retain a usable Context across suspension.
+    // BlockingContext::suspend removes it before switching to this stack.
+    let cx = unsafe { change_context_lifetime(cx) };
+    resume_fiber(store, fiber, Ok(NonNull::from(cx)))
+}
+
 /// Create a new `StoreFiber` which runs the specified closure.
 ///
 /// # Safety
@@ -995,6 +1012,10 @@ impl<'b> Future for FiberFuture<'_, 'b> {
             Ok(Ok(())) => Poll::Ready(Ok(None)),
             Ok(Err(e)) => Poll::Ready(Err(e)),
             Err(StoreFiberYield::KeepStore) => Poll::Pending,
+            #[cfg(feature = "rr")]
+            Err(StoreFiberYield::ReplayHost) => {
+                unreachable!("replay fibers require the replay driver")
+            }
             #[cfg(feature = "component-model-async")]
             Err(StoreFiberYield::ReleaseStore) => match &me.on_release {
                 OnRelease::ReturnPending => Poll::Pending,

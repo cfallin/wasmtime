@@ -197,6 +197,14 @@ where
         // the memory go away, so the size matters here for performance.
         let mut captures = (func, storage);
 
+        #[cfg(feature = "rr")]
+        // SAFETY: Params::store initialized the signature's parameter slots.
+        let rr = unsafe {
+            store
+                .0
+                .rr_enter(func, core::ptr::from_ref(&captures.1).cast(), false)?
+        };
+
         let result = invoke_wasm_and_catch_traps(store, |caller, vm| {
             let (func_ref, storage) = &mut captures;
             let storage_len = mem::size_of_val::<Storage<_, _>>(storage) / mem::size_of::<ValRaw>();
@@ -212,6 +220,13 @@ where
         });
 
         let (_, storage) = captures;
+        #[cfg(feature = "rr")]
+        // SAFETY: the array call initializes result slots on success only.
+        unsafe {
+            store
+                .0
+                .rr_leave(rr, core::ptr::from_ref(&storage).cast(), &result, false)?;
+        }
         result?;
 
         let mut store = AutoAssertNoGc::new(store.0);

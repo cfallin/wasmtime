@@ -27,6 +27,8 @@ use crate::hash_map::HashMap;
 use crate::hash_set::HashSet;
 use crate::prelude::*;
 use std::{any::Any, borrow::Cow, mem, ops::Range};
+#[cfg(feature = "component-model")]
+use wasmtime_environ::component::Translator;
 use wasmtime_environ::{
     Abi, CompiledFunctionBody, CompiledFunctionsTable, CompiledFunctionsTableBuilder,
     CompiledModuleInfo, Compiler, DefinedFuncIndex, FilePos, FinishedObject, FuncKey,
@@ -34,8 +36,6 @@ use wasmtime_environ::{
     ModuleTypes, ModuleTypesBuilder, ObjectKind, PrimaryMap, StaticModuleIndex, Tunables,
     graphs::{EntityGraph, Graph as _},
 };
-#[cfg(feature = "component-model")]
-use wasmtime_environ::{WasmChecksum, component::Translator};
 
 mod stratify;
 
@@ -120,7 +120,7 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
         dwarf_package,
     )?;
 
-    if tunables.debug_guest {
+    if tunables.debug_guest || tunables.recording {
         object.append_wasm_bytecode(std::iter::once(wasm));
     }
 
@@ -198,7 +198,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
     }
 
     // Collect bytecode slices here before moving `module_translations` below.
-    let module_wasms = if tunables.debug_guest {
+    let module_wasms = if tunables.debug_guest || tunables.recording {
         module_translations
             .values()
             .map(|t| t.wasm)
@@ -219,7 +219,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
         None, // TODO: Support dwarf packages for components.
     )?;
 
-    if tunables.debug_guest {
+    if tunables.debug_guest || tunables.recording {
         object.append_wasm_bytecode(module_wasms);
     }
 
@@ -234,7 +234,6 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
         ty,
         types,
         static_modules: compilation_artifacts.modules,
-        checksum: WasmChecksum::from_binary(binary, tunables.recording),
     };
     object.serialize_info(&artifacts);
 
