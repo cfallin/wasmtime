@@ -145,58 +145,118 @@ struct Driver<'a, T: 'static> {
     // A newly allocated instance must run its startup before any other code
     // can observe it, including when the trace is malformed.
     pending_startup: Option<usize>,
+    // Observers of embedder-defined events, by tag.
+    observers: Vec<(u32, Box<dyn FnMut(&[u8]) -> Result<()> + Send>)>,
+    finished: bool,
 }
 
-pub(super) async fn run<T: Send>(store: &mut StoreInner<T>, trace: &Trace) -> Result<Replay> {
-    store.rr_validate()?;
-    ensure!(
-        store.engine().is_replaying(),
-        "replay requires RRConfig::Replaying"
-    );
-    let objects = Objects::default();
-    // `Trace` construction checked the version and framing.
-    let mut reader = Reader::new(&trace.bytes);
-    reader.take(codec::MAGIC.len())?;
-    let trampolines = Trampolines::new(store.engine())?;
-    store.rr.session = Some(try_new::<Box<_>>(Session {
-        objects,
-        mode: Mode::Replaying {
-            growth_failures: Vec::new(),
-        },
-        pending: Vec::new(),
-        failure: None,
-    })?);
-    let mut driver = Driver {
-        store,
-        trampolines,
-        reader,
-        activations: Vec::new(),
-        observed: None,
-        scratch: Vec::new(),
-        instances: Vec::new(),
-        pending_startup: None,
-    };
-    core::future::poll_fn(|cx| {
-        // Give the executor a chance to cancel long traces between events.
-        for _ in 0..256 {
-            match driver.step() {
-                Ok(true) => return Poll::Ready(Ok(())),
-                Ok(false) => {}
-                Err(e) => {
+/// Replays a trace in a store, one stop at a time.
+///
+/// Created by [`Store::replayer`](crate::Store::replayer). Dropping a replayer
+/// frees all of its suspended activations; the store then remains available
+/// for inspection, but its functions cannot be called.
+pub struct Replayer<'a, T: 'static> {
+    driver: Driver<'a, T>,
+}
+
+/// Why [`Replayer::run`] returned.
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReplayStop {
+    /// The entire trace was replayed.
+    Finished,
+}
+
+impl<'a, T: Send + 'static> Replayer<'a, T> {
+    pub(super) fn new(store: &'a mut StoreInner<T>, trace: &'a Trace) -> Result<Self> {
+        store.rr_validate()?;
+        ensure!(
+            store.engine().is_replaying(),
+            "replay requires RRConfig::Replaying"
+        );
+        // `Trace` construction checked the version and framing.
+        let mut reader = Reader::new(&trace.bytes);
+        reader.take(codec::MAGIC.len())?;
+        let trampolines = Trampolines::new(store.engine())?;
+        store.rr.session = Some(try_new::<Box<_>>(Session {
+            objects: Objects::default(),
+            mode: Mode::Replaying {
+                growth_failures: Vec::new(),
+            },
+            pending: Vec::new(),
+            failure: None,
+        })?);
+        Ok(Replayer {
+            driver: Driver {
+                store,
+                trampolines,
+                reader,
+                activations: Vec::new(),
+                observed: None,
+                scratch: Vec::new(),
+                instances: Vec::new(),
+                pending_startup: None,
+                observers: Vec::new(),
+                finished: false,
+            },
+        })
+    }
+
+    /// Calls `observer` with each recorded event of type `E` as replay reaches
+    /// it, including again after rewinding. Observers cannot affect replay.
+    pub fn on_event<E: TraceEvent>(&mut self, mut observer: impl FnMut(E) + Send + 'static) {
+        self.driver.observers.push((
+            E::TAG,
+            Box::new(move |bytes| {
+                observer(postcard::from_bytes(bytes)?);
+                Ok(())
+            }),
+        ));
+    }
+
+    /// Replays until the next stop.
+    ///
+    /// This yields to the async executor periodically, so a long replay can
+    /// be cancelled by dropping the future.
+    pub async fn run(&mut self) -> Result<ReplayStop> {
+        let driver = &mut self.driver;
+        core::future::poll_fn(|cx| {
+            // Give the executor a chance to cancel long traces between events.
+            for _ in 0..256 {
+                if driver.finished {
+                    return Poll::Ready(Ok(ReplayStop::Finished));
+                }
+                if let Err(e) = driver.step() {
                     return Poll::Ready(Err(e.context(format!(
                         "replaying trace at byte {}",
                         driver.reader.position()
                     ))));
                 }
             }
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// Core instances constructed so far, in their recorded construction
+    /// order. Components replay as their constituent core instances.
+    pub fn instances(&self) -> &[crate::Instance] {
+        &self.driver.instances
+    }
+
+    /// The store being replayed into, for inspection.
+    ///
+    /// Modifying its state invalidates the rest of the replay.
+    pub fn store(&mut self) -> StoreContextMut<'_, T> {
+        StoreContextMut(self.driver.store)
+    }
+
+    pub(super) fn into_replay(mut self) -> Replay {
+        Replay {
+            instances: core::mem::take(&mut self.driver.instances),
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await?;
-    Ok(Replay {
-        instances: core::mem::take(&mut driver.instances),
-    })
+    }
 }
 
 impl<T: 'static> Driver<'_, T> {
@@ -211,7 +271,7 @@ impl<T: 'static> Driver<'_, T> {
         Ok(())
     }
 
-    fn step(&mut self) -> Result<bool> {
+    fn step(&mut self) -> Result<()> {
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
             ensure!(
@@ -227,7 +287,18 @@ impl<T: 'static> Driver<'_, T> {
                 );
                 body.end()?;
                 self.reader.end()?;
-                return Ok(true);
+                self.finished = true;
+            }
+            codec::EVENT => {
+                self.require_idle(
+                    "event before matching guest execution",
+                    "event while guest is running",
+                )?;
+                let tag = body.u32()?;
+                let payload = body.rest();
+                for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
+                    observer(payload).context("failed to observe a trace event")?;
+                }
             }
             codec::HOST
             | codec::MODULE
@@ -449,7 +520,7 @@ impl<T: 'static> Driver<'_, T> {
             }
             _ => bail!("unknown trace event {tag}"),
         }
-        Ok(false)
+        Ok(())
     }
 
     /// Creates the raw fiber and state for a new activation of `func`. Its

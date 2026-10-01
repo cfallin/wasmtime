@@ -29,6 +29,7 @@ use core::ptr::NonNull;
 mod codec;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
+pub use replay::{ReplayStop, Replayer};
 
 /// Core instances constructed while replaying initialization.
 ///
@@ -44,6 +45,42 @@ impl Replay {
     pub fn instances(&self) -> &[crate::Instance] {
         &self.instances
     }
+}
+
+/// An embedder-defined event that can be recorded in a trace with
+/// [`record_event`], and observed during replay with [`Replayer::on_event`].
+///
+/// Events carry information about the recorded execution, such as its
+/// output, that the embedder wants to see again when replaying. They cannot
+/// affect the replay itself.
+pub trait TraceEvent: serde::Serialize + serde::de::DeserializeOwned + 'static {
+    /// Identifies this type of event in traces. It must be unique among an
+    /// embedding's event types and stable between the processes that record
+    /// and replay a trace.
+    const TAG: u32;
+}
+
+/// Records `event` at the current point of a recording. This does nothing if
+/// the store is not recording.
+pub fn record_event<E: TraceEvent>(mut store: impl AsContextMut, event: &E) -> Result<()> {
+    let store = store.as_context_mut().0;
+    if !store.rr.recording() {
+        return Ok(());
+    }
+    let result = (|| {
+        let Mode::Recording { bytes, .. } = &mut store.rr_session().mode else {
+            unreachable!()
+        };
+        let start = bytes.len();
+        codec::record(bytes, codec::EVENT, 4)?;
+        bytes.extend_from_slice(&E::TAG.to_le_bytes());
+        // Serialize in place; the length is patched afterwards.
+        *bytes = postcard::to_extend(event, core::mem::take(bytes))?;
+        let len = u32::try_from(bytes.len() - start - 5)?;
+        bytes[start + 1..start + 5].copy_from_slice(&len.to_le_bytes());
+        Ok(())
+    })();
+    store.rr_poison_on_err(result)
 }
 
 /// A complete execution trace, including object construction and startup.
@@ -253,7 +290,18 @@ impl<T: 'static> Store<T> {
     where
         T: Send,
     {
-        replay::run(self.as_context_mut().0, trace).await
+        let mut replayer = self.replayer(trace)?;
+        while replayer.run().await? != ReplayStop::Finished {}
+        Ok(replayer.into_replay())
+    }
+
+    /// Starts replaying a trace, as for [`Store::replay`], with control over
+    /// how it proceeds.
+    pub fn replayer<'a>(&'a mut self, trace: &'a Trace) -> Result<Replayer<'a, T>>
+    where
+        T: Send,
+    {
+        Replayer::new(self.as_context_mut().0, trace)
     }
 }
 

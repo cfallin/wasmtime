@@ -13,7 +13,8 @@ the remaining work below).
 
 The entrypoints are `Store::start_recording()`,
 `Store::finish_recording() -> Result<rr::Trace>`, and
-`Store::replay(&rr::Trace).await -> Result<rr::Replay>`. An engine uses
+`Store::replay(&rr::Trace).await -> Result<rr::Replay>`. `Store::replayer`
+returns an `rr::Replayer` that replays one stop at a time. An engine uses
 `Config::rr(RRConfig::Recording)` or `Config::rr(RRConfig::Replaying)`.
 Recording can use synchronous or asynchronous calls; replay always uses fibers.
 The feature does not require component-model support. Replay requires a
@@ -79,6 +80,12 @@ In addition to construction, the execution stream contains:
   instance flags are ordinary mutable i32 globals in the core import graph;
   global-write records reproduce the canonical runtime's changes at guest
   entry and host return boundaries.
+* Embedder events: `rr::record_event` appends a value of an embedder type
+  implementing `rr::TraceEvent` (a stable `u32` tag plus serde, encoded with
+  postcard) at the current point of the recording, e.g. a WASI
+  implementation's output. During replay, `Replayer::on_event` observers
+  receive them as replay reaches them, including again after rewinding;
+  observers cannot affect the replay.
 * Guest growth failures: a failed `memory.grow` or `table.grow` records the
   object, its old size, and the delta. Such records directly follow the event
   that resumed the guest; the driver queues them, and replay fails exactly the

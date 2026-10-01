@@ -378,6 +378,91 @@ fn replay_requires_a_native_target() -> Result<()> {
     Ok(())
 }
 
+/// Program output, as a WASI implementation could record it.
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Output {
+    stream: u8,
+    text: String,
+}
+
+impl rr::TraceEvent for Output {
+    const TAG: u32 = 1;
+}
+
+/// A guest that prints through a host function which records its output.
+fn printing() -> Result<(Store<()>, TypedFunc<i32, ()>)> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let print = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, ()>, stream: i32, ptr: i32, len: i32| -> Result<()> {
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let bytes = &memory.data(&caller)[ptr as usize..][..len as usize];
+            let text = String::from_utf8(bytes.to_vec())?;
+            rr::record_event(
+                &mut caller,
+                &Output {
+                    stream: stream as u8,
+                    text,
+                },
+            )
+        },
+    );
+    let module = Module::new(
+        &recording,
+        r#"(module
+        (import "" "print" (func $print (param i32 i32 i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "tick err")
+        (func (export "run") (param $n i32)
+            (loop $l
+                (call $print (i32.const 1) (i32.const 0) (i32.const 4))
+                (call $print (i32.const 2) (i32.const 5) (i32.const 3))
+                (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1)))))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    Ok((store, run))
+}
+
+#[tokio::test]
+async fn embedder_events_are_replayed_in_order() -> Result<()> {
+    let (mut store, run) = printing()?;
+    let start = Output {
+        stream: 0,
+        text: "start".to_string(),
+    };
+    rr::record_event(&mut store, &start)?;
+    run.call(&mut store, 2)?;
+    let trace = store.finish_recording()?;
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = replay.replayer(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output));
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    drop(replayer);
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            start,
+            tick(1, "tick"),
+            tick(2, "err"),
+            tick(1, "tick"),
+            tick(2, "err"),
+        ]
+    );
+    // Recording outside of a session does nothing.
+    rr::record_event(&mut replay, &tick(0, "ignored"))?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_guest_growth_is_replayed() -> Result<()> {
     // Growth beyond a small, immovable reservation fails when recording but
