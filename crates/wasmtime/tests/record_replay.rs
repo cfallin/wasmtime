@@ -1273,6 +1273,8 @@ async fn concurrent_component_activations_can_finish_out_of_order() -> Result<()
         })
         .await??;
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(RRConfig::Replaying);
     let mut replay = Store::new(&Engine::new(&config)?, ());
     replay.replay(&trace).await?;
@@ -1321,6 +1323,8 @@ async fn component_async_adapter_callbacks() -> Result<()> {
     let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, (41,)).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(RRConfig::Replaying);
     let mut replay = Store::new(&Engine::new(&config)?, ());
     replay.replay(&trace).await?;
@@ -1431,6 +1435,8 @@ async fn component_async_stream_wait() -> Result<()> {
         })
         .await??;
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(RRConfig::Replaying);
     let mut replay = Store::new(&Engine::new(&config)?, ());
     replay.replay(&trace).await?;
@@ -1467,6 +1473,8 @@ async fn component_async_lift_callback() -> Result<()> {
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, ()).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(RRConfig::Replaying);
     let mut replay = Store::new(&Engine::new(&config)?, ());
     let output = replay.replay(&trace).await?;
@@ -1670,6 +1678,8 @@ async fn component_async_lower_futures_and_cancellation() -> Result<()> {
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, ()).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(RRConfig::Replaying);
     let mut replay = Store::new(&Engine::new(&config)?, ());
     replay.replay(&trace).await?;
@@ -1726,8 +1736,13 @@ async fn function_references_cross_boundaries_by_id() -> Result<()> {
     // Raw pointers never enter the trace, and an invalid ID must fail before
     // entering guest code with a fabricated function reference.
     let mut bytes = trace.as_bytes().to_vec();
-    // The first argument of the first EnterWasm, after the callee and call IDs.
-    let body = first_frame(&bytes, ENTER_WASM);
+    // The first argument of the first EnterWasm with arguments (after the
+    // instance startups), after the callee and call IDs.
+    let body = frames(&bytes)
+        .windows(2)
+        .find(|f| f[0].0 == ENTER_WASM && f[1].1 - f[0].1 > 8 + 5)
+        .unwrap()[0]
+        .1;
     bytes[body + 8..body + 12].copy_from_slice(&u32::MAX.to_le_bytes());
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     let error = replay.replay(&Trace::from_bytes(bytes)?).await.unwrap_err();
@@ -2064,5 +2079,121 @@ async fn reversible_debugging_on_replay() -> Result<()> {
     }
     assert_eq!(from_start.len(), 4);
     assert!(from_start.ends_with(&hits));
+    Ok(())
+}
+
+/// The contents of every exported memory of the replayed instances.
+fn exported_memories<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Vec<Vec<u8>> {
+    let instances = replayer.instances().to_vec();
+    let mut store = replayer.store();
+    let mut memories = Vec::new();
+    for instance in instances {
+        let exports = instance
+            .exports(&mut store)
+            .filter_map(|e| e.into_memory())
+            .collect::<Vec<_>>();
+        for memory in exports {
+            memories.push(memory.data(&store).to_vec());
+        }
+    }
+    memories
+}
+
+/// Replays `trace`, single-stepping all guest code and checkpointing every
+/// few stops. Then rewinds to each checkpoint, in several orders, and replays
+/// to the end again: every run must end in the same state.
+#[cfg(feature = "debug")]
+async fn check_rewinds(mut config: Config, trace: &Trace) -> Result<()> {
+    config.rr(RRConfig::Replaying).guest_debug(true);
+    let mut store = Store::new(&Engine::new(&config)?, ());
+    let mut replayer = store.replayer(trace)?;
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    let mut checkpoints = vec![replayer.checkpoint()?];
+    let mut stops = 0;
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        stops += 1;
+        if stops % 7 == 0 {
+            checkpoints.push(replayer.checkpoint()?);
+        }
+    }
+    assert!(stops > 0);
+    let expected = exported_memories(&mut replayer);
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(false)?;
+    let n = checkpoints.len();
+    let order = (0..n)
+        .rev()
+        .chain((0..n).step_by(2))
+        .chain([n / 2, 0, n - 1]);
+    for k in order {
+        replayer.restore(&checkpoints[k])?;
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+        assert_eq!(exported_memories(&mut replayer), expected);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn debugging_nested_activations_through_host_frames() -> Result<()> {
+    let (mut record, run, _) = nested()?;
+    run.typed::<(), i32>(&record)?.call(&mut record, ())?;
+    let trace = record.finish_recording()?;
+    let mut store = Store::new(&debug_engine()?, 0_usize);
+    let mut replayer = store.replayer(&trace)?;
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+
+    // Each stop's defined functions, innermost first: `callback` is 0, `fail`
+    // is 1, and `run` is 2.
+    fn stack<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Result<Vec<u32>> {
+        let frames = replayer.debug_exit_frames();
+        let mut store = replayer.store();
+        frames
+            .iter()
+            .map(|f| {
+                Ok(f.wasm_function_index_and_pc(&mut store)?
+                    .unwrap()
+                    .0
+                    .as_u32())
+            })
+            .collect()
+    }
+    let mut stacks = Vec::new();
+    let mut checkpoints = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        stacks.push(stack(&mut replayer)?);
+        checkpoints.push(replayer.checkpoint()?);
+    }
+    // Callbacks from the host function are separate activations, shown
+    // beneath the stopped one.
+    assert!(stacks.contains(&vec![2]));
+    assert!(stacks.contains(&vec![0, 2]));
+    assert!(stacks.contains(&vec![1, 2]));
+    let end = exported_memories(&mut replayer);
+
+    // Rewind into the callback, with `run` parked in the host function, and
+    // replay onwards from there, twice.
+    let k = stacks.iter().position(|s| s == &[0, 2]).unwrap();
+    for _ in 0..2 {
+        replayer.restore(&checkpoints[k])?;
+        assert_eq!(stack(&mut replayer)?, stacks[k]);
+        let mut rest = Vec::new();
+        while replayer.run().await? == rr::ReplayStop::Breakpoint {
+            rest.push(stack(&mut replayer)?);
+        }
+        assert_eq!(rest, stacks[k + 1..]);
+        assert_eq!(exported_memories(&mut replayer), end);
+    }
     Ok(())
 }

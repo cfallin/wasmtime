@@ -5,7 +5,7 @@
 //!
 //! * the driver's protocol state: the trace position, the activations and
 //!   their parked host calls, the startup and growth-failure state, and the
-//!   number of objects and instances constructed so far;
+//!   identities of the objects and instances constructed so far;
 //! * each activation's raw fiber snapshot, control block, saved
 //!   `VMStoreContext` state, protection-key mask, and value buffer;
 //! * the guest state of every object constructed so far: memory sizes and
@@ -17,7 +17,9 @@
 //! stacks remain valid. An activation that completed after a checkpoint is
 //! therefore retained, rather than freed, while a checkpoint can restore it.
 //! Objects constructed after a checkpoint stay in the store but become
-//! unreachable once it is restored; replay constructs them again.
+//! unreachable once it is restored; replay constructs new ones again, so each
+//! checkpoint keeps the object identities of its own timeline. Compiled
+//! modules are immutable and shared between timelines.
 
 use super::*;
 use crate::Val;
@@ -87,12 +89,12 @@ pub struct Checkpoint {
     replayer: usize,
     _live: Arc<()>,
     position: usize,
-    instances: usize,
     pending_startup: Option<usize>,
     finished: bool,
     paused: Option<u64>,
     growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
-    objects: ObjectCounts,
+    objects: Objects,
+    instance_list: Vec<crate::Instance>,
     activations: Vec<ActivationImage>,
     memories: Vec<Vec<u8>>,
     tables: Vec<Vec<FuncTableElem>>,
@@ -114,39 +116,22 @@ struct ActivationImage {
     values: Vec<ValRaw>,
 }
 
-/// How many of each kind of object had been constructed.
-struct ObjectCounts {
-    funcs: usize,
-    memories: usize,
-    globals: usize,
-    tables: usize,
-    flags: usize,
-    modules: usize,
-}
-
 impl Objects {
-    fn counts(&self) -> ObjectCounts {
-        ObjectCounts {
-            funcs: self.funcs.len(),
-            memories: self.memories.len(),
-            globals: self.globals.len(),
-            tables: self.tables.len(),
-            flags: self.flags.len(),
-            modules: self.modules_defined,
-        }
-    }
-
-    fn truncate(&mut self, counts: &ObjectCounts) {
-        self.funcs.truncate(counts.funcs);
-        self.functions_by_key.retain(|_, id| *id < counts.funcs);
-        self.memories.truncate(counts.memories);
-        self.memories_by_key.retain(|_, id| *id < counts.memories);
-        self.globals.truncate(counts.globals);
-        self.globals_by_key.retain(|_, id| *id < counts.globals);
-        self.tables.truncate(counts.tables);
-        self.tables_by_key.retain(|_, id| *id < counts.tables);
-        self.flags.truncate(counts.flags);
-        self.modules_defined = counts.modules;
+    /// A copy of these identities, sharing the compiled modules.
+    fn try_clone_identities(&self) -> Result<Objects> {
+        Ok(Objects {
+            funcs: try_copy(&self.funcs)?,
+            functions_by_key: self.functions_by_key.try_clone()?,
+            memories: try_copy(&self.memories)?,
+            memories_by_key: self.memories_by_key.try_clone()?,
+            globals: try_copy(&self.globals)?,
+            globals_by_key: self.globals_by_key.try_clone()?,
+            tables: try_copy(&self.tables)?,
+            tables_by_key: self.tables_by_key.try_clone()?,
+            flags: try_copy(&self.flags)?,
+            modules: Vec::new(),
+            modules_defined: self.modules_defined,
+        })
     }
 }
 
@@ -199,7 +184,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             try_copy(&objects.tables)?,
             try_copy(&objects.globals)?,
         );
-        let counts = objects.counts();
+        let identities = objects.try_clone_identities()?;
         let mut memory_images = Vec::new();
         memory_images.try_reserve_exact(memories.len())?;
         for memory in memories {
@@ -229,12 +214,12 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             replayer: driver.checkpoints.replayer,
             _live: live,
             position: driver.reader.position(),
-            instances: driver.instances.len(),
+            instance_list: try_copy(&driver.instances)?,
             pending_startup: driver.pending_startup,
             finished: driver.finished,
             paused: driver.paused,
             growth_failures,
-            objects: counts,
+            objects: identities,
             activations,
             memories: memory_images,
             tables: table_images,
@@ -293,8 +278,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         driver.activations = restored;
 
         let store: &mut StoreOpaque = driver.store;
+        let identities = checkpoint.objects.try_clone_identities()?;
         let objects = &mut store.rr.session.as_mut().unwrap().objects;
-        objects.truncate(&checkpoint.objects);
+        let modules = core::mem::take(&mut objects.modules);
+        *objects = identities;
+        objects.modules = modules;
         let (memories, tables, globals) = (
             try_copy(&objects.memories)?,
             try_copy(&objects.tables)?,
@@ -314,7 +302,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         // Invalidate frame handles into the replaced stacks.
         store.vm_store_context_mut().execution_version += 1;
 
-        driver.instances.truncate(checkpoint.instances);
+        driver.instances = try_copy(&checkpoint.instance_list)?;
         driver.reader.set_position(checkpoint.position);
         driver.pending_startup = checkpoint.pending_startup;
         driver.finished = checkpoint.finished;

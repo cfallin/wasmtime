@@ -271,7 +271,10 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     }
 
     /// The frames of the activation stopped at a debug event, as for
-    /// [`Store::debug_exit_frames`](crate::Store::debug_exit_frames). This is
+    /// [`Store::debug_exit_frames`](crate::Store::debug_exit_frames): one
+    /// exit frame for it, followed by one for each activation parked at a host
+    /// call, most recently started first. For nested calls (a host function
+    /// calling back into the guest) this is their logical call order. This is
     /// empty unless [`Replayer::run`] returned [`ReplayStop::Breakpoint`].
     ///
     /// The frames can be inspected through [`Replayer::store`] until replay
@@ -279,18 +282,26 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     #[cfg(feature = "debug")]
     pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
         let driver = &mut self.driver;
-        let Some(serial) = driver.paused else {
+        let Some(paused) = driver.paused else {
             return Vec::new();
         };
-        let index = driver.index_of(serial);
         let store: &mut StoreOpaque = driver.store;
-        let activation = &mut driver.activations[index];
-        activation.context.rr_swap();
-        let frames =
+        // The paused activation is not parked at a host call; order it first.
+        let mut order = driver
+            .activations
+            .iter_mut()
+            .rev()
+            .filter(|a| a.serial == paused || a.host.is_some())
+            .collect::<Vec<_>>();
+        order.sort_by_key(|a| a.serial != paused);
+        let mut frames = Vec::new();
+        for activation in order {
+            activation.context.rr_swap();
             crate::runtime::vm::with_parked_activation(store, &mut activation.context, |store| {
-                store.debug_exit_frames().collect()
+                frames.extend(store.debug_exit_frames());
             });
-        activation.context.rr_swap();
+            activation.context.rr_swap();
+        }
         frames
     }
 

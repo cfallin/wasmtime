@@ -340,11 +340,6 @@ impl Instance {
         let instance = Instance::from_wasmtime(id, store);
 
         let needs_startup = instance.id.get_mut(store).needs_startup();
-        // Always record an available startup function, even if memory images
-        // made it redundant here. Replay may use different memory images.
-        #[cfg(feature = "rr")]
-        let needs_startup =
-            needs_startup || (store.rr.active() && !module.env_module().startup.is_none());
 
         // At this point the instance is created and stored within the store,
         // but it's also not quite usable just yet. Initialization hasn't

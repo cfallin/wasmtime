@@ -844,10 +844,12 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                             params: sig.params().into(),
                         });
                 }
-                if self.tunables.debug_guest {
+                if self.tunables.debug_guest || self.tunables.recording {
                     // All functions are potentially reachable and
                     // callable by the guest debugger, so they must
-                    // all be flagged as escaping.
+                    // all be flagged as escaping. Record/replay
+                    // identifies functions in the same way whether or
+                    // not the replaying engine enables debugging.
                     self.flag_func_escaped(func_index);
                 }
                 self.result
@@ -1199,6 +1201,13 @@ impl ModuleTranslation<'_> {
     ) {
         if tunables.memory_init_cow {
             self.try_static_init(page_size, max_image_size_always_allowed);
+        }
+
+        // Record/replay records every instance's startup as an activation,
+        // so whether a module has one must not depend on how its memories
+        // are initialized, which differs between engine configurations.
+        if tunables.recording {
+            self.require_startup_func(types);
         }
 
         // If any memory is statically initialized, and if that memory has an

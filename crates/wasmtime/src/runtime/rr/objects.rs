@@ -6,6 +6,7 @@
 
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct RecordedFunc {
     pub func: Func,
     pub host: bool,
