@@ -113,20 +113,23 @@ Buffer growth is fallible. Chunk rotation, configurable size limits,
 compression, and an inline VMStoreContext append cursor are future work.
 The trace currently stays in memory until finalization.
 
-`Memory::data_mut_tracked(store, range)` returns an `rr::MemoryMut` guard. It
-registers a pending write when mutably dereferenced and commits on drop.
-`Memory::write` registers only its destination range. Legacy `data_mut` and
-`data_and_store_mut` register the full memory. Overlapping pending ranges can
-be coalesced within a host segment. Pending writes are flushed before guest
-entry, host return, host growth, and finalization. Consequently, forgetting a
-guard does not lose writes or accidentally record later guest writes as host
-effects. Infallible accessors/destructors poison the recording on failure;
-`finish_recording` reports the error and discards the session.
+Host writes to guest memory are recorded through the ordinary APIs, so that an
+embedding runtime needs no record/replay-specific code. Handing out a mutable
+view registers its range as pending: `Memory::data_mut` and
+`data_and_store_mut` register the whole memory, `Memory::write` its
+destination, and component lowering (the code that `bindgen!` host bindings
+use) and builtins only the bytes they write. The public
+`LowerContext::as_slice_mut` registers the whole memory. Registration is
+constant time; at the next guest entry, host return, host growth, or
+finalization, pending ranges are sorted, merged, and their current contents
+appended to the trace. A write is therefore never lost, and a later guest
+write is never mistaken for a host effect. Infallible accessors poison the
+recording on failure; `finish_recording` reports the error and discards the
+session.
 
-Writes through `Memory::data_ptr` or other untracked pointers are outside the
-supported contract. A pointer obtained through a tracked guard may be used
-only within the guard's borrowing rules. Shared/external concurrent writes
-cannot be represented by the current serial trace.
+Writes through `Memory::data_ptr` or other raw pointers are outside the
+supported contract. Shared/external concurrent writes cannot be represented by
+the current serial trace.
 
 The replay driver owns all activations and resumes one at a time. Each guest
 activation runs on a raw fiber (`wasmtime_fiber::RawFiber`) whose stack, while

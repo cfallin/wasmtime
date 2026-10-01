@@ -376,31 +376,17 @@ impl Instance {
                 .expect("should have a startup function")
         };
         let caller_vmctx = instance.vmctx();
-        #[cfg(feature = "rr")]
-        let rr = unsafe {
-            let funcref = f.vm_func_ref(store.0);
-            store.0.rr_enter(
-                funcref,
-                core::ptr::NonNull::<crate::ValRaw>::dangling().as_ptr(),
-                false,
-            )?
-        };
-        let result = unsafe {
-            let funcref = f.vm_func_ref(store.0);
-            super::func::invoke_wasm_and_catch_traps(store, |_default_caller, vm| {
-                VMFuncRef::array_call(funcref, vm, caller_vmctx, NonNull::from(&mut []))
-            })
-        };
-        #[cfg(feature = "rr")]
+        // SAFETY: the startup function belongs to this store and takes no
+        // parameters or results.
         unsafe {
-            store.0.rr_leave(
-                rr,
-                core::ptr::NonNull::<crate::ValRaw>::dangling().as_ptr(),
-                &result,
-                false,
-            )?;
+            let funcref = f.vm_func_ref(store.0);
+            super::func::invoke_wasm_and_catch_traps(
+                store,
+                funcref,
+                Some(caller_vmctx),
+                NonNull::from(&mut []),
+            )
         }
-        result
     }
 
     /// Get this instance's module.

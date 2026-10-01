@@ -11,6 +11,7 @@ fn engine(mode: RRConfig) -> Result<Engine> {
 // Trace frame tags, for tests that edit traces (see `rr/codec.rs`).
 const ENTER_WASM: u8 = 1;
 const LEAVE_HOST: u8 = 4;
+const WRITE: u8 = 5;
 const MODULE: u8 = 8;
 
 /// The `(tag, body offset)` of each frame of a serialized trace.
@@ -59,10 +60,8 @@ fn nested() -> Result<(Store<usize>, Func, Memory)> {
         move |mut caller: Caller<'_, usize>| -> Result<i32> {
             *caller.data_mut() += 1;
             let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
-            let mut view = memory.data_mut_tracked(&mut caller, 0..4)?;
-            view.copy_from_slice(&10_i32.to_le_bytes());
-            // Forgetting a safe guard must not lose the write before the callback.
-            std::mem::forget(view);
+            // A raw slice handed to the host is recorded at the next boundary.
+            memory.data_mut(&mut caller)[..4].copy_from_slice(&10_i32.to_le_bytes());
             let callback = caller
                 .get_export("callback")
                 .unwrap()
@@ -843,6 +842,13 @@ async fn component_strings_realloc_and_post_return() -> Result<()> {
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
     assert_eq!(run.call(&mut store, ("héllo",))?, ("héllo!".to_owned(),));
     let trace = store.finish_recording()?;
+    // Lowering records the bytes it writes, not the whole 64 KiB memory.
+    let written = frames(trace.as_bytes())
+        .windows(2)
+        .filter(|f| f[0].0 == WRITE)
+        .map(|f| f[1].1 - f[0].1 - 5 - 12)
+        .sum::<usize>();
+    assert!(written < 64, "{written} bytes of memory recorded");
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     let output = replay.replay(&trace).await?;
     let memory = output

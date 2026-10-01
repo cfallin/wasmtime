@@ -10,8 +10,9 @@
 //! function references. GC and typed function references are unsupported.
 //! Shared memory, host table/global mutation, resource limiters, call hooks,
 //! custom signal handlers, Wasm stack switching, guest debugging, epochs, and
-//! fuel are unsupported. Raw-pointer writes are not tracked: use safe memory
-//! APIs or [`Memory::data_mut_tracked`]. Replay requires a compiler and a
+//! fuel are unsupported. Host writes through the memory APIs, including
+//! slices from [`Memory::data_mut`], are recorded; writes through raw pointers
+//! such as [`Memory::data_ptr`] are not. Replay requires a compiler and a
 //! native (non-Pulley) target, and is unsupported on Windows, under Miri, and
 //! with AddressSanitizer. Whole-store checkpoints remain future work.
 //!
@@ -22,7 +23,7 @@ use crate::prelude::*;
 use crate::runtime::vm::VMFuncRef;
 use crate::store::{StoreInner, StoreOpaque};
 use crate::{AsContextMut, Func, Memory, Store, ValRaw};
-use core::ops::{Deref, DerefMut, Range};
+use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
@@ -273,9 +274,12 @@ impl StoreOpaque {
     }
 
     #[cfg(feature = "component-model")]
+    /// Tracks a host write to `written` (clamped to the memory's size) of a
+    /// component's memory.
     pub(crate) fn rr_track_memory_definition(
         &mut self,
         definition: NonNull<crate::vm::VMMemoryDefinition>,
+        written: Range<usize>,
     ) {
         if !self.rr.recording() {
             return;
@@ -288,7 +292,7 @@ impl StoreOpaque {
         match memory {
             Some(memory) => {
                 let len = memory.internal_data_size(self);
-                self.rr_track_memory(memory, 0..len);
+                self.rr_track_memory(memory, written.start.min(len)..written.end.min(len));
             }
             None => self
                 .rr_session()
@@ -373,6 +377,15 @@ impl StoreOpaque {
             unreachable!()
         };
         let mut bytes = core::mem::take(bytes);
+        // Emit each written byte once, in a deterministic order.
+        pending.sort_unstable_by_key(|(id, range)| (*id, range.start));
+        pending.dedup_by(|(id, next), (prev_id, prev)| {
+            let overlaps = id == prev_id && next.start <= prev.end;
+            if overlaps {
+                prev.end = prev.end.max(next.end);
+            }
+            overlaps
+        });
         let result = (|| {
             for (id, range) in &pending {
                 let memory = self.rr.session.as_ref().unwrap().objects.memories[*id];
@@ -408,13 +421,16 @@ impl StoreOpaque {
             return;
         };
         let session = self.rr_session();
-        // Union overlapping ranges only within one uninterrupted host segment.
-        for (other, old) in &mut session.pending {
-            if *other == id && range.start <= old.end && old.start <= range.end {
-                old.start = old.start.min(range.start);
-                old.end = old.end.max(range.end);
-                return;
-            }
+        // Writes are usually sequential, so coalesce with the previous range
+        // here, in constant time; the flush merges any other overlaps.
+        if let Some((other, old)) = session.pending.last_mut()
+            && *other == id
+            && range.start <= old.end
+            && old.start <= range.end
+        {
+            old.start = old.start.min(range.start);
+            old.end = old.end.max(range.end);
+            return;
         }
         if session.pending.try_reserve(1).is_err() {
             session.fail(OutOfMemory::new(core::mem::size_of::<(usize, Range<usize>)>()).into());
@@ -620,60 +636,5 @@ impl StoreOpaque {
         }
         outstanding.swap_remove(position);
         Ok(())
-    }
-}
-
-/// A tracked mutable view of a range of guest memory.
-///
-/// Dropping this guard commits pending writes. Forgetting it is also supported:
-/// the store commits pending writes before guest execution or finalization.
-pub struct MemoryMut<'a> {
-    store: &'a mut StoreOpaque,
-    memory: Memory,
-    range: Range<usize>,
-}
-
-impl Deref for MemoryMut<'_> {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.memory.rr_data(self.store)[self.range.clone()]
-    }
-}
-
-impl DerefMut for MemoryMut<'_> {
-    fn deref_mut(&mut self) -> &mut [u8] {
-        self.store.rr_track_memory(self.memory, self.range.clone());
-        &mut self.memory.rr_data_mut(self.store)[self.range.clone()]
-    }
-}
-
-impl Drop for MemoryMut<'_> {
-    fn drop(&mut self) {
-        if let Err(e) = self.store.rr_flush() {
-            if let Some(session) = &mut self.store.rr.session {
-                session.failure = Some(e);
-            }
-        }
-    }
-}
-
-impl Memory {
-    /// Borrows a byte range, recording its final contents when the returned
-    /// guard is dropped. This also works when recording is disabled.
-    pub fn data_mut_tracked<'a, T: 'static>(
-        &self,
-        store: impl Into<crate::StoreContextMut<'a, T>>,
-        range: Range<usize>,
-    ) -> Result<MemoryMut<'a>> {
-        let store = store.into().0;
-        ensure!(
-            self.rr_data(store).get(range.clone()).is_some(),
-            "memory range out of bounds"
-        );
-        Ok(MemoryMut {
-            store,
-            memory: *self,
-            range,
-        })
     }
 }

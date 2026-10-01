@@ -190,44 +190,13 @@ where
             params.store(&mut store, ty, dst)?;
         }
 
-        // Try to capture only a single variable (a tuple) in the closure below.
-        // This means the size of the closure is one pointer and is much more
-        // efficient to move in memory. This closure is actually invoked on the
-        // other side of a C++ shim, so it can never be inlined enough to make
-        // the memory go away, so the size matters here for performance.
-        let mut captures = (func, storage);
-
-        #[cfg(feature = "rr")]
-        // SAFETY: Params::store initialized the signature's parameter slots.
-        let rr = unsafe {
-            store
-                .0
-                .rr_enter(func, core::ptr::from_ref(&captures.1).cast(), false)?
-        };
-
-        let result = invoke_wasm_and_catch_traps(store, |caller, vm| {
-            let (func_ref, storage) = &mut captures;
-            let storage_len = mem::size_of_val::<Storage<_, _>>(storage) / mem::size_of::<ValRaw>();
-            let storage: *mut Storage<_, _> = storage;
-            let storage = storage.cast::<ValRaw>();
-            let storage = core::ptr::slice_from_raw_parts_mut(storage, storage_len);
-            let storage = NonNull::new(storage).unwrap();
-
-            // SAFETY: this function's own contract is that `func_ref` is safe
-            // to call and additionally that the params/results are correctly
-            // ascribed for this function call to be safe.
-            unsafe { VMFuncRef::array_call(*func_ref, vm, caller, storage) }
-        });
-
-        let (_, storage) = captures;
-        #[cfg(feature = "rr")]
-        // SAFETY: the array call initializes result slots on success only.
-        unsafe {
-            store
-                .0
-                .rr_leave(rr, core::ptr::from_ref(&storage).cast(), &result, false)?;
-        }
-        result?;
+        let len = mem::size_of_val(&storage) / mem::size_of::<ValRaw>();
+        let params_and_returns =
+            NonNull::slice_from_raw_parts(NonNull::from(&mut storage).cast::<ValRaw>(), len);
+        // SAFETY: this function's own contract is that `func` is safe to call
+        // and additionally that the params/results are correctly ascribed for
+        // this function call to be safe.
+        unsafe { invoke_wasm_and_catch_traps(store, func, None, params_and_returns)? };
 
         let mut store = AutoAssertNoGc::new(store.0);
         // SAFETY: this function is itself unsafe to ensure that the result type

@@ -500,18 +500,44 @@ impl Instance {
         store: &'a mut StoreOpaque,
         options: OptionsIndex,
     ) -> &'a mut [u8] {
+        self.options_memory_mut_for(store, options, 0..usize::MAX)
+    }
+
+    /// Like `options_memory_mut`, but the caller writes only the `written`
+    /// range, so record/replay records only those bytes.
+    pub(crate) fn options_memory_mut_for<'a>(
+        &self,
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        written: core::ops::Range<usize>,
+    ) -> &'a mut [u8] {
         let memory = match self.options_memory_raw(store, options) {
             Some(m) => m,
             None => return &mut [],
         };
         #[cfg(feature = "rr")]
-        store.rr_track_memory_definition(memory);
+        store.rr_track_memory_definition(memory, written);
+        #[cfg(not(feature = "rr"))]
+        let _ = written;
         // SAFETY: See `options_memory` comment above, and note that this is
         // taking `&mut StoreOpaque` to thread the lifetime through instead.
         unsafe {
             let memory = memory.as_ref();
             core::slice::from_raw_parts_mut(memory.base.as_ptr(), memory.current_length())
         }
+    }
+
+    /// The `len` bytes at `offset` of the options' memory, if in bounds.
+    pub(crate) fn options_memory_range_mut<'a>(
+        &self,
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        offset: usize,
+        len: usize,
+    ) -> Option<&'a mut [u8]> {
+        let end = offset.checked_add(len)?;
+        self.options_memory_mut_for(store, options, offset..end)
+            .get_mut(offset..end)
     }
 
     /// Helper function to simultaneously get a borrow to this instance's
