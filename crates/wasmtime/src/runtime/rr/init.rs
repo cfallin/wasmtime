@@ -371,28 +371,26 @@ pub(super) fn replay_event<T: 'static>(
             let id = usize::try_from(body.u32()?)?;
             let wasm = body.blob()?;
             body.end()?;
-            ensure!(
-                id == store.rr.session.as_ref().unwrap().objects.modules.len(),
-                "invalid module id"
-            );
-            let module = compile_module(store.engine(), wasm)?;
-            store
-                .rr
-                .session
-                .as_mut()
-                .unwrap()
-                .objects
-                .modules
-                .push(module);
+            let objects = &store.rr.session.as_ref().unwrap().objects;
+            ensure!(id == objects.modules_defined, "invalid module id");
+            if id == objects.modules.len() {
+                let module = compile_module(store.engine(), wasm)?;
+                store
+                    .rr
+                    .session
+                    .as_mut()
+                    .unwrap()
+                    .objects
+                    .modules
+                    .push(module);
+            }
+            store.rr.session.as_mut().unwrap().objects.modules_defined += 1;
         }
         codec::INSTANCE => {
             let id = usize::try_from(body.u32()?)?;
             let objects = &store.rr.session.as_ref().unwrap().objects;
-            let module = objects
-                .modules
-                .get(id)
-                .ok_or_else(|| format_err!("invalid instance module"))?
-                .clone();
+            ensure!(id < objects.modules_defined, "invalid instance module");
+            let module = objects.modules[id].clone();
             let mut imports = Vec::new();
             for initializer in &module.env_module().initializers {
                 let wasmtime_environ::Initializer::Import { index: ty, .. } = *initializer;

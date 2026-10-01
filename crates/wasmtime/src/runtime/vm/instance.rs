@@ -794,6 +794,37 @@ impl Instance {
         result
     }
 
+    /// Restores a defined memory's size and contents, for record/replay
+    /// checkpoints, updating this instance's `VMMemoryDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore_memory(
+        mut self: Pin<&mut Self>,
+        idx: DefinedMemoryIndex,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let memory = &mut self.as_mut().memories_mut()[idx].1;
+        memory.rr_restore(bytes)?;
+        let vmmemory = memory.vmmemory();
+        self.set_memory(idx, vmmemory);
+        Ok(())
+    }
+
+    /// Restores a defined function table's size and raw elements, for
+    /// record/replay checkpoints, updating this instance's
+    /// `VMTableDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore_table(
+        mut self: Pin<&mut Self>,
+        idx: DefinedTableIndex,
+        elements: &[crate::vm::FuncTableElem],
+    ) -> Result<()> {
+        let table = self.as_mut().get_defined_table(idx);
+        table.rr_restore_func_elements(elements)?;
+        let element = table.vmtable();
+        self.set_table(idx, element);
+        Ok(())
+    }
+
     /// Performs a grow operation on the `table_index` specified using `grow`.
     ///
     /// This will handle updating the VMTableDefinition internally as necessary.

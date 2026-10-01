@@ -1167,6 +1167,11 @@ fn throw_ref(store: &mut dyn VMStore, _instance: InstanceId, exnref: u32) -> Res
 }
 
 fn breakpoint(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    // A replay activation instead yields the stop to the replay driver.
+    #[cfg(feature = "rr")]
+    if store.store_opaque_mut().rr_debug_stop() {
+        return Ok(());
+    }
     #[cfg(feature = "debug")]
     {
         store.block_on_debug_handler(crate::DebugEvent::Breakpoint)?;

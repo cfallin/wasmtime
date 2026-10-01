@@ -1828,3 +1828,241 @@ async fn initialization_preserves_import_aliases_across_instances() -> Result<()
     assert_eq!(replay.replay(&trace).await?.instances().len(), 2);
     Ok(())
 }
+
+/// A guest that counts in a global and in memory, grows its memory and table
+/// part-way, and reports each step through a host function that records an
+/// event.
+const COUNTER: &str = r#"(module
+  (import "" "report" (func $report (param i32)))
+  (memory (export "memory") 1)
+  (table (export "table") 1 funcref)
+  (global $count (export "count") (mut i32) (i32.const 0))
+  (func (export "run") (param $n i32) (local $i i32)
+    (loop $l
+      (global.set $count (i32.add (global.get $count) (i32.const 1)))
+      (i32.store (i32.mul (local.get $i) (i32.const 4)) (global.get $count))
+      (if (i32.eq (local.get $i) (i32.const 2))
+        (then
+          (drop (memory.grow (i32.const 1)))
+          (drop (table.grow (ref.null func) (i32.const 3)))))
+      (call $report (local.get $i))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))))"#;
+
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Step(i32);
+
+impl rr::TraceEvent for Step {
+    const TAG: u32 = 2;
+}
+
+fn record_counter(steps: i32) -> Result<rr::Trace> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, i: i32| {
+        rr::record_event(&mut caller, &Step(i))
+    });
+    let module = Module::new(&recording, COUNTER)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    run.call(&mut store, steps)?;
+    store.finish_recording()
+}
+
+/// The counter, memory size, and table size of the counter instance.
+fn counter_state<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> (i32, usize, u64, Vec<u8>) {
+    let instance = replayer.instances()[0];
+    let mut store = replayer.store();
+    let count = instance
+        .get_global(&mut store, "count")
+        .unwrap()
+        .get(&mut store)
+        .unwrap_i32();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let table = instance.get_table(&mut store, "table").unwrap();
+    (
+        count,
+        memory.data_size(&store),
+        table.size(&store),
+        memory.data(&store)[..32].to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn checkpoints_rewind_guest_state_and_events() -> Result<()> {
+    let trace = record_counter(6)?;
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+    replayer.stop_at_events(true);
+
+    let initial = replayer.checkpoint()?;
+    // Stop at the reports of steps 0 and 3: before and after growth, each
+    // with the guest parked in the middle of a host call.
+    let mut checkpoints = Vec::new();
+    let mut states = Vec::new();
+    while let rr::ReplayStop::Event(_) = replayer.run().await? {
+        let step = *seen.lock().unwrap().last().unwrap();
+        if step == 0 || step == 3 {
+            checkpoints.push(replayer.checkpoint()?);
+            states.push(counter_state(&mut replayer));
+        }
+    }
+    let end = counter_state(&mut replayer);
+    assert_eq!(end.0, 6);
+    assert_eq!((end.1, end.2), (2 << 16, 4));
+    assert_eq!(states[0].0, 1);
+    assert_eq!((states[0].1, states[0].2), (1 << 16, 1));
+    assert_eq!(states[1].0, 4);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+
+    // Rewind after the end, to before growth; then jump forward past growth,
+    // back again, and replay to the end from each.
+    for &which in &[0, 1, 0, 1] {
+        replayer.restore(&checkpoints[which])?;
+        assert_eq!(counter_state(&mut replayer), states[which]);
+        seen.lock().unwrap().clear();
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+        replayer.stop_at_events(true);
+        let expected: Vec<i32> = if which == 0 {
+            (1..6).collect()
+        } else {
+            (4..6).collect()
+        };
+        assert_eq!(*seen.lock().unwrap(), expected);
+        assert_eq!(counter_state(&mut replayer), end);
+    }
+
+    // Restart from before any object existed.
+    replayer.restore(&initial)?;
+    assert!(replayer.instances().is_empty());
+    seen.lock().unwrap().clear();
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(counter_state(&mut replayer), end);
+
+    // Checkpoints only restore into their own replay.
+    drop(replayer);
+    let mut other = Store::new(store.engine(), ());
+    let mut other = other.replayer(&trace)?;
+    assert!(other.restore(&checkpoints[0]).is_err());
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+fn debug_engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config.rr(RRConfig::Replaying).guest_debug(true);
+    Engine::new(&config)
+}
+
+/// Where the counter guest is stopped: its function, PC, loop index, and the
+/// replay's view of the counter.
+#[cfg(feature = "debug")]
+fn position<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Result<(u32, u32, i32, i32)> {
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let instance = replayer.instances()[0];
+    let mut store = replayer.store();
+    assert!(frame.parent(&mut store)?.is_none());
+    let (func, pc) = frame.wasm_function_index_and_pc(&mut store)?.unwrap();
+    let i = frame.local(&mut store, 1)?.unwrap_i32();
+    let count = instance
+        .get_global(&mut store, "count")
+        .unwrap()
+        .get(&mut store)
+        .unwrap_i32();
+    Ok((func.as_u32(), pc.raw(), i, count))
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn reversible_debugging_on_replay() -> Result<()> {
+    let trace = record_counter(4)?;
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let initial = replayer.checkpoint()?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+
+    // Run until the guest first reports, then single-step it to the end,
+    // recording every stop.
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    let mut trail = Vec::new();
+    let mut checkpoints = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        checkpoints.push(replayer.checkpoint()?);
+        trail.push(position(&mut replayer)?);
+    }
+    assert!(trail.len() > 20, "{} steps", trail.len());
+    assert_eq!(trail.last().unwrap().3, 4);
+    assert!(trail.windows(2).all(|w| w[0].2 <= w[1].2));
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3]);
+
+    // Step backwards from the end, one stop at a time, by restoring the
+    // previous stop's checkpoint: the guest is exactly where it was.
+    for (k, checkpoint) in checkpoints.iter().enumerate().rev() {
+        replayer.restore(checkpoint)?;
+        assert_eq!(position(&mut replayer)?, trail[k]);
+    }
+
+    // From the middle, stepping forward again retraces the same path and
+    // re-delivers the same events.
+    let middle = trail.len() / 2;
+    replayer.restore(&checkpoints[middle])?;
+    seen.lock().unwrap().clear();
+    let mut again = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        again.push(position(&mut replayer)?);
+    }
+    assert_eq!(again, trail[middle + 1..]);
+    let reports = trail[middle + 1..]
+        .windows(2)
+        .filter(|w| w[0].2 != w[1].2)
+        .count();
+    assert_eq!(seen.lock().unwrap().len(), reports);
+
+    // Breakpoints persist across a restore to the very beginning: with a
+    // breakpoint at one PC in the loop, replay stops there once per
+    // iteration.
+    let (_, pc, _, _) = trail[0];
+    replayer.restore(&initial)?;
+    assert!(replayer.instances().is_empty());
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    let instance = replayer.instances()[0];
+    let module = instance.module(replayer.store()).clone();
+    {
+        let mut breakpoints = replayer.store().edit_breakpoints().unwrap();
+        breakpoints.single_step(false)?;
+        breakpoints.add_breakpoint(&module, ModulePC::new(pc))?;
+    }
+    let mut hits = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        hits.push(position(&mut replayer)?);
+    }
+    assert!(hits.iter().all(|h| h.1 == pc));
+    let iterations = hits.iter().map(|h| h.2).collect::<Vec<_>>();
+    assert!(iterations.windows(2).all(|w| w[0] < w[1]));
+    replayer.restore(&initial)?;
+    let mut from_start = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        from_start.push(position(&mut replayer)?);
+    }
+    assert_eq!(from_start.len(), 4);
+    assert!(from_start.ends_with(&hits));
+    Ok(())
+}

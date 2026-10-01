@@ -476,14 +476,6 @@ impl<T> StoreInner<T> {
                 .contains(wasmparser::WasmFeatures::STACK_SWITCHING),
             "record/replay does not support Wasm stack switching"
         );
-        // Temporary until debug events yield to the replay driver. Reversible
-        // debugging is an intended consumer of RR: the ordinary async hook
-        // retains an arbitrary future on the guest fiber, which would violate
-        // the snapshot contract. See docs/record-replay.md.
-        ensure!(
-            !tunables.debug_guest,
-            "record/replay guest debug event integration is not implemented yet"
-        );
         Ok(())
     }
 }

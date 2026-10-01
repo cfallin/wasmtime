@@ -29,7 +29,7 @@ use core::ptr::NonNull;
 mod codec;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
-pub use replay::{ReplayStop, Replayer};
+pub use replay::{Checkpoint, ReplayStop, Replayer};
 
 /// Core instances constructed while replaying initialization.
 ///
@@ -228,6 +228,12 @@ impl<T: 'static> Store<T> {
             store.engine().is_recording(),
             "recording requires RRConfig::Recording"
         );
+        // Guest debugging is supported on replay instead: a debug handler
+        // could run arbitrary host code that the trace does not record.
+        ensure!(
+            !store.engine().tunables().debug_guest,
+            "record/replay does not support recording with guest debugging"
+        );
         let objects = Objects::default();
         let mut bytes = Vec::new();
         codec::reserve(&mut bytes, codec::MAGIC.len())?;
@@ -338,6 +344,23 @@ impl StoreOpaque {
         record[5..13].copy_from_slice(&u64::try_from(size)?.to_le_bytes());
         record[13..].copy_from_slice(&delta.to_le_bytes());
         Ok(record)
+    }
+
+    /// Requests that the running replay activation, if any, stop for a debug
+    /// event. Its breakpoint trampoline yields to the driver once the libcall
+    /// requesting this returns.
+    pub(crate) fn rr_debug_stop(&mut self) -> bool {
+        match self.vm_store_context().replay_control {
+            Some(control) => {
+                // SAFETY: the running activation's control block is live, and
+                // the driver holds no reference to it while it runs.
+                unsafe {
+                    (*control.as_ptr()).reason = wasmtime_environ::VM_REPLAY_DEBUG;
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// Whether replay must fail this guest growth because it failed when it

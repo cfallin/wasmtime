@@ -134,7 +134,7 @@ impl<'a, T> Caller<'a, T> {
 }
 
 impl StoreOpaque {
-    fn debug_exit_frames(&mut self) -> impl Iterator<Item = FrameHandle> {
+    pub(crate) fn debug_exit_frames(&mut self) -> impl Iterator<Item = FrameHandle> {
         let activations = if self.engine().tunables().debug_guest {
             Backtrace::activations(self)
         } else {

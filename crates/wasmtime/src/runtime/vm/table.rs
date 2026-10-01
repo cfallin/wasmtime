@@ -828,6 +828,38 @@ impl Table {
         }
     }
 
+    /// The raw elements of a function table, including lazy-initialization
+    /// tags, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_func_elements(&self) -> &[FuncTableElem] {
+        let (funcrefs, _) = self.funcrefs();
+        // SAFETY: `MaybeTaggedFuncRef` is a transparent `FuncTableElem`.
+        unsafe { slice::from_raw_parts(funcrefs.as_ptr().cast(), funcrefs.len()) }
+    }
+
+    /// Restores a function table's size and raw elements, as returned by
+    /// `rr_func_elements`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore_func_elements(&mut self, elements: &[FuncTableElem]) -> Result<()> {
+        match self {
+            Self::Dynamic(DynamicTable::Func(DynamicFuncTable { elements: dst, .. })) => {
+                dst.resize_with(elements.len(), || None)?;
+                dst.copy_from_slice(elements);
+            }
+            Self::Static(StaticTable::Func(StaticFuncTable { data, size, .. })) => {
+                // SAFETY: the table owns `data`, and nothing borrows it.
+                let data = unsafe { data.as_mut() };
+                ensure!(elements.len() <= data.len(), "table capacity exceeded");
+                // Elements beyond the size are always null, as `grow` expects.
+                data[elements.len()..*size].fill(None);
+                data[..elements.len()].copy_from_slice(elements);
+                *size = elements.len();
+            }
+            _ => bail!("only function tables can be restored"),
+        }
+        Ok(())
+    }
+
     fn funcrefs(&self) -> (&[MaybeTaggedFuncRef], bool) {
         assert_eq!(self.element_type(), TableElementType::Func);
         match self {

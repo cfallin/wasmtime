@@ -28,7 +28,12 @@ use crate::runtime::vm::{
 };
 use core::mem::MaybeUninit;
 use core::task::Poll;
-use wasmtime_environ::{FuncKey, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED};
+use wasmtime_environ::{
+    FuncKey, VM_REPLAY_DEBUG, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED,
+};
+
+mod checkpoint;
+pub use checkpoint::Checkpoint;
 use wasmtime_fiber::RawFiber;
 
 /// The generated code that replay activations run. It is compiled into an
@@ -86,6 +91,8 @@ impl Trampolines {
 /// A guest activation and everything its suspended fiber refers to. All of
 /// it has a stable address until the activation is disposed.
 struct Activation {
+    // Identifies this activation across checkpoints.
+    serial: u64,
     fiber: Option<RawFiber>,
     // An owned allocation (from `Box`). The fiber's generated code writes to
     // it while running, so the driver only accesses it through raw pointers
@@ -123,6 +130,7 @@ impl Activation {
 
 /// A borrowed array-call buffer on a suspended activation's stack. Only the
 /// driver accesses it, and only before resuming or disposing that activation.
+#[derive(Clone, Copy)]
 struct HostCall {
     func: usize,
     call: usize,
@@ -147,7 +155,15 @@ struct Driver<'a, T: 'static> {
     pending_startup: Option<usize>,
     // Observers of embedder-defined events, by tag.
     observers: Vec<(u32, Box<dyn FnMut(&[u8]) -> Result<()> + Send>)>,
+    stop_at_events: bool,
     finished: bool,
+    // The activation stopped at a debug event, which resumes before any
+    // further trace events are processed.
+    paused: Option<u64>,
+    // Why the current `run` should return, once the current step completes.
+    stop: Option<ReplayStop>,
+    next_serial: u64,
+    checkpoints: checkpoint::Checkpoints,
 }
 
 /// Replays a trace in a store, one stop at a time.
@@ -160,11 +176,18 @@ pub struct Replayer<'a, T: 'static> {
 }
 
 /// Why [`Replayer::run`] returned.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReplayStop {
     /// The entire trace was replayed.
     Finished,
+    /// Guest code reached a breakpoint or single-stepped, as configured
+    /// through the store's breakpoint API. The stopped frames are available
+    /// from `Replayer::debug_exit_frames`.
+    Breakpoint,
+    /// An embedder event with this tag was replayed, after its observers ran.
+    /// Only reported when enabled with [`Replayer::stop_at_events`].
+    Event(u32),
 }
 
 impl<'a, T: Send + 'static> Replayer<'a, T> {
@@ -197,7 +220,12 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 instances: Vec::new(),
                 pending_startup: None,
                 observers: Vec::new(),
+                stop_at_events: false,
                 finished: false,
+                paused: None,
+                stop: None,
+                next_serial: 0,
+                checkpoints: Default::default(),
             },
         })
     }
@@ -223,7 +251,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         core::future::poll_fn(|cx| {
             // Give the executor a chance to cancel long traces between events.
             for _ in 0..256 {
-                if driver.finished {
+                if driver.finished && driver.paused.is_none() {
                     return Poll::Ready(Ok(ReplayStop::Finished));
                 }
                 if let Err(e) = driver.step() {
@@ -232,11 +260,43 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                         driver.reader.position()
                     ))));
                 }
+                if let Some(stop) = driver.stop.take() {
+                    return Poll::Ready(Ok(stop));
+                }
             }
             cx.waker().wake_by_ref();
             Poll::Pending
         })
         .await
+    }
+
+    /// The frames of the activation stopped at a debug event, as for
+    /// [`Store::debug_exit_frames`](crate::Store::debug_exit_frames). This is
+    /// empty unless [`Replayer::run`] returned [`ReplayStop::Breakpoint`].
+    ///
+    /// The frames can be inspected through [`Replayer::store`] until replay
+    /// continues or is restored.
+    #[cfg(feature = "debug")]
+    pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
+        let driver = &mut self.driver;
+        let Some(serial) = driver.paused else {
+            return Vec::new();
+        };
+        let index = driver.index_of(serial);
+        let store: &mut StoreOpaque = driver.store;
+        let activation = &mut driver.activations[index];
+        activation.context.rr_swap();
+        let frames =
+            crate::runtime::vm::with_parked_activation(store, &mut activation.context, |store| {
+                store.debug_exit_frames().collect()
+            });
+        activation.context.rr_swap();
+        frames
+    }
+
+    /// Also stop [`Replayer::run`] after each embedder event is replayed.
+    pub fn stop_at_events(&mut self, enabled: bool) {
+        self.driver.stop_at_events = enabled;
     }
 
     /// Core instances constructed so far, in their recorded construction
@@ -272,6 +332,10 @@ impl<T: 'static> Driver<'_, T> {
     }
 
     fn step(&mut self) -> Result<()> {
+        if let Some(serial) = self.paused.take() {
+            let index = self.index_of(serial);
+            return self.resume(index, None, true);
+        }
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
             ensure!(
@@ -298,6 +362,9 @@ impl<T: 'static> Driver<'_, T> {
                 let payload = body.rest();
                 for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
                     observer(payload).context("failed to observe a trace event")?;
+                }
+                if self.stop_at_events {
+                    self.stop = Some(ReplayStop::Event(tag));
                 }
             }
             codec::HOST
@@ -351,7 +418,7 @@ impl<T: 'static> Driver<'_, T> {
                     .map_err(|_| OutOfMemory::new(core::mem::size_of::<Activation>()))?;
                 let activation = self.activate(func, id, call, values)?;
                 self.activations.push(activation);
-                self.resume(self.activations.len() - 1, None)?;
+                self.resume(self.activations.len() - 1, None, false)?;
             }
             codec::ENTER_HOST => {
                 let Some(Observed::Host(activation, mut call)) = self.observed.take() else {
@@ -421,7 +488,7 @@ impl<T: 'static> Driver<'_, T> {
                 let outcome = body.outcome(&bound.results, values, |id| {
                     session.objects.decode_ref(self.store, id)
                 })?;
-                self.resume(index, outcome.err())?;
+                self.resume(index, outcome.err(), false)?;
             }
             codec::LEAVE_WASM => {
                 let Some(Observed::Complete(actual_call, result)) = self.observed.take() else {
@@ -461,7 +528,8 @@ impl<T: 'static> Driver<'_, T> {
                     body.bytes() == &self.scratch[5..],
                     "guest return values or trap diverged"
                 );
-                self.activations.remove(index).dispose(self.store);
+                let activation = self.activations.remove(index);
+                self.retire(activation);
             }
             codec::WRITE => {
                 self.require_idle(
@@ -597,7 +665,9 @@ impl<T: 'static> Driver<'_, T> {
             .max(range.start);
         let context =
             EntryStoreContext::rr_initial(store, stack_limit, NonNull::from(&mut *stack_info));
+        self.next_serial += 1;
         Ok(Activation {
+            serial: self.next_serial,
             fiber: Some(fiber),
             control,
             context,
@@ -610,31 +680,55 @@ impl<T: 'static> Driver<'_, T> {
         })
     }
 
-    /// Runs the activation at `index` until its next yield and records what it
-    /// yielded for. A `pending` error resumes a parked host call as failed.
-    fn resume(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
-        // Guest growth failures recorded while the activation ran follow the
-        // event that resumes it; queue them for the growth libcalls.
-        let mut failures = Vec::new();
-        while self.reader.peek_tag() == Some(codec::GROWTH_FAILED) {
-            let (_, mut body) = self.reader.record()?;
-            let record = body.take(codec::GROWTH_FAILED_LEN)?;
-            body.end()?;
-            failures.try_reserve(1)?;
-            failures.push(record.try_into().unwrap());
-        }
+    fn growth_failures(&mut self) -> &mut Vec<[u8; codec::GROWTH_FAILED_LEN]> {
         let Mode::Replaying { growth_failures } = &mut self.store.rr.session.as_mut().unwrap().mode
         else {
             unreachable!()
         };
-        *growth_failures = failures;
+        growth_failures
+    }
+
+    /// Frees a completed activation, unless a checkpoint can restore it.
+    fn retire(&mut self, activation: Activation) {
+        if let Some(activation) = self.checkpoints.retire(activation) {
+            activation.dispose(self.store);
+        }
+    }
+
+    fn index_of(&self, serial: u64) -> usize {
+        self.activations
+            .iter()
+            .position(|a| a.serial == serial)
+            .unwrap()
+    }
+
+    /// Runs the activation at `index` until its next yield and records what it
+    /// yielded for. A `pending` error resumes a parked host call as failed.
+    /// `paused` resumes an activation stopped at a debug event.
+    fn resume(&mut self, index: usize, pending: Option<Error>, paused: bool) -> Result<()> {
+        // Guest growth failures recorded while the activation ran follow the
+        // event that resumes it; queue them for the growth libcalls.
+        if !paused {
+            let mut failures = Vec::new();
+            while self.reader.peek_tag() == Some(codec::GROWTH_FAILED) {
+                let (_, mut body) = self.reader.record()?;
+                let record = body.take(codec::GROWTH_FAILED_LEN)?;
+                body.end()?;
+                failures.try_reserve(1)?;
+                failures.push(record.try_into().unwrap());
+            }
+            *self.growth_failures() = failures;
+        }
 
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
         let fiber = activation.fiber.as_mut().unwrap();
         let control = activation.control.as_ptr();
         // SAFETY: the activation is not running.
-        unsafe { (*control).host_succeeded = u32::from(pending.is_none()) };
+        unsafe {
+            (*control).reason = 0;
+            (*control).host_succeeded = u32::from(pending.is_none());
+        }
 
         // Install this activation's runtime state. Everything installed here
         // is restored before returning, so nothing refers to the fiber while
@@ -677,17 +771,22 @@ impl<T: 'static> Driver<'_, T> {
             fiber.stack().range().unwrap(),
         );
         verify_suspended_stack(fiber)?;
-        let Mode::Replaying { growth_failures } = &store.rr.session.as_ref().unwrap().mode else {
-            unreachable!()
-        };
-        ensure!(
-            growth_failures.is_empty(),
-            "replay diverged: a recorded guest growth failure did not occur"
-        );
+        let serial = activation.serial;
+        let call = activation.call;
 
         // SAFETY: the activation has yielded, and this reference does not
         // outlive this function.
         let control = unsafe { &*control };
+        if control.reason == VM_REPLAY_DEBUG {
+            self.paused = Some(serial);
+            self.stop = Some(ReplayStop::Breakpoint);
+            return Ok(());
+        }
+        ensure!(
+            self.growth_failures().is_empty(),
+            "replay diverged: a recorded guest growth failure did not occur"
+        );
+        let store: &mut StoreOpaque = self.store;
         match control.reason {
             VM_REPLAY_HOST_CALL => {
                 let callee = control.host_callee.unwrap().as_non_null();
@@ -715,7 +814,7 @@ impl<T: 'static> Driver<'_, T> {
                     values_len,
                 ));
                 self.observed = Some(Observed::Host(
-                    activation.call,
+                    call,
                     HostCall {
                         func: id,
                         call: 0,
@@ -724,8 +823,9 @@ impl<T: 'static> Driver<'_, T> {
                 ));
             }
             VM_REPLAY_RETURNED | VM_REPLAY_TRAPPED => {
-                fiber.finish()?;
-                self.observed = Some(Observed::Complete(activation.call, result));
+                let index = self.index_of(serial);
+                self.activations[index].fiber.as_mut().unwrap().finish()?;
+                self.observed = Some(Observed::Complete(call, result));
             }
             reason => bail!("replay activation yielded with unknown reason {reason}"),
         }
@@ -739,6 +839,9 @@ impl<T: 'static> Drop for Driver<'_, T> {
         // exist. Nothing runs on their fibers, and no original host
         // implementation runs during cancellation.
         while let Some(activation) = self.activations.pop() {
+            activation.dispose(self.store);
+        }
+        for activation in self.checkpoints.take_retired() {
             activation.dispose(self.store);
         }
         self.store.rr.session = None;

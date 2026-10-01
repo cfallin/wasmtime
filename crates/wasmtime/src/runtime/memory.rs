@@ -736,6 +736,15 @@ impl Memory {
         store[self.instance].memory_ptr(self.index).as_ptr().addr()
     }
 
+    /// Restores this memory's size and contents, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore(&self, store: &mut StoreOpaque, bytes: &[u8]) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_restore_memory(self.index, bytes)
+    }
+
     #[cfg(feature = "rr")]
     pub(crate) fn rr_data<'a>(&self, store: &'a StoreOpaque) -> &'a [u8] {
         let definition = store[self.instance].memory(self.index);

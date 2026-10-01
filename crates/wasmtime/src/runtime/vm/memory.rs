@@ -191,6 +191,16 @@ pub trait RuntimeLinearMemory: Send + Sync {
         let _ = len;
         panic!("CoW images used with this memory and it doesn't support it");
     }
+
+    /// Internal method for record/replay checkpoints: shrinks this memory to
+    /// `size` bytes. Bytes beyond `size` must read as zero after growing
+    /// again, and must not be accessible until then.
+    #[doc(hidden)]
+    #[cfg(feature = "rr")]
+    fn shrink_to(&mut self, size: usize) -> Result<()> {
+        let _ = size;
+        bail!("this kind of linear memory cannot be restored to a smaller size")
+    }
 }
 
 /// The base pointer of a memory allocation.
@@ -382,6 +392,16 @@ impl Memory {
         match self {
             Memory::Local(mem) => mem.byte_size(),
             Memory::Shared(mem) => mem.byte_size(),
+        }
+    }
+
+    /// Restores a non-shared memory's size and contents, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            Memory::Local(mem) => mem.rr_restore(bytes),
+            Memory::Shared(_) => bail!("shared memories cannot be restored"),
         }
     }
 
@@ -729,6 +749,54 @@ impl LocalMemory {
 
     pub fn vmmemory(&self) -> VMMemoryDefinition {
         self.alloc.vmmemory()
+    }
+
+    /// Restores this memory to the size and contents of `bytes`, for
+    /// record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub fn rr_restore(&mut self, bytes: &[u8]) -> Result<()> {
+        let old = self.alloc.byte_size();
+        let new = bytes.len();
+        if new > old {
+            match &mut self.memory_image {
+                Some(image) if new <= self.alloc.byte_capacity() => {
+                    image.set_heap_limit(new)?;
+                    self.alloc.set_byte_size(new);
+                }
+                _ => {
+                    // As in `grow`, growth beyond the image's slot discards it.
+                    self.memory_image = None;
+                    self.alloc.grow_to(new)?;
+                }
+            }
+        } else if new < old {
+            match &mut self.memory_image {
+                Some(image) => {
+                    // Zero the rest of the last accessible host page; the
+                    // pages beyond it are discarded.
+                    let page_end = crate::vm::HostAlignedByteCount::new_rounded_up(new)?
+                        .byte_count()
+                        .min(old);
+                    // SAFETY: `new..page_end` is accessible memory owned by
+                    // this allocation, and nothing borrows it.
+                    unsafe {
+                        self.alloc
+                            .base()
+                            .as_mut_ptr()
+                            .add(new)
+                            .write_bytes(0, page_end - new);
+                    }
+                    image.rr_shrink_heap_limit(new)?;
+                    self.alloc.set_byte_size(new);
+                }
+                None => self.alloc.shrink_to(new)?,
+            }
+        }
+        // SAFETY: the memory is now `new` bytes long and nothing borrows it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.alloc.base().as_mut_ptr(), new);
+        }
+        Ok(())
     }
 
     pub fn byte_size(&self) -> usize {

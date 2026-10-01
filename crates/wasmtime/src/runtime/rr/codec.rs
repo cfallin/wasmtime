@@ -203,6 +203,10 @@ impl<'a> Reader<'a> {
         self.position
     }
 
+    pub fn set_position(&mut self, position: usize) {
+        self.position = position;
+    }
+
     /// The tag of the next record, if any.
     pub fn peek_tag(&self) -> Option<u8> {
         self.bytes.get(self.position).copied()

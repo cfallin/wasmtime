@@ -531,6 +531,32 @@ impl Table {
         Table { instance, index }
     }
 
+    /// This function table's raw elements, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_elements(
+        &self,
+        store: &mut StoreOpaque,
+    ) -> Result<Vec<crate::vm::FuncTableElem>> {
+        let (table, _) = self.wasmtime_table(store, None);
+        let elements = table.rr_func_elements();
+        let mut copy = Vec::new();
+        copy.try_reserve_exact(elements.len())?;
+        copy.extend_from_slice(elements);
+        Ok(copy)
+    }
+
+    /// Restores this function table's size and raw elements.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore(
+        &self,
+        store: &mut StoreOpaque,
+        elements: &[crate::vm::FuncTableElem],
+    ) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_restore_table(self.index, elements)
+    }
+
     #[cfg(feature = "rr")]
     pub(crate) fn rr_key(&self) -> (u32, u32) {
         (self.instance.instance().as_u32(), self.index.as_u32())
