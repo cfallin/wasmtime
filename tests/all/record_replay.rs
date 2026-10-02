@@ -2859,3 +2859,59 @@ async fn preloaded_modules_take_breakpoints_before_replay() -> Result<()> {
     assert_eq!(position(&mut replayer)?.1, pc);
     Ok(())
 }
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn interrupting_replay_with_epochs() -> Result<()> {
+    // A long loop with no trace events, which only an epoch check can stop.
+    const SPIN: &str = r#"
+    (module
+      (func (export "spin") (param $n i32) (result i32)
+        (local $i i32) (local $acc i32)
+        loop
+          (local.set $acc (i32.add (local.get $acc) (i32.mul (local.get $i) (i32.const 3))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $acc))
+    "#;
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let module = Module::new(&recording, SPIN)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 10_000_000)?;
+    let trace = store.finish_recording()?;
+
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Replaying)
+        .guest_debug(true)
+        .epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+    let mut replayer = store.replayer(&trace)?;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    replayer.set_interrupt_flag(flag.clone());
+    // An interrupt request stops replay at the next epoch check once the
+    // epoch advances (in practice, from another thread while replay runs).
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Interrupted);
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    // Stopped in the loop, which can be inspected and checkpointed.
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    let i = frames[0].local(&mut replayer.store(), 1)?.unwrap_i32();
+    assert!(i > 0, "{i}");
+    let checkpoint = replayer.checkpoint()?;
+    // Epoch ticks without a request do not stop replay, which continues to
+    // the end, reproducing the recorded result, and again from the
+    // interrupted point.
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    replayer.restore(&checkpoint)?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    Ok(())
+}
