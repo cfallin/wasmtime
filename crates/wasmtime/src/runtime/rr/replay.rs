@@ -189,6 +189,10 @@ pub enum ReplayStop {
     /// through the store's breakpoint API. The stopped frames are available
     /// from `Replayer::debug_exit_frames`.
     Breakpoint,
+    /// Replay was interrupted through the flag given to
+    /// [`Replayer::set_interrupt_flag`]. Guest code is stopped as for
+    /// breakpoints.
+    Interrupted,
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
@@ -202,7 +206,7 @@ pub enum ReplayStop {
 
 impl<'a, T: Send + 'static> Replayer<'a, T> {
     pub(super) fn new(store: &'a mut StoreInner<T>, trace: &'a Trace) -> Result<Self> {
-        store.rr_validate()?;
+        store.rr_validate(false)?;
         ensure!(
             store.engine().is_replaying(),
             "replay requires RRConfig::Replaying"
@@ -222,11 +226,17 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 parked: Vec::new(),
                 embedder_access: false,
                 stopped: Vec::new(),
+                interrupt: None,
+                interrupted: false,
             },
             pending: Vec::new(),
             failure: None,
             receivers: Vec::new(),
         })?);
+        // Epoch checks only look for interrupt requests.
+        if store.engine().tunables().epoch_interruption {
+            store.set_epoch_deadline(1);
+        }
         Ok(Replayer {
             driver: Driver {
                 store,
@@ -307,6 +317,22 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     #[cfg(feature = "debug")]
     pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
         self.driver.store.debug_exit_frames().collect()
+    }
+
+    /// Makes replay stop with [`ReplayStop::Interrupted`] once `flag` is set,
+    /// clearing it. This requires an engine configured with
+    /// [`Config::epoch_interruption`](crate::Config::epoch_interruption):
+    /// guest code checks the flag whenever the engine's epoch advances, so
+    /// after setting the flag, call
+    /// [`Engine::increment_epoch`](crate::Engine::increment_epoch) to stop
+    /// promptly. Epoch checks do not otherwise affect replay.
+    pub fn set_interrupt_flag(&mut self, flag: alloc::sync::Arc<core::sync::atomic::AtomicBool>) {
+        let Mode::Replaying { interrupt, .. } =
+            &mut self.driver.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *interrupt = Some(flag);
     }
 
     /// Compiles every module in the trace now, rather than when replay
@@ -973,7 +999,16 @@ impl<T: 'static> Driver<'_, T> {
                 self.stop = Some(ReplayStop::Watchpoint(hit));
                 return Ok(());
             }
-            self.stop = Some(ReplayStop::Breakpoint);
+            let Mode::Replaying { interrupted, .. } =
+                &mut self.store.rr.session.as_mut().unwrap().mode
+            else {
+                unreachable!()
+            };
+            self.stop = Some(if core::mem::take(interrupted) {
+                ReplayStop::Interrupted
+            } else {
+                ReplayStop::Breakpoint
+            });
             return Ok(());
         }
         ensure!(

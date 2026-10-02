@@ -193,6 +193,11 @@ impl<'a> Debugger<'a> {
                         // Connection error: break.
                         break 'mainloop;
                     }
+                    // Ask the debuggee to stop; its `interrupted` event is
+                    // then reported as the stop (see `handle_event`).
+                    trace!("Ctrl-C: interrupting debuggee");
+                    self.debuggee.interrupt();
+                    self.interrupt = true;
                     stub = inner.interrupt_handled(self, None::<MultiThreadStopReason<u64>>)?;
                 }
                 GdbStubStateMachine::Disconnected(mut inner) => {
@@ -222,6 +227,8 @@ impl<'a> Debugger<'a> {
     }
 
     fn update_on_stop(&mut self) {
+        // Any stop satisfies a pending interrupt request.
+        self.interrupt = false;
         self.addr_space.update(self.debuggee).unwrap();
 
         // Cache all frame handles for the duration of this stop.

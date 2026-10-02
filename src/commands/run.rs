@@ -99,10 +99,7 @@ impl RunCommand {
     /// This also adjusts the guest options as needed to enable
     /// debugging (e.g., implicitly set `-D guest-debug=y`).
     #[cfg(feature = "debug")]
-    ///
-    /// `debuggee_epochs` enables epoch interruption in the debuggee, so that
-    /// a debugger can interrupt it.
-    pub(crate) fn debugger_run(&mut self, debuggee_epochs: bool) -> Result<Option<RunCommand>> {
+    pub(crate) fn debugger_run(&mut self) -> Result<Option<RunCommand>> {
         fn set_implicit_option(
             place: &str,
             name: &str,
@@ -151,14 +148,12 @@ impl RunCommand {
                 &mut self.run.common.debug.guest_debug,
                 true,
             )?;
-            if debuggee_epochs {
-                set_implicit_option(
-                    "debuggee",
-                    "epoch_interruption",
-                    &mut self.run.common.wasm.epoch_interruption,
-                    true,
-                )?;
-            }
+            set_implicit_option(
+                "debuggee",
+                "epoch_interruption",
+                &mut self.run.common.wasm.epoch_interruption,
+                true,
+            )?;
 
             let mut debugger_run = RunCommand::try_parse_from(
                 ["run".into(), debugger_component_path.into()]
@@ -251,7 +246,7 @@ impl RunCommand {
             self.run.common.init_logging()?;
 
             #[cfg(feature = "debug")]
-            let debug_run = self.debugger_run(true)?;
+            let debug_run = self.debugger_run()?;
             #[cfg(all(feature = "debug", feature = "rr"))]
             if debug_run.is_some() && self.run.record.is_some() {
                 bail!("--record cannot be combined with a debugger; debug the replay instead");

@@ -434,7 +434,9 @@ impl<T> DerefMut for StoreInner<T> {
 
 #[cfg(feature = "rr")]
 impl<T> StoreInner<T> {
-    pub(crate) fn rr_validate(&self) -> Result<()> {
+    /// Checks that this store can start recording (if `recording`) or
+    /// replaying.
+    pub(crate) fn rr_validate(&self, recording: bool) -> Result<()> {
         ensure!(
             !self.rr.active(),
             "store already has an active record/replay session"
@@ -464,8 +466,13 @@ impl<T> StoreInner<T> {
         );
         let tunables = self.engine().tunables();
         ensure!(
-            !tunables.consume_fuel && !tunables.epoch_interruption,
-            "record/replay does not support fuel or epoch interruption"
+            !tunables.consume_fuel,
+            "record/replay does not support fuel"
+        );
+        // Replay uses epochs only to interrupt replay for debugging.
+        ensure!(
+            !recording || !tunables.epoch_interruption,
+            "recording does not support epoch interruption"
         );
         ensure!(
             !self

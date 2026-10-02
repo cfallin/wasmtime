@@ -173,9 +173,7 @@ impl<T: Send + 'static> std::clone::Clone for Handler<T> {
 
 impl<T: Send + 'static> DebugHandler for Handler<T> {
     type Data = T;
-    async fn handle(&self, mut store: StoreContextMut<'_, T>, event: DebugEvent<'_>) {
-        let mut in_rx = self.0.in_rx.lock().await;
-
+    async fn handle(&self, store: StoreContextMut<'_, T>, event: DebugEvent<'_>) {
         let result = match event {
             DebugEvent::HostcallError(_) => DebugRunResult::HostcallError,
             DebugEvent::Exception(exn) => DebugRunResult::Exception(exn),
@@ -194,6 +192,15 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
                 DebugRunResult::EpochYield
             }
         };
+        self.pause(store, result).await;
+    }
+}
+
+impl<T: Send + 'static> Handler<T> {
+    /// Reports `result` to the outer `Debuggee` and serves its queries until
+    /// it continues.
+    async fn pause(&self, mut store: StoreContextMut<'_, T>, result: DebugRunResult) {
+        let mut in_rx = self.0.in_rx.lock().await;
         if self.0.out_tx.send(Response::Paused(result)).await.is_err() {
             // Outer Debuggee has been dropped: just continue
             // executing.
@@ -275,8 +282,9 @@ impl<T: Send + 'static> Debuggee<T> {
     /// store fail. `setup` can configure the replayer before it starts, for
     /// example to observe embedder events such as WASI output.
     ///
-    /// An interrupt request (see [`Debuggee::interrupt_pending`]) pauses the
-    /// replay as an epoch yield would, the next time it reaches a trace event.
+    /// With an engine configured for epoch interruption, an interrupt request
+    /// (see [`Debuggee::interrupt_pending`]) pauses the replay, as an epoch
+    /// yield would, once the engine's epoch next advances.
     #[cfg(feature = "rr")]
     pub fn new_replay(
         store: Store<T>,
@@ -287,34 +295,22 @@ impl<T: Send + 'static> Debuggee<T> {
             let result = async {
                 let mut replayer = store.replayer(&trace)?;
                 replayer.preload_modules()?;
+                replayer.set_interrupt_flag(handler.0.interrupt_pending.clone());
                 setup(&mut replayer);
                 handler
                     .handle(replayer.store(), DebugEvent::Breakpoint)
                     .await;
                 loop {
-                    let interrupt = handler.0.interrupt_pending.clone();
-                    let stop = {
-                        let mut run = std::pin::pin!(replayer.run());
-                        // `Replayer::run` yields between trace events, where
-                        // it can be abandoned without losing progress.
-                        core::future::poll_fn(|cx| {
-                            if interrupt.load(Ordering::SeqCst) {
-                                return std::task::Poll::Ready(None);
-                            }
-                            run.as_mut().poll(cx).map(Some)
-                        })
-                        .await
-                    };
-                    let event = match stop.transpose()? {
-                        None => DebugEvent::EpochYield,
-                        Some(wasmtime::rr::ReplayStop::Finished) => break,
-                        Some(wasmtime::rr::ReplayStop::Breakpoint) => DebugEvent::Breakpoint,
-                        Some(wasmtime::rr::ReplayStop::Watchpoint(hit)) => {
-                            DebugEvent::Watchpoint(hit)
+                    let result = match replayer.run().await? {
+                        wasmtime::rr::ReplayStop::Finished => break,
+                        wasmtime::rr::ReplayStop::Breakpoint => DebugRunResult::Breakpoint,
+                        wasmtime::rr::ReplayStop::Interrupted => DebugRunResult::EpochYield,
+                        wasmtime::rr::ReplayStop::Watchpoint(hit) => {
+                            DebugRunResult::Watchpoint(hit)
                         }
-                        Some(_) => continue,
+                        _ => continue,
                     };
-                    handler.handle(replayer.store(), event).await;
+                    handler.pause(replayer.store(), result).await;
                 }
                 Ok(())
             }
@@ -654,6 +650,53 @@ mod test {
             }
         }
         assert!(steps > 3, "{steps} steps");
+        debuggee.finish().await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "rr")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn replay_interrupt() -> wasmtime::Result<()> {
+        let wat = r#"
+            (module
+              (func (export "main") (result i32)
+                (local $i i32)
+                loop
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if 0 (i32.lt_u (local.get $i) (i32.const 1000000)))
+                end
+                local.get $i))
+        "#;
+        let mut config = Config::new();
+        config.rr(RRConfig::Recording);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, ());
+        store.start_recording()?;
+        let module = Module::new(&engine, wat)?;
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let main = instance.get_typed_func::<(), i32>(&mut store, "main")?;
+        main.call(&mut store, ())?;
+        let trace = store.finish_recording()?;
+
+        let mut config = Config::new();
+        config
+            .rr(RRConfig::Replaying)
+            .guest_debug(true)
+            .epoch_interruption(true);
+        let engine = Engine::new(&config)?;
+        let mut debuggee = Debuggee::new_replay(Store::new(&engine, ()), trace, |_| {});
+        // Wait for the initial pause, then interrupt, as the debugger API's
+        // `interrupt` does.
+        debuggee.with_store(|_| ()).await?;
+        debuggee.interrupt_pending().store(true, Ordering::SeqCst);
+        engine.increment_epoch();
+        assert!(matches!(debuggee.run().await?, DebugRunResult::EpochYield));
+        let frames = debuggee
+            .with_store(|mut store| store.debug_exit_frames().count())
+            .await?;
+        assert_eq!(frames, 1);
+        assert!(matches!(debuggee.run().await?, DebugRunResult::Finished));
         debuggee.finish().await?;
         Ok(())
     }

@@ -45,7 +45,9 @@ impl ReplayCommand {
         let mut cmd = RunCommand::for_replay(self.run, trace_path.clone());
         cmd.run.common.init_logging()?;
         #[cfg(feature = "debug")]
-        let debug_run = cmd.debugger_run(false)?;
+        // This also enables epoch interruption, so the debugger can interrupt
+        // the replay.
+        let debug_run = cmd.debugger_run()?;
 
         let bytes = std::fs::read(&trace_path)
             .with_context(|| format!("failed to read trace `{}`", trace_path.display()))?;
