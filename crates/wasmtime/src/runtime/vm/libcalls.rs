@@ -263,6 +263,11 @@ fn memory_grow(
             .await?
             .map(|size_in_bytes| AllocationSize(size_in_bytes >> page_size_log2));
 
+        #[cfg(feature = "rr")]
+        if result.is_none() {
+            store.rr.poison("failed guest memory growth");
+        }
+
         Ok(result)
     })?
 }
@@ -320,6 +325,10 @@ unsafe fn table_grow(
             .defined_table_grow(defined_table_index, limiter, delta)
             .await?
             .map(AllocationSize);
+        #[cfg(feature = "rr")]
+        if result.is_none() {
+            store.rr.poison("failed guest table growth");
+        }
         Ok(result)
     })?
 }
