@@ -317,6 +317,7 @@ impl Metadata<'_> {
             recording,
             memory_watchpoints,
             table_write_tracking,
+            debug_step_counter,
 
             // This doesn't affect compilation, it's just a runtime setting.
             memory_reservation_for_growth: _,
@@ -434,6 +435,11 @@ impl Metadata<'_> {
             table_write_tracking,
             other.table_write_tracking,
             "table write tracking",
+        )?;
+        Self::check_bool(
+            debug_step_counter,
+            other.debug_step_counter,
+            "debug step counter",
         )?;
         Self::check_inlining(inlining, other.inlining)?;
         Self::check_int(

@@ -159,6 +159,11 @@ define_tunables! {
         /// runtime before writing them, for record/replay checkpoints.
         pub table_write_tracking: bool,
 
+        /// Whether compiled code counts every Wasm operator it executes in
+        /// the store's `VMDebugSteps`, and can stop at a given count, for
+        /// reversible debugging on replay.
+        pub debug_step_counter: bool,
+
         /// Whether record/replay compilation is enabled. Retains core Wasm
         /// bytecode, preserves component builtin calls for interception, and
         /// (for native targets) includes the replay trampolines.
@@ -293,6 +298,7 @@ impl Tunables {
             concurrency_support: true,
             memory_watchpoints: false,
             table_write_tracking: false,
+            debug_step_counter: false,
             recording: false,
             gc_zeal_alloc_counter: None,
             gc_heap_reservation: 0,

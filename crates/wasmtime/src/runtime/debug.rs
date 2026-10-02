@@ -946,6 +946,20 @@ impl crate::Memory {
         watch: bool,
     ) -> Result<()> {
         let store = store.as_context_mut().0.as_store_opaque();
+        self.debug_watch_opaque(store, range.clone(), watch)?;
+        // Watchpoints apply to the replay's whole timeline, including after
+        // restoring a checkpoint from before this memory was created.
+        #[cfg(feature = "rr")]
+        store.rr_note_watch(*self, range, watch)?;
+        Ok(())
+    }
+
+    pub(crate) fn debug_watch_opaque(
+        &self,
+        store: &mut StoreOpaque,
+        range: core::ops::Range<u64>,
+        watch: bool,
+    ) -> Result<()> {
         let Some(shadow) = self.vm_shadow_mut(store) else {
             crate::error::bail!("watchpoints require guest debugging");
         };

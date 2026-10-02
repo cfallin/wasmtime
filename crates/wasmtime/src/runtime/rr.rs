@@ -37,7 +37,7 @@ mod codec;
 pub(crate) mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
-pub use replay::{Checkpoint, ReplayStop, Replayer};
+pub use replay::{Checkpoint, ReplayPosition, ReplayStop, Replayer};
 
 /// Core instances constructed while replaying initialization.
 ///
@@ -276,6 +276,13 @@ enum Mode {
         interrupt: Option<Arc<core::sync::atomic::AtomicBool>>,
         // Whether the running activation's debug stop is for an interrupt.
         interrupted: bool,
+        // Whether the running activation's debug stop is for a step target.
+        step_target: bool,
+        // Memory watchpoints set or cleared during replay, by memory ID, in
+        // order, so that they apply to memories replay creates again after a
+        // checkpoint from before the memory existed is restored.
+        #[cfg(feature = "debug")]
+        watches: Vec<(usize, Range<u64>, bool)>,
     },
 }
 
@@ -325,6 +332,23 @@ impl State {
 }
 
 impl Session {
+    /// Applies the watchpoints recorded during replay to memories with IDs
+    /// from `first`, which replay has just created.
+    #[cfg(feature = "debug")]
+    fn apply_watches(&self, store: &mut StoreOpaque, first: usize) {
+        let Mode::Replaying { watches, .. } = &self.mode else {
+            return;
+        };
+        for (id, range, watch) in watches {
+            if let Some(memory) = self.objects.memories.get(*id).filter(|_| *id >= first) {
+                // The part beyond the memory's current size is not watched.
+                let len = u64::try_from(memory.internal_data_size(store)).unwrap_or(u64::MAX);
+                let range = range.start.min(len)..range.end.min(len);
+                let _ = memory.debug_watch_opaque(store, range, *watch);
+            }
+        }
+    }
+
     /// Keeps the first failure of a session; later ones are its consequences.
     fn fail(&mut self, error: Error) {
         self.failure.get_or_insert(error);
@@ -645,6 +669,42 @@ impl StoreOpaque {
                     core::ops::ControlFlow::Continue(())
                 })
             };
+        }
+    }
+
+    /// Records a watchpoint change on `memory` during replay (see
+    /// `Mode::Replaying::watches`).
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_note_watch(
+        &mut self,
+        memory: Memory,
+        range: Range<u64>,
+        watch: bool,
+    ) -> Result<()> {
+        if !self.rr.active() || self.rr.recording() {
+            return Ok(());
+        }
+        let key = memory.rr_key(self);
+        let session = self.rr_session();
+        let Some(&id) = session.objects.memories_by_key.get(&key) else {
+            return Ok(());
+        };
+        let Mode::Replaying { watches, .. } = &mut session.mode else {
+            unreachable!()
+        };
+        watches.try_reserve(1)?;
+        watches.push((id, range, watch));
+        Ok(())
+    }
+
+    /// Requests that the running replay activation, if any, stop because the
+    /// debug step counter reached its target.
+    pub(crate) fn rr_step_target_reached(&mut self) {
+        if self.rr_debug_stop() {
+            let Mode::Replaying { step_target, .. } = &mut self.rr_session().mode else {
+                unreachable!()
+            };
+            *step_target = true;
         }
     }
 

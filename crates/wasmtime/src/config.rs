@@ -2731,6 +2731,9 @@ impl Config {
         if matches!(self.rr_config, RRConfig::Replaying) {
             tunables.memory_watchpoints = true;
             tunables.table_write_tracking = true;
+            // Debugging a replay can run it in reverse, which needs exact
+            // positions.
+            tunables.debug_step_counter = tunables.debug_guest;
         }
 
         // If no GC heap tunables are explicitly configured, copy the memory

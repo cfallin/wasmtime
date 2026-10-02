@@ -82,6 +82,7 @@ enum VmType {
     HostValRaw,
     VMMemoryShadow,
     VMReplayControl,
+    VMDebugSteps,
 }
 
 /// A key that uniquely identifies an alias region across an entire compilation.
