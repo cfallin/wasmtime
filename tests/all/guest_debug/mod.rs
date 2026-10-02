@@ -684,3 +684,52 @@ fn guest_debug_rsp_watchpoints() -> Result<()> {
     wt.child.wait()?;
     result
 }
+
+/// A long loop with no host calls, which only an interrupt can stop early.
+const SPIN_WAT: &str = r#"
+(module
+  (func (export "_start")
+    (local $i i32) (local $j i32)
+    loop
+      (local.set $j (i32.const 0))
+      loop
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br_if 0 (i32.lt_u (local.get $j) (i32.const 1000000000)))
+      end
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if 0 (i32.lt_u (local.get $i) (i32.const 8)))
+    end))
+"#;
+
+/// Continues `SPIN_WAT` under `wasmtime <subcmd> -g` with `args`, then
+/// interrupts it, expecting a stop rather than an exit.
+fn interrupt_spin(subcmd: &str, args: &[&str]) -> Result<()> {
+    let port = free_port();
+    let mut wt = WasmtimeWithGdbstub::spawn(subcmd, port, args, Duration::from_secs(30))?;
+    let result = (|| -> Result<()> {
+        let mut rsp = RspClient::connect(port)?;
+        rsp.request("?")?;
+        rsp.send("c")?;
+        std::thread::sleep(Duration::from_millis(200));
+        rsp.tcp.write_all(&[0x03])?;
+        let reply = rsp.reply("interrupt")?;
+        assert!(
+            reply.starts_with('T') || reply.starts_with('S'),
+            "unexpected interrupt reply: {reply}"
+        );
+        Ok(())
+    })();
+    wt.child.kill().ok();
+    wt.child.wait()?;
+    result
+}
+
+/// Test that a debugger can interrupt a running program.
+#[test]
+#[ignore]
+fn guest_debug_cli_interrupt() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let wat = dir.path().join("spin.wat");
+    std::fs::write(&wat, SPIN_WAT)?;
+    interrupt_spin("run", &["-Ccache=n", wat.to_str().unwrap()])
+}
