@@ -2159,6 +2159,7 @@ async fn reversible_debugging_on_replay() -> Result<()> {
 }
 
 /// The contents of every exported memory of the replayed instances.
+#[cfg(feature = "debug")]
 fn exported_memories<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Vec<Vec<u8>> {
     let instances = replayer.instances().to_vec();
     let mut store = replayer.store();
@@ -2903,8 +2904,10 @@ async fn interrupting_replay_with_epochs() -> Result<()> {
     // Stopped in the loop, which can be inspected and checkpointed.
     let frames = replayer.debug_exit_frames();
     assert_eq!(frames.len(), 1);
+    // Where epoch checks are, and so where this stops, depends on the
+    // target, but it is in the loop's function.
     let i = frames[0].local(&mut replayer.store(), 1)?.unwrap_i32();
-    assert!(i > 0, "{i}");
+    assert!((0..10_000_000).contains(&i), "{i}");
     let checkpoint = replayer.checkpoint()?;
     // Epoch ticks without a request do not stop replay, which continues to
     // the end, reproducing the recorded result, and again from the
@@ -2913,5 +2916,307 @@ async fn interrupting_replay_with_epochs() -> Result<()> {
     assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
     replayer.restore(&checkpoint)?;
     assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn reverse_stepping_retraces_single_steps() -> Result<()> {
+    let trace = record_counter(5)?;
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    // A small interval, so that snapshots are taken, thinned, and used.
+    replayer.enable_reverse_execution(7)?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+
+    // Single-step forward through the whole replay.
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    let mut trail = std::collections::BTreeMap::new();
+    let mut last = rr::ReplayPosition::BEGINNING;
+    loop {
+        match replayer.run().await? {
+            rr::ReplayStop::Breakpoint => {
+                let position = replayer.position();
+                assert!(position > last);
+                last = position;
+                trail.insert(position.steps(), position_state(&mut replayer)?);
+            }
+            rr::ReplayStop::Finished => break,
+            stop => panic!("unexpected stop {stop:?}"),
+        }
+    }
+    assert!(replayer.position().is_end());
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4]);
+    // Every operator was a step.
+    let steps = trail.keys().copied().collect::<Vec<_>>();
+    assert_eq!(steps, (1..=steps.len() as u64).collect::<Vec<_>>());
+
+    // Step backward through every stop, from the end to the beginning.
+    for (&steps, state) in trail.iter().rev() {
+        assert_eq!(replayer.reverse_step().await?, rr::ReplayStop::Breakpoint);
+        assert_eq!(replayer.position().steps(), steps);
+        assert_eq!(&position_state(&mut replayer)?, state);
+    }
+    assert_eq!(replayer.reverse_step().await?, rr::ReplayStop::Beginning);
+    assert!(replayer.position().is_beginning());
+    // Moving backward does not deliver events.
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4]);
+
+    // Running forward again delivers them again, and moving back to the
+    // beginning delivers none.
+    seen.lock().unwrap().clear();
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(false)?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4]);
+    seen.lock().unwrap().clear();
+    assert_eq!(
+        replayer.reverse_continue().await?,
+        rr::ReplayStop::Beginning
+    );
+    assert!(seen.lock().unwrap().is_empty());
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+
+    // Forward again, then back and forth around the middle.
+    let middle = trail.len() as u64 / 2;
+    for _ in 0..middle {
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    }
+    assert_eq!(replayer.position().steps(), middle);
+    for k in [middle - 1, middle - 2] {
+        replayer.reverse_step().await?;
+        assert_eq!(replayer.position().steps(), k);
+        assert_eq!(position_state(&mut replayer)?, trail[&k]);
+    }
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    assert_eq!(position_state(&mut replayer)?, trail[&(middle - 1)]);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn reverse_continuing_visits_breakpoints_backward() -> Result<()> {
+    let trace = record_counter(6)?;
+    // Find the PC of the loop's first instruction.
+    let pc = {
+        let mut store = Store::new(&debug_engine()?, ());
+        let mut replayer = store.replayer(&trace)?;
+        replayer.stop_at_events(true);
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+        replayer.stop_at_events(false);
+        replayer
+            .store()
+            .edit_breakpoints()
+            .unwrap()
+            .single_step(true)?;
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+        position_state(&mut replayer)?.1
+    };
+
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.enable_reverse_execution(5)?;
+    let modules = replayer.preload_modules()?;
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .add_breakpoint(&modules[0], ModulePC::new(pc))?;
+    let mut hits = Vec::new();
+    while replayer.run().await? == rr::ReplayStop::Breakpoint {
+        hits.push((replayer.position(), position_state(&mut replayer)?));
+    }
+    assert!(hits.len() >= 6, "{}", hits.len());
+
+    // From the end, back through every hit, then to the beginning.
+    for (position, state) in hits.iter().rev() {
+        assert_eq!(
+            replayer.reverse_continue().await?,
+            rr::ReplayStop::Breakpoint
+        );
+        assert_eq!(replayer.position(), *position);
+        assert_eq!(&position_state(&mut replayer)?, state);
+    }
+    assert_eq!(
+        replayer.reverse_continue().await?,
+        rr::ReplayStop::Beginning
+    );
+
+    // Forward and backward again from a hit in the middle.
+    for _ in 0..3 {
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    }
+    assert_eq!(replayer.position(), hits[2].0);
+    assert_eq!(
+        replayer.reverse_continue().await?,
+        rr::ReplayStop::Breakpoint
+    );
+    assert_eq!(replayer.position(), hits[1].0);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    assert_eq!(replayer.position(), hits[2].0);
+
+    // Reverse stepping from a hit stops just before the previous operator.
+    replayer.reverse_step().await?;
+    assert_eq!(replayer.position().steps(), hits[2].0.steps() - 1);
+    // And reverse continuing from there finds the hit before.
+    assert_eq!(
+        replayer.reverse_continue().await?,
+        rr::ReplayStop::Breakpoint
+    );
+    assert_eq!(replayer.position(), hits[1].0);
+    Ok(())
+}
+
+/// The function, PC, and loop counter of the stopped frame, and the count.
+#[cfg(feature = "debug")]
+fn position_state<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Result<(u32, u32, i32, i32)> {
+    position(replayer)
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn reverse_continuing_visits_watchpoints_and_breakpoints() -> Result<()> {
+    let trace = record_counter(5)?;
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.enable_reverse_execution(1000)?;
+    let modules = replayer.preload_modules()?;
+    // Stop at the report of step 0, where the memory exists, to watch the
+    // stores of steps 1 and 3; then also break at the next instruction.
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    let instance = replayer.instances()[0];
+    let memory = instance.get_memory(replayer.store(), "memory").unwrap();
+    memory.debug_watch(replayer.store(), 4..8, true)?;
+    memory.debug_watch(replayer.store(), 12..16, true)?;
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    let (_, pc, _, _) = position_state(&mut replayer)?;
+    {
+        let mut breakpoints = replayer.store().edit_breakpoints().unwrap();
+        breakpoints.single_step(false)?;
+        breakpoints.add_breakpoint(&modules[0], ModulePC::new(pc))?;
+    }
+
+    // Forward to the end, noting every stop.
+    let mut stops = Vec::new();
+    loop {
+        let stop = replayer.run().await?;
+        if stop == rr::ReplayStop::Finished {
+            break;
+        }
+        let watch = matches!(stop, rr::ReplayStop::Watchpoint(_));
+        stops.push((replayer.position(), watch, position_state(&mut replayer)?));
+    }
+    assert_eq!(stops.iter().filter(|s| s.1).count(), 2);
+    assert!(stops.iter().filter(|s| !s.1).count() >= 4);
+
+    // Backward through the same stops, of both kinds.
+    for (position, watch, state) in stops.iter().rev() {
+        let stop = replayer.reverse_continue().await?;
+        assert_eq!(
+            matches!(stop, rr::ReplayStop::Watchpoint(_)),
+            *watch,
+            "{stop:?}"
+        );
+        assert_eq!(replayer.position(), *position);
+        assert_eq!(&position_state(&mut replayer)?, state);
+    }
+    // Breakpoints apply to the whole replay: before the first stop noted
+    // above is the hit in the first loop iteration, before the breakpoint was
+    // set.
+    let first = replayer.reverse_continue().await?;
+    assert_eq!(first, rr::ReplayStop::Breakpoint);
+    assert!(replayer.position() < stops[0].0);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn reverse_execution_keeps_objects_and_memory() -> Result<()> {
+    let trace = record_counter(6)?;
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let modules = replayer.preload_modules()?;
+    // A large interval: moving backward replays from the beginning,
+    // re-creating the instance.
+    replayer.enable_reverse_execution(1_000_000)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    let instance = replayer.instances()[0];
+    let memory = instance.get_memory(replayer.store(), "memory").unwrap();
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    replayer.run().await?;
+    let pc = position_state(&mut replayer)?.1;
+    {
+        let mut breakpoints = replayer.store().edit_breakpoints().unwrap();
+        breakpoints.single_step(false)?;
+        breakpoints.add_breakpoint(&modules[0], ModulePC::new(pc))?;
+    }
+    // Hit the breakpoint a few times, stepping over it first as debuggers
+    // do, noting memory through the handle obtained at the start.
+    let mut hits = Vec::new();
+    for _ in 0..3 {
+        replayer
+            .store()
+            .edit_breakpoints()
+            .unwrap()
+            .single_step(true)?;
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+        replayer
+            .store()
+            .edit_breakpoints()
+            .unwrap()
+            .single_step(false)?;
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+        hits.push((
+            replayer.position(),
+            memory.data(replayer.store())[..32].to_vec(),
+        ));
+    }
+    assert_ne!(hits[1].1, hits[2].1);
+
+    // Back to the previous hit, whose memory the same handle shows.
+    assert_eq!(
+        replayer.reverse_continue().await?,
+        rr::ReplayStop::Breakpoint
+    );
+    assert_eq!(replayer.position(), hits[1].0);
+    assert_eq!(memory.data(replayer.store())[..32], hits[1].1);
+    // All the way back, and forward again: the instance is the same object.
+    while replayer.reverse_continue().await? != rr::ReplayStop::Beginning {}
+    while replayer.position() < hits[2].0 {
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    }
+    assert_eq!(replayer.position(), hits[2].0);
+    assert_eq!(memory.data(replayer.store())[..32], hits[2].1);
+    let live_instance = replayer.instances()[0];
+    let live = live_instance
+        .get_memory(replayer.store(), "memory")
+        .unwrap();
+    assert_eq!(live.debug_index_in_store(), memory.debug_index_in_store());
     Ok(())
 }
