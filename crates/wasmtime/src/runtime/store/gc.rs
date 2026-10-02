@@ -823,6 +823,9 @@ impl StoreOpaque {
                 .trace_fiber_roots(modules, unwind, gc_roots_list);
         }
 
+        #[cfg(feature = "rr")]
+        self.rr_trace_parked_roots(gc_roots_list);
+
         log::trace!("End trace GC roots :: Wasm stack");
     }
 
@@ -1212,5 +1215,78 @@ mod tests {
         let gc_store = store.as_context_mut().0.unwrap_gc_store();
         assert_eq!(gc_store.gc_heap_capacity(), 1 << 20);
         Ok(())
+    }
+}
+
+/// The state of a store's GC heap at a record/replay checkpoint.
+#[cfg(feature = "rr")]
+pub(crate) struct RrGcImage {
+    bytes: crate::rr::overlay::PagedImage,
+    heap: alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
+    last_post_gc_allocated_bytes: Option<usize>,
+    /// The store's pending exception, a root into the heap: an exception that
+    /// the guest threw and that reached the host.
+    pending_exception: Option<u32>,
+}
+
+#[cfg(feature = "rr")]
+impl RrGcImage {
+    /// The bytes of the GC heap this image does not share with `prev`.
+    pub(crate) fn stored_bytes(&self, prev: Option<&RrGcImage>) -> usize {
+        self.bytes.stored_bytes(prev.map(|p| &p.bytes))
+    }
+}
+
+#[cfg(feature = "rr")]
+impl StoreOpaque {
+    /// Captures the GC heap for a record/replay checkpoint, sharing unchanged
+    /// pages with `prev`. With GC enabled, this allocates the GC heap if
+    /// needed, so that every checkpoint has one to restore.
+    pub(crate) fn rr_gc_checkpoint(
+        &mut self,
+        prev: Option<&RrGcImage>,
+        page_size: usize,
+    ) -> Result<Option<RrGcImage>> {
+        if !self.engine().features().gc_types() {
+            return Ok(None);
+        }
+        vm::assert_ready(self.ensure_gc_store(None))?;
+        let gc = self.gc_store.as_ref().unwrap();
+        Ok(Some(RrGcImage {
+            bytes: crate::rr::overlay::PagedImage::capture(
+                gc.gc_heap.get().heap_slice(),
+                page_size,
+                prev.map(|p| &p.bytes),
+            )?,
+            heap: gc.gc_heap.get().rr_save()?,
+            last_post_gc_allocated_bytes: gc.last_post_gc_allocated_bytes,
+            pending_exception: self
+                .gc_data
+                .pending_exception
+                .as_ref()
+                .map(|r| r.as_raw_u32()),
+        }))
+    }
+
+    /// Restores the GC heap from a record/replay checkpoint, invalidating
+    /// `Unrooted` references (as any mutation of the heap does).
+    pub(crate) fn rr_gc_restore(&mut self, image: &RrGcImage) -> Result<()> {
+        debug_assert!(!self.gc_roots().rr_has_heap_roots());
+        let gc = self.gc_store.as_mut().unwrap();
+        let heap = gc.gc_heap.get_mut();
+        heap.rr_restore(&*image.heap, image.bytes.len())?;
+        image.bytes.restore_into(heap.heap_slice_mut());
+        *self.vm_store_context.gc_heap.get_mut() = heap.vmmemory();
+        gc.last_post_gc_allocated_bytes = image.last_post_gc_allocated_bytes;
+        // The restored heap accounts for the root as it was at the checkpoint
+        // (e.g. in reference counts), so replace it without barriers.
+        self.gc_data.pending_exception = image.pending_exception.and_then(VMGcRef::from_raw_u32);
+        Ok(())
+    }
+
+    /// The store's pending exception, without taking it.
+    pub(crate) fn rr_pending_exception(&self) -> Option<crate::Unrooted<ExnRef>> {
+        let exn = self.gc_data.pending_exception.as_ref()?;
+        Some(crate::Unrooted::new(self, exn))
     }
 }

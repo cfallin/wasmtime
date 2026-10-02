@@ -10,7 +10,10 @@
 //! component builtins.
 //!
 //! Core function boundaries support numbers, vectors, and nullable abstract
-//! function references. Modules that use GC or exceptions are unsupported.
+//! function references. GC and typed function references may be used inside
+//! the guest but not cross the host boundary. Guest code may throw and catch
+//! exceptions, and exceptions that it throws may reach the host, but host
+//! functions may not throw exceptions.
 //! Shared memory, host table/global mutation, call hooks,
 //! custom signal handlers, Wasm stack switching, and epoch deadline callbacks
 //! are unsupported, as is recording with guest debugging. Fuel and epoch
@@ -40,7 +43,7 @@ use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
-mod overlay;
+pub(crate) mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
 pub use replay::{Checkpoint, ReplayStop, Replayer};
@@ -372,6 +375,9 @@ enum Mode {
         histories: alloc::collections::BTreeMap<overlay::TrackedKey, overlay::History>,
         // The granularity at which checkpoints track memory writes.
         page_size: usize,
+        // The exit `(pc, trampoline fp, entry fp)` of each activation that is
+        // parked while another runs, whose frames hold GC roots.
+        parked: Vec<(usize, usize, usize)>,
         // The exit `(pc, trampoline fp, entry fp)` of the activations whose
         // frames a debugger sees while replay is stopped.
         stopped: Vec<(usize, usize, usize)>,
@@ -610,6 +616,15 @@ impl StoreOpaque {
         Ok(record)
     }
 
+    /// The granularity at which replay checkpoints track memory.
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_checkpoint_page_size(&mut self) -> usize {
+        let Mode::Replaying { page_size, .. } = self.rr_session().mode else {
+            unreachable!()
+        };
+        page_size
+    }
+
     /// The exit `(pc, trampoline fp, entry fp)` of the activations whose
     /// frames a debugger sees while replay is stopped at a debug event.
     #[cfg(feature = "debug")]
@@ -682,6 +697,28 @@ impl StoreOpaque {
         };
         histories.insert(key, history);
         result.map(Some)
+    }
+
+    /// Traces the GC roots in the frames of parked replay activations, which
+    /// are on other fibers than the running one.
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_trace_parked_roots(&mut self, gc_roots_list: &mut crate::vm::GcRootsList) {
+        let Some(Mode::Replaying { parked, .. }) = self.rr.session.as_deref().map(|s| &s.mode)
+        else {
+            return;
+        };
+        let unwind = self.unwinder();
+        for &(pc, trampoline_fp, entry_fp) in parked {
+            // SAFETY: parked activations' stacks are intact while another
+            // runs, and their exit state describes their Wasm frames.
+            let _ = unsafe {
+                let fp = crate::vm::VMStoreContext::wasm_exit_fp_from_trampoline_fp(trampoline_fp);
+                wasmtime_unwinder::visit_frames::<()>(unwind, pc, fp, entry_fp, |frame| {
+                    StoreOpaque::trace_wasm_stack_frame(self.modules(), gc_roots_list, frame);
+                    core::ops::ControlFlow::Continue(())
+                })
+            };
+        }
     }
 
     /// Requests that the running replay activation, if any, stop at a
@@ -1117,6 +1154,20 @@ impl StoreOpaque {
                 None => return Ok(()),
             }
         };
+        // A host function that fails with the store's pending exception throws
+        // it into the guest, which may catch it. Replay does not run the host,
+        // so it could not provide the exception, which lives in the GC heap.
+        // (An exception that the guest throws and that reaches the host
+        // replays as is: replay throws the same exception itself.)
+        #[cfg(feature = "gc")]
+        if host
+            && self.has_pending_exception()
+            && result
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::ThrownException>())
+        {
+            self.rr.poison("host functions throwing exceptions");
+        }
         // SAFETY: inherited from this function's contract.
         let recorded = unsafe { self.rr_record_leave(call as usize, raw, &result, host) };
         let recorded = self.rr_poison_on_err(recorded);

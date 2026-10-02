@@ -486,6 +486,16 @@ impl RootSet {
         log::trace!("End trace user owned roots");
     }
 
+    /// Whether any root refers into the GC heap. A record/replay checkpoint
+    /// restore replaces the heap, which such roots would then dangle into;
+    /// there are none, as replay starts without a GC heap and the embedder
+    /// only has shared access to a replaying store.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_has_heap_roots(&self) -> bool {
+        self.lifo_roots.iter().any(|r| !r.gc_ref.is_i31())
+            || self.owned_rooted.iter().any(|(_, r)| !r.is_i31())
+    }
+
     /// Enter a LIFO rooting scope.
     ///
     /// Returns an integer that should be passed unmodified to `exit_lifo_scope`

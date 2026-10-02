@@ -82,6 +82,20 @@ fn main() {
 // Each of the tests included from `wast_testsuite_tests` will call this
 // function which actually executes the `wast` test suite given the `strategy`
 // to compile it.
+/// Core exception tests that record/replay runs: they throw exceptions
+/// within the guest and to the host.
+#[cfg(feature = "rr")]
+const RR_EXCEPTION_TESTS: &[&str] = &[
+    "spec_testsuite/tag.wast",
+    "spec_testsuite/throw.wast",
+    "spec_testsuite/throw_ref.wast",
+    "spec_testsuite/try_table.wast",
+    "misc_testsuite/exceptions-null-collector.wast",
+    "misc_testsuite/throw-payloads.wast",
+    "misc_testsuite/stack-args-exceptions.wast",
+    "misc_testsuite/many-results-with-exceptions.wast",
+];
+
 fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
     let test_config = &test.config;
 
@@ -260,18 +274,21 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
         }
     }
 
-    // Record the component-model async tests, and replay (single-stepping
-    // and rewinding) their recordings.
+    // Record the component-model async tests and the core exception tests,
+    // and replay (single-stepping and rewinding) their recordings.
+    #[cfg(feature = "rr")]
+    let path = test.path.to_str().unwrap_or("");
+    #[cfg(feature = "rr")]
+    let record_replay = (path.contains("component-model")
+        && path.contains("async")
+        && !test_config.gc()
+        && !test_config.exceptions())
+        || RR_EXCEPTION_TESTS.iter().any(|t| path.ends_with(t));
     #[cfg(feature = "rr")]
     if !should_fail
-        && !test_config.gc()
-        && !test_config.exceptions()
+        && record_replay
         && !config.pooling
         && config.compiler == Compiler::CraneliftNative
-        && test
-            .path
-            .to_str()
-            .is_some_and(|p| p.contains("component-model") && p.contains("async"))
     {
         let mut cfg = cfg.clone();
         cfg.cranelift_nan_canonicalization(true)
@@ -288,6 +305,9 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
             use_shared_memory: false,
             suppress_prints: true,
         })?;
+        if test.config.spec_test.unwrap_or(false) {
+            wast_context.ignore_error_messages(true);
+        }
         if test.path.to_str().unwrap().contains("misc_testsuite") {
             wast_context.register_wasmtime()?;
         }

@@ -300,9 +300,6 @@ impl Instance {
     ) -> Result<(Instance, bool)> {
         #[cfg(feature = "rr")]
         {
-            if module.env_module().needs_gc_heap {
-                store.rr.reject("GC or exception-using modules")?;
-            }
             if module.env_module().memories.values().any(|m| m.shared) {
                 store.rr.reject("shared memories")?;
             }

@@ -227,6 +227,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 watchpoint: None,
                 histories: Default::default(),
                 page_size: 4096,
+                parked: Vec::new(),
                 stopped: Vec::new(),
             },
             dirty_ranges: Vec::new(),
@@ -300,7 +301,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         // that Wasm may mutate (see `StoreOpaque::on_wasm_to_host_transition`),
         // and this future may be cancelled at any point, so invalidate them
         // here instead, before anything replays: the embedder must not use
-        // handles, such as frame handles, from before a replay step after it.
+        // handles, such as frame handles and unrooted references, from before
+        // a replay step after it.
         driver.store.on_wasm_to_host_transition();
         driver.publish_stopped(false);
         let result = core::future::poll_fn(|cx| {
@@ -430,8 +432,23 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// Only the replay may change the store's state, so this gives only
     /// shared access to it. Its debugging state, such as breakpoints and
     /// watchpoints, can be changed through [`Replayer::edit_breakpoints`].
+    ///
+    /// Accessors return GC objects as [`Unrooted`](crate::Unrooted)
+    /// references, which are valid until replay runs or is restored.
     pub fn store(&self) -> StoreContext<'_, T> {
         StoreContext(self.driver.store)
+    }
+
+    /// The most recent exception that guest code threw and that reached the
+    /// host, as replay computed it.
+    ///
+    /// When the recorded host took it from the store (with
+    /// [`Store::take_pending_exception`](crate::Store::take_pending_exception)),
+    /// it remains available here until replay continues or is restored, or
+    /// until guest code throws another exception that reaches the host.
+    #[cfg(feature = "gc")]
+    pub fn pending_exception(&self) -> Option<crate::Unrooted<crate::ExnRef>> {
+        self.driver.store.rr_pending_exception()
     }
 
     /// Borrow the [`BreakpointState`] of the store being replayed into, to
@@ -916,6 +933,29 @@ impl<T: 'static> Driver<'_, T> {
             }
             *self.growth_failures() = failures;
         }
+
+        // A collection while this activation runs must find the GC roots of
+        // the others, which are parked on their own fibers.
+        let Mode::Replaying { parked, .. } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        parked.clear();
+        parked.try_reserve(self.activations.len())?;
+        parked.extend(
+            self.activations
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| *i != index && (a.host.is_some() || Some(a.serial) == self.paused))
+                .map(|(_, a)| {
+                    let cx = &a.context;
+                    (
+                        cx.last_wasm_exit_pc,
+                        cx.last_wasm_exit_trampoline_fp,
+                        cx.last_wasm_entry_fp,
+                    )
+                }),
+        );
 
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];

@@ -581,6 +581,12 @@ pub(crate) fn pending_unwind_error() -> Option<Error> {
             Some(UnwindReason::Trap(Ok(trap))) => Some(match &trap.reason {
                 TrapReason::User(error) => match error.downcast_ref::<crate::Trap>() {
                     Some(trap) => Error::from(*trap),
+                    // Keep the type of thrown exceptions, so that recording can
+                    // tell when a host function throws one.
+                    #[cfg(feature = "gc")]
+                    None if error.is::<crate::ThrownException>() => {
+                        Error::from(crate::ThrownException)
+                    }
                     None => format_err!("{}", error.root_cause()),
                 },
                 TrapReason::Jit {
@@ -913,8 +919,14 @@ impl CallThreadState {
         // Also note that this can execute arbitrary WebAssembly code within
         // this block due to the store's debug handler. That means that we
         // might be paused here for quite some time.
+        //
+        // Without a debug handler, skip building the event: an exception's
+        // event roots the exception, and a replaying store must not have roots
+        // into its GC heap, which restoring a checkpoint replaces.
         #[cfg(feature = "debug")]
-        if let Some(UnwindReason::Trap(Ok(trap))) = &unwind {
+        if let Some(UnwindReason::Trap(Ok(trap))) = &unwind
+            && store.has_debug_handler()
+        {
             #[cfg(feature = "gc")]
             use wasmtime_core::alloc::PanicOnOom;
 
