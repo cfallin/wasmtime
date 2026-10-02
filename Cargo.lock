@@ -5145,6 +5145,8 @@ dependencies = [
  "rand 0.10.1",
  "rustix 1.1.5",
  "rustix-linux-procfs",
+ "serde",
+ "serde_derive",
  "tempfile",
  "test-log",
  "test-programs-artifacts",
