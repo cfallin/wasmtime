@@ -9,12 +9,17 @@
 //! Core function boundaries support numbers, vectors, and nullable abstract
 //! function references. GC and typed function references are unsupported.
 //! Shared memory, host table/global mutation, resource limiters, call hooks,
-//! custom signal handlers, Wasm stack switching, guest debugging, epochs, and
-//! fuel are unsupported. Host writes through the memory APIs, including
-//! slices from [`Memory::data_mut`], are recorded; writes through raw pointers
-//! such as [`Memory::data_ptr`] are not. Replay requires a compiler and a
-//! native (non-Pulley) target, and is unsupported on Windows, under Miri, and
-//! with AddressSanitizer. Whole-store checkpoints remain future work.
+//! custom signal handlers, Wasm stack switching, epochs, and fuel are
+//! unsupported, as is recording with guest debugging. Host writes through the
+//! memory APIs, including slices from [`Memory::data_mut`], are recorded;
+//! writes through raw pointers such as [`Memory::data_ptr`] are not. Replay
+//! requires a compiler and a native (non-Pulley) target, and is unsupported on
+//! Windows, under Miri, and with AddressSanitizer.
+//!
+//! A [`Replayer`] replays step by step: it can stop at embedder events
+//! ([`record_event`]) and, with guest debugging enabled on the replaying
+//! engine, at breakpoints and single steps, and it can take and restore
+//! [`Checkpoint`]s, which together support reversible debugging.
 //!
 //! Traces are private to this Wasmtime version. They contain host-supplied data
 //! and can be large; applications should impose their own storage limits.

@@ -5,11 +5,9 @@ store and replays it with a top-level driver of independent Wasm activations.
 Recording includes core and component execution, object construction, and
 startup. Components replay as their constituent core modules; replay does not
 reconstruct the component runtime or require a component linker. Suspended
-replay activations contain no Rust frames, and the fiber library can snapshot
-and restore them; whole-store checkpoints remain implementation work.
-Reversible guest debugging is an intended consumer of this design, but engines
-with guest debugging are rejected until debug events yield to the driver (see
-the remaining work below).
+replay activations contain no Rust frames, so a replay can be checkpointed and
+rewound, and guest debugging (breakpoints, single-stepping, frame inspection)
+works on replay. Together these support reversible debugging.
 
 The entrypoints are `Store::start_recording()`,
 `Store::finish_recording() -> Result<rr::Trace>`, and
@@ -193,6 +191,67 @@ number of trace events. An activation that never reaches a boundary does not
 yield; deterministic interruption is not implemented. Failed or cancelled
 replay does not roll back guest state; retry with a fresh store.
 
+A recording may end while guest calls are unfinished, for example with
+component-model tasks suspended in host calls, or after a host panic. The
+trace then ends with those activations parked at their host calls, and replay
+reproduces execution up to that point.
+
+## Checkpoints
+
+`Replayer::checkpoint` captures the replay at a stop, and `Replayer::restore`
+returns to it; see `rr/replay/checkpoint.rs`. A checkpoint holds the driver's
+protocol state (trace position, activations and parked host calls, startup and
+growth-failure state, object identities and instances), each activation's raw
+fiber snapshot, control block, parked `VMStoreContext` state, protection-key
+mask, and value buffer, and the guest state of every object: memory sizes and
+contents, function table sizes and raw elements, and mutable globals
+(including component instance flags).
+
+Restoring puts all of this back in place. Fibers, control blocks, and buffers
+keep their addresses, so completed activations are retained while a live
+checkpoint can restore them. Memories and tables shrink back when restored;
+discarded pages become inaccessible and read as zero once regrown. Objects
+constructed after a checkpoint remain in the store but are unreachable after
+restoring, and replaying forward constructs new ones, so each checkpoint keeps
+its own timeline's object identities. Compiled modules are shared between
+timelines, so breakpoints on them persist. Embedder events are delivered to
+observers again as replay passes them. Frame handles become invalid.
+
+Memory images are 4 KiB pages shared with the previous checkpoint's image of
+the same memory, so a checkpoint retains only changed pages, and restoring
+writes only pages that differ from the current contents. Changed pages are
+still found by comparing memory; dirty-page tracking is future work.
+
+To keep traces independent of the replaying engine's configuration, record/
+replay engines give every module an unconditional startup function and treat
+every function as escaping, so function identities and startup activations do
+not depend on memory-initialization strategy or on guest debugging.
+
+## Debugging on replay
+
+A replaying engine may enable `Config::guest_debug`, and breakpoints and
+single-stepping are configured through the store as usual
+(`Replayer::store().edit_breakpoints()`). In record/replay engines the
+breakpoint trampoline checks, after the breakpoint libcall returns, whether
+that libcall requested a debug stop of the running replay activation, and if
+so yields to the driver through the control block (`VM_REPLAY_DEBUG`). The
+stopped stack therefore holds no host frames and can be checkpointed.
+`Replayer::run` returns `ReplayStop::Breakpoint`; the next `run` resumes the
+stopped activation before processing further trace events.
+
+While stopped, `Replayer::debug_exit_frames` installs the parked activation's
+`VMStoreContext` state and a `CallThreadState` just long enough to collect
+frame handles, which are then inspected through `Replayer::store`. It returns
+the stopped activation's exit frame followed by those of activations parked
+at host calls, most recent first: for a callback beneath a host frame, its
+guest callers. `ReplayStop::Event` (enabled by `Replayer::stop_at_events`)
+stops after embedder events.
+
+Debug events other than breakpoints and steps (traps, host errors,
+exceptions) are not reported on replay, and the store's async
+`DebugHandler` is not invoked. Recording with guest debugging is rejected,
+since a debug handler would run unrecorded host code.
+
 Restrictions:
 
 * Core signatures may not contain GC or typed function references, and
@@ -201,11 +260,10 @@ Restrictions:
   numeric core handles and are supported.
 * Hosts may not mutate tables or globals; constructing numeric or abstract
   funcref globals and abstract funcref tables is supported.
-* Resource limiters, call hooks, custom signal handlers, fuel, epochs, and
-  guest debugging are rejected. Installing a limiter, hook, or handler during
-  a recording poisons the recording.
-* Host panics leave unmatched calls and cannot be finalized into a complete
-  trace. Rust error objects are represented by their root cause's message.
+* Resource limiters, call hooks, custom signal handlers, fuel, and epochs are
+  rejected, as is recording with guest debugging. Installing a limiter, hook,
+  or handler during a recording poisons the recording.
+* Rust error objects are represented by their root cause's message.
 * Replay requires a native compilation target: Pulley interprets guest code
   in Rust. Raw fibers require this crate's own stack switching, which Windows
   (OS fibers) and Miri lack, and AddressSanitizer's fiber handshake would
@@ -216,72 +274,26 @@ Restrictions:
 
 The remaining implementation work is:
 
-1. Whole-store checkpoints. The fiber library snapshots and restores one raw
-   fiber's stack and register context (`RawFiber::snapshot`/`restore`) and
-   always resumes into the current host continuation; this is tested at the
-   fiber layer. It is not whole-store restoration. A replay checkpoint must
-   also capture, and restore consistently:
-
-   * the trace cursor, dynamic call IDs, the set of activations with their
-     lifecycle states, parked host calls, and pending startup/observed state;
-   * each activation's `VMReplayControl`, parked `VMStoreContext` state, and
-     protection-key mask, and the driver-owned entry/result buffers;
-   * guest store state: memories (including size), tables, globals, and
-     component instance flags.
-
-   Everything a snapshot can dereference must be live at the same address on
-   restore: module code, contexts, control blocks, value buffers, and fiber
-   stacks. The driver currently frees an activation once it completes, so a
-   checkpoint-capable driver must instead retain completed activations while
-   a checkpoint refers to them. Objects constructed after a checkpoint are not
-   removed by restoring bytes; restoring must truncate the identity tables to
-   the checkpoint's contents and leave the store-owned objects unreachable, or
-   reject restoring across construction. Checkpoints are taken between trace
-   events with no unmatched observation, so at a host call the `EnterHost`
-   record has been matched.
-
-2. Integrate async debug hooks with the driver as an observation/control path.
-   Breakpoints, single-step stops, traps, and hostcall errors must pause the
-   current replay activation without consuming or inventing host-call records.
-   A debug stop is an asynchronous call: generated code must yield it through
-   the activation's control block (a new `VMReplayControl::reason`) like a
-   host call, and the driver must run/poll the async `DebugHandler` outside
-   the guest fiber, then resume that same activation. No debugger future or
-   Rust adapter may remain on the guest stack. Borrowed error payloads need
-   driver-owned storage. Trap stops are currently raised from the synchronous
-   `raise` libcall, which would need to yield instead of running the handler
-   in place. Exception events additionally require the currently unsupported
-   GC/exception policy.
-
-   Debug inspection must explicitly select the parked activation and use its
-   saved stack metadata (its parked `VMStoreContext` state): the existing API
-   walks the currently entered Wasm stack and cannot simply be called after
-   yielding. Nested activations should be exposed in logical call order even
-   though their stacks are separate.
-
-   A debug stop can occur between trace events, so a checkpoint there must
-   also preserve the paused PC and the cursor of the next expected event.
-   Restoring should discard any in-progress debugger future and produce a
-   fresh stop notification. Breakpoint configuration and debugger/controller
-   state are outside the reproduced execution. Read-only inspection can
-   continue replay unchanged; state edits and debugger-invoked guest calls
-   need an explicit fork/new-recording policy (or rejection). Tests must cover
-   async hook yields, nested activations, changing breakpoints, cancellation,
-   trap stops, and repeated backward/forward restoration. Remove the temporary
-   debug guard when this path and its inspection semantics are implemented.
-
-3. Ordinary (non-replay) asynchronous execution does not use raw fibers. To
+1. Dirty-page tracking for checkpoints, instead of comparing memory, e.g.
+   with `PAGEMAP_SCAN` or write protection.
+2. Trap, host-error, and exception debug events on replay. Traps are raised
+   from the synchronous `raise` libcall, which would need to yield a stop
+   (with driver-owned payload storage) before unwinding.
+3. Embedder integrations of `rr::record_event`, such as WASI output.
+   Host bindings usually see only the store's data, not the store, so this may
+   need an event sink that is flushed into the trace at the next boundary.
+4. Ordinary (non-replay) asynchronous execution does not use raw fibers. To
    participate in snapshots, asynchronous host work would run on an owned
-   child fiber whose Rust frames are never copied as guest snapshots;
-   ownership, cancellation, nested guest entry, and teardown of that child
-   are not yet defined.
-
-4. Specify allocation failure and deterministic interruption behavior, extend
-   platform coverage (Windows, sanitizers), verify suspended stacks on the
-   remaining architectures, and measure append overhead and trace volume.
+   child fiber whose Rust frames are never copied as guest snapshots.
+5. Deterministic interruption, Windows and sanitizer support, verifying
+   suspended stacks on architectures other than x86-64 and aarch64, and
+   measuring append overhead and trace volume.
 
 Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
-behavior) and `crates/fiber/src/raw.rs` (raw fiber lifecycle and snapshots):
+behavior, checkpoints, and debugging), `crates/fiber/src/raw.rs` (raw fiber
+lifecycle and snapshots), and the `.wast` runner, which with `--features rr`
+records the component-model async suites, replays them, and single-steps and
+rewinds the replays:
 
 ```sh
 cargo test -p wasmtime-internal-fiber
@@ -290,6 +302,7 @@ cargo test -p wasmtime --features rr,all-arch,pulley --test record_replay replay
 cargo test -p wasmtime --release --no-default-features \
   --features cranelift,runtime,std,rr,wat,component-model-async --test record_replay
 cargo check -p wasmtime --no-default-features --features runtime,rr
+cargo test --test wast --features rr -- component-model
 ```
 
 The raw-fiber design and its rationale are described in the

@@ -27,9 +27,12 @@ Record/replay fibers: plan
 - Replay host stubs, the old Rust interception in `HostFunc`,
   `StoreFiberYield::ReplayHost`, and `resume_replay_fiber` are replaced or
   removed. The trace format is unchanged. Pulley engines reject replay.
-- Deferred: step 6 (debug events and ordinary asynchronous execution through
-  the yield contract); the guest-debug guard remains. Whole-store checkpoints
-  are specified in record-replay.md but not implemented.
+- Since then (see record-replay.md): whole-store checkpoints, breakpoint and
+  single-step stops yielded through the control block (part of step 6), and
+  inspection of parked activations are implemented, and the raw-fiber tests
+  also pass on aarch64, s390x, and riscv64 under qemu. Still deferred from
+  step 6: trap/host-error debug events and ordinary asynchronous execution
+  through the yield contract.
 
 
 The rest of this document is the design brief agreed on 2026-09-21, before
