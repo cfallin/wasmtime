@@ -46,6 +46,8 @@ pub mod p2;
 #[cfg(feature = "p3")]
 pub mod p3;
 pub mod random;
+#[cfg(feature = "rr")]
+pub mod rr;
 pub mod runtime;
 pub mod sockets;
 mod view;
