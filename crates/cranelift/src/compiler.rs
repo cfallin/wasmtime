@@ -513,6 +513,50 @@ impl Compiler {
         })
     }
 
+    /// Yield to the replay driver if the running replay activation, if any,
+    /// has requested a debug stop.
+    fn replay_debug_yield(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        alias_regions: &mut AliasRegions<u8>,
+        vmctx: ir::Value,
+    ) {
+        let check = builder.create_block();
+        let stop = builder.create_block();
+        let done = builder.create_block();
+        let mut cursor = builder.cursor();
+        let store_context = alias_regions
+            .vmctx()
+            .store_context()
+            .load(&mut cursor, vmctx);
+        let control = alias_regions
+            .vm_store_context()
+            .replay_control()
+            .load(&mut cursor, store_context);
+        builder.ins().brif(control, check, &[], done, &[]);
+
+        builder.switch_to_block(check);
+        builder.seal_block(check);
+        let reason = alias_regions
+            .vm_replay_control()
+            .reason()
+            .load(&mut builder.cursor(), control);
+        let is_stop = builder.ins().icmp_imm_u(
+            ir::condcodes::IntCC::Equal,
+            reason,
+            i64::from(wasmtime_environ::VM_REPLAY_DEBUG),
+        );
+        builder.ins().brif(is_stop, stop, &[], done, &[]);
+
+        builder.switch_to_block(stop);
+        builder.seal_block(stop);
+        self.replay_yield(builder, alias_regions, control);
+        builder.ins().jump(done, &[]);
+
+        builder.switch_to_block(done);
+        builder.seal_block(done);
+    }
+
     /// Suspend a replay activation by calling the fiber switch routine named by
     /// its `VMReplayControl`. This returns when the driver resumes it.
     fn replay_yield(
@@ -635,6 +679,20 @@ impl Compiler {
                 self.raise_if_host_trapped(&mut builder, &mut alias_regions, vmctx, succeeded);
             }
             None => {}
+        }
+
+        // During replay, a debug event (a breakpoint or watchpoint) stops the
+        // activation by yielding to the replay driver once the libcall has
+        // returned, so that no host frames remain on the suspended stack.
+        if self.tunables.recording
+            && [
+                BuiltinFunctionIndex::breakpoint(),
+                BuiltinFunctionIndex::memory_watch_store(),
+                BuiltinFunctionIndex::memory_watch_range(),
+            ]
+            .contains(&builtin_func_index)
+        {
+            self.replay_debug_yield(&mut builder, &mut alias_regions, vmctx);
         }
 
         // And finally, return all the results of this libcall.
