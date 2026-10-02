@@ -293,6 +293,21 @@ struct CopyingHeap {
     idle_extern_ref_set_head: Option<VMExternRef>,
 }
 
+/// A copying heap's state other than its memory's bytes, for record/replay
+/// checkpoints.
+#[cfg(feature = "rr")]
+struct CopyingSaved {
+    no_gc_count: u64,
+    bump_ptr: u32,
+    active_space_end: u32,
+    active_space_start: u32,
+    idle_space_start: u32,
+    idle_space_end: u32,
+    worklist_ptr: u32,
+    active_extern_ref_set_head: Option<VMExternRef>,
+    idle_extern_ref_set_head: Option<VMExternRef>,
+}
+
 impl CopyingHeap {
     fn new() -> Result<Self> {
         log::trace!("allocating new copying heap");
@@ -974,6 +989,53 @@ unsafe impl GcHeap for CopyingHeap {
         debug_assert!(self.is_attached());
         self.vmmemory.take();
         self.memory.take().unwrap()
+    }
+
+    #[cfg(feature = "rr")]
+    fn rr_save(&self) -> Result<Box<dyn Any + Send + Sync>> {
+        Ok(Box::new(CopyingSaved {
+            no_gc_count: self.no_gc_count,
+            bump_ptr: self.bump_ptr(),
+            active_space_end: self.active_space_end(),
+            active_space_start: self.active_space_start,
+            idle_space_start: self.idle_space_start,
+            idle_space_end: self.idle_space_end,
+            worklist_ptr: self.worklist_ptr,
+            active_extern_ref_set_head: self
+                .active_extern_ref_set_head
+                .as_ref()
+                .map(|r| r.unchecked_copy()),
+            idle_extern_ref_set_head: self
+                .idle_extern_ref_set_head
+                .as_ref()
+                .map(|r| r.unchecked_copy()),
+        }))
+    }
+
+    #[cfg(feature = "rr")]
+    fn rr_restore(&mut self, saved: &(dyn Any + Send + Sync), len: usize) -> Result<()> {
+        let saved = saved
+            .downcast_ref::<CopyingSaved>()
+            .ok_or_else(|| format_err!("GC heap checkpoint from another collector"))?;
+        let memory = self.memory.as_mut().unwrap();
+        memory.rr_resize(len)?;
+        self.vmmemory = Some(memory.vmmemory());
+        self.no_gc_count = saved.no_gc_count;
+        self.set_bump_ptr(saved.bump_ptr);
+        self.set_active_space_end(saved.active_space_end);
+        self.active_space_start = saved.active_space_start;
+        self.idle_space_start = saved.idle_space_start;
+        self.idle_space_end = saved.idle_space_end;
+        self.worklist_ptr = saved.worklist_ptr;
+        self.active_extern_ref_set_head = saved
+            .active_extern_ref_set_head
+            .as_ref()
+            .map(|r| r.unchecked_copy());
+        self.idle_extern_ref_set_head = saved
+            .idle_extern_ref_set_head
+            .as_ref()
+            .map(|r| r.unchecked_copy());
+        Ok(())
     }
 
     fn needs_gc_before_next_growth(&self) -> bool {

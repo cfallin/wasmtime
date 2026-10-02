@@ -39,6 +39,9 @@ pub(super) struct Checkpoints {
     // Completed activations that a live checkpoint can restore.
     retired: Vec<Activation>,
     globals: overlay::ValuesHistory,
+    // The most recent GC heap image, to share pages with.
+    #[cfg(feature = "gc")]
+    gc: Option<Arc<crate::store::RrGcImage>>,
 }
 
 impl Default for Checkpoints {
@@ -49,6 +52,8 @@ impl Default for Checkpoints {
             live: Vec::new(),
             retired: Vec::new(),
             globals: Default::default(),
+            #[cfg(feature = "gc")]
+            gc: None,
         }
     }
 }
@@ -105,6 +110,10 @@ pub struct Checkpoint {
     memories: Vec<overlay::Image>,
     tables: Vec<overlay::Image>,
     globals: Arc<overlay::ValuesLayer>,
+    #[cfg(feature = "gc")]
+    gc: Option<Arc<crate::store::RrGcImage>>,
+    // The bytes of the GC heap copied for this checkpoint.
+    gc_bytes: usize,
 }
 
 // SAFETY: the raw pointers in a checkpoint are only used, by the replayer
@@ -125,10 +134,15 @@ struct ActivationImage {
 impl Checkpoint {
     /// The number of bytes of guest memory contents copied for this
     /// checkpoint: those written since the previous checkpoint, at the
-    /// granularity set by [`Replayer::set_checkpoint_page_size`]. Unchanged
-    /// contents are shared with earlier checkpoints.
+    /// granularity set by [`Replayer::set_checkpoint_page_size`], including
+    /// the GC heap's changed pages. Unchanged contents are shared with earlier
+    /// checkpoints.
     pub fn memory_bytes(&self) -> usize {
-        self.memories.iter().map(|m| m.stored_bytes()).sum()
+        self.memories
+            .iter()
+            .map(|m| m.stored_bytes())
+            .sum::<usize>()
+            + self.gc_bytes
     }
 
     /// The number of bytes of table elements copied for this checkpoint:
@@ -242,6 +256,22 @@ impl<T: 'static> Driver<'_, T> {
             values.push((global.rr_key(store), global.rr_raw(store)));
         }
         let global_images = driver.checkpoints.globals.checkpoint(values)?;
+        #[cfg(feature = "gc")]
+        let (gc, gc_bytes) = {
+            let prev = driver.checkpoints.gc.as_deref();
+            let page_size = store.rr_checkpoint_page_size();
+            match store.rr_gc_checkpoint(prev, page_size)? {
+                Some(image) => {
+                    let bytes = image.stored_bytes(prev);
+                    let image = try_new::<Arc<_>>(image)?;
+                    driver.checkpoints.gc = Some(image.clone());
+                    (Some(image), bytes)
+                }
+                None => (None, 0),
+            }
+        };
+        #[cfg(not(feature = "gc"))]
+        let gc_bytes = 0;
 
         let live = try_new::<Arc<_>>(())?;
         let serials = activations.iter().map(|a| a.serial).collect();
@@ -266,6 +296,9 @@ impl<T: 'static> Driver<'_, T> {
             memories: memory_images,
             tables: table_images,
             globals: global_images,
+            #[cfg(feature = "gc")]
+            gc,
+            gc_bytes,
         })
     }
 
@@ -351,6 +384,11 @@ impl<T: 'static> Driver<'_, T> {
             |key| by_key[&key].rr_raw(store),
             |key, value| by_key[&key].rr_set_raw(store, value),
         );
+        #[cfg(feature = "gc")]
+        if let Some(image) = &checkpoint.gc {
+            store.rr_gc_restore(image)?;
+            driver.checkpoints.gc = Some(image.clone());
+        }
         // Invalidate frame handles into the replaced stacks.
         store.vm_store_context_mut().execution_version += 1;
 

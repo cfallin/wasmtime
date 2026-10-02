@@ -245,6 +245,25 @@ unsafe impl GcHeap for NullHeap {
         self.memory.as_ref().unwrap().vmmemory()
     }
 
+    #[cfg(feature = "rr")]
+    fn rr_save(&self) -> Result<Box<dyn Any + Send + Sync>> {
+        // SAFETY: only compiled code running on this heap writes the cell,
+        // and none is running.
+        let next = unsafe { (*self.vmctx_data.get()).next };
+        Ok(Box::new((next, self.no_gc_count)))
+    }
+
+    #[cfg(feature = "rr")]
+    fn rr_restore(&mut self, saved: &(dyn Any + Send + Sync), len: usize) -> Result<()> {
+        let &(next, no_gc_count) = saved
+            .downcast_ref::<(NonZeroU32, usize)>()
+            .ok_or_else(|| format_err!("GC heap checkpoint from another collector"))?;
+        self.memory.as_mut().unwrap().rr_resize(len)?;
+        self.vmctx_data.get_mut().next = next;
+        self.no_gc_count = no_gc_count;
+        Ok(())
+    }
+
     fn clone_gc_ref(&mut self, gc_ref: &VMGcRef) -> VMGcRef {
         gc_ref.unchecked_copy()
     }
