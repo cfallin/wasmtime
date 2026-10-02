@@ -391,6 +391,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         driver.observed = None;
         driver.stop = None;
         *driver.growth_failures() = try_copy(&checkpoint.growth_failures)?;
+        driver.publish_stopped(true);
         Ok(())
     }
 }

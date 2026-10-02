@@ -31,8 +31,9 @@ Record/replay fibers: plan
   single-step stops yielded through the control block (part of step 6), and
   inspection of parked activations are implemented, and the raw-fiber tests
   also pass on aarch64, s390x, and riscv64 under qemu. Still deferred from
-  step 6: trap/host-error debug events and ordinary asynchronous execution
-  through the yield contract.
+  step 6: trap/host-error debug events. Ordinary asynchronous execution
+  through the yield contract is no longer planned: only replays are
+  checkpointed, since the trace replaces all live host state.
 
 
 The rest of this document is the design brief agreed on 2026-09-21, before

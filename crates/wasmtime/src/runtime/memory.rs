@@ -763,6 +763,7 @@ impl Memory {
     }
 
     /// This memory's watchpoint shadow, if compiled code checks it.
+    #[cfg(any(feature = "debug", feature = "rr"))]
     pub(crate) fn vm_shadow_mut<'a>(
         &self,
         store: &'a mut StoreOpaque,
@@ -774,6 +775,7 @@ impl Memory {
     }
 
     /// Whether this is the same memory as `other`.
+    #[cfg(feature = "debug")]
     pub(crate) fn same(&self, other: &Memory) -> bool {
         self.instance == other.instance && self.index == other.index
     }

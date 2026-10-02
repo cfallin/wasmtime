@@ -455,10 +455,6 @@ impl<T> StoreInner<T> {
             "record/replay requires an empty store"
         );
         ensure!(
-            self.limiter.is_none(),
-            "record/replay does not support resource limiters"
-        );
-        ensure!(
             self.call_hook.is_none(),
             "record/replay does not support call hooks"
         );
@@ -988,8 +984,6 @@ impl<T> Store<T> {
         &mut self,
         mut limiter: impl (FnMut(&mut T) -> &mut dyn crate::ResourceLimiter) + Send + Sync + 'static,
     ) {
-        #[cfg(feature = "rr")]
-        self.inner.rr.poison("installing a resource limiter");
         // Apply the limits on instances, tables, and memory given by the limiter:
         let inner = &mut self.inner;
         let (instance_limit, table_limit, memory_limit) = {

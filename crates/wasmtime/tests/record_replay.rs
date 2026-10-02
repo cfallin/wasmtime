@@ -466,15 +466,18 @@ async fn embedder_events_are_replayed_in_order() -> Result<()> {
 #[tokio::test]
 async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
     let recording = engine(RRConfig::Recording)?;
-    let mut store = Store::new(&recording, None::<rr::EventSink>);
-    assert!(store.rr_event_sink().is_none());
-    store.start_recording()?;
-    let sink = store.rr_event_sink().unwrap();
-    *store.data_mut() = Some(sink.clone());
     let tick = |stream, text: &str| Output {
         stream,
         text: text.to_string(),
     };
+    // The sink is handed out before recording starts, like the two ends of
+    // a channel; events before the receiver is attached are buffered.
+    let (sink, receiver) = rr::event_channel();
+    let mut store = Store::new(&recording, Some(sink.clone()));
+    assert!(store.rr_event_sink().is_none());
+    sink.record(&tick(9, "early"));
+    store.start_recording()?;
+    store.rr_attach_events(receiver)?;
     // A host function records through a sink, as code without access to
     // the store would, on another thread.
     let print = Func::wrap(
@@ -508,7 +511,7 @@ async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
     assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
     // Direct events are recorded immediately; sunk ones at the next boundary,
     // which for the last one is the end of the recording.
-    assert_eq!(*seen.lock().unwrap(), [1, 2, 0, 3]);
+    assert_eq!(*seen.lock().unwrap(), [9, 1, 2, 0, 3]);
     Ok(())
 }
 
@@ -2773,5 +2776,49 @@ async fn restoring_invalidates_host_gc_handles() -> Result<()> {
     assert_eq!(gc_list(&mut replayer)?, [0]);
     replayer.stop_at_events(false);
     assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn preloaded_modules_take_breakpoints_before_replay() -> Result<()> {
+    let trace = record_counter(4)?;
+    // Find a PC in the loop by single-stepping into it.
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let modules = replayer.preload_modules()?;
+    assert_eq!(modules.len(), 1);
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .single_step(true)?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    let (_, pc, _, _) = position(&mut replayer)?;
+    // While stopped, the store's own debug API sees the stopped frames, in
+    // the module that was preloaded.
+    let frames = replayer.debug_exit_frames();
+    let mut s = replayer.store();
+    let store_frames = s.debug_exit_frames().collect::<Vec<_>>();
+    assert_eq!(store_frames.len(), frames.len());
+    let instance = store_frames[0].instance(&mut s)?;
+    assert!(Module::same(instance.module(&s), &modules[0]));
+    drop(replayer);
+
+    // A breakpoint set in a preloaded module before replay starts is hit.
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let modules = replayer.preload_modules()?;
+    assert_eq!(replayer.store().debug_all_modules().len(), 1);
+    replayer
+        .store()
+        .edit_breakpoints()
+        .unwrap()
+        .add_breakpoint(&modules[0], ModulePC::new(pc))?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Breakpoint);
+    assert_eq!(position(&mut replayer)?.1, pc);
     Ok(())
 }

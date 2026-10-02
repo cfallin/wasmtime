@@ -7,8 +7,9 @@
 //! fibers and never invokes the original host functions or component builtins.
 //!
 //! Core function boundaries support numbers, vectors, and nullable abstract
-//! function references. GC and typed function references are unsupported.
-//! Shared memory, host table/global mutation, resource limiters, call hooks,
+//! function references. GC and typed function references may be used inside
+//! the guest but not cross the host boundary.
+//! Shared memory, host table/global mutation, call hooks,
 //! custom signal handlers, Wasm stack switching, epochs, and fuel are
 //! unsupported, as is recording with guest debugging. Host writes through the
 //! memory APIs, including slices from [`Memory::data_mut`], are recorded;
@@ -97,24 +98,65 @@ fn encode_event<E: TraceEvent>(bytes: &mut Vec<u8>, event: &E) -> Result<()> {
     Ok(())
 }
 
-/// Records events into a store's recording from code that has no access to
-/// the store, such as a host stream's implementation or a background task.
+/// Creates an event channel: a sink through which code without access to a
+/// store, such as a host stream's implementation or a background task, records
+/// events, and a receiver that delivers them into a store's recording once
+/// attached with [`Store::rr_attach_events`].
 ///
-/// Created by [`Store::rr_event_sink`]. Events recorded through a sink enter
-/// the trace at the store's next boundary: the next guest entry, host
-/// return, or the end of the recording. Recording through a sink after its
-/// recording has finished does nothing. Sinks can be cloned and sent to other
-/// threads.
+/// The two ends work like those of a channel. The sink can be handed to event
+/// producers (for example, built into a WASI context) before the store starts
+/// recording; events recorded before the receiver is attached are buffered.
+/// Once attached, events enter the trace at the store's next boundary: the next
+/// guest entry, host return, or the end of the recording. When the receiver is
+/// dropped, for example when its recording finishes, recording through the
+/// sink does nothing.
+pub fn event_channel() -> (EventSink, EventReceiver) {
+    let buffer = Arc::new(crate::sync::RwLock::new(SinkBuffer::default()));
+    (
+        EventSink {
+            buffer: buffer.clone(),
+        },
+        EventReceiver { buffer },
+    )
+}
+
+/// The producing end of an [`event_channel`]. Sinks can be cloned and sent to
+/// other threads.
 #[derive(Clone)]
 pub struct EventSink {
     buffer: Arc<crate::sync::RwLock<SinkBuffer>>,
+}
+
+/// The receiving end of an [`event_channel`], to attach to a recording store
+/// with [`Store::rr_attach_events`].
+pub struct EventReceiver {
+    buffer: Arc<crate::sync::RwLock<SinkBuffer>>,
+}
+
+impl Drop for EventReceiver {
+    fn drop(&mut self) {
+        let mut buffer = self.buffer.write();
+        buffer.closed = true;
+        buffer.bytes = Vec::new();
+    }
+}
+
+impl EventReceiver {
+    /// Takes the events recorded since the last call.
+    fn take(&self) -> Result<Vec<u8>> {
+        let mut buffer = self.buffer.write();
+        if let Some(e) = buffer.failure.take() {
+            return Err(e);
+        }
+        Ok(core::mem::take(&mut buffer.bytes))
+    }
 }
 
 #[derive(Default)]
 struct SinkBuffer {
     // Encoded event records, in the order they were recorded.
     bytes: Vec<u8>,
-    // Set when the recording ends.
+    // Set when the receiver is dropped.
     closed: bool,
     // The first encoding failure, which fails the recording.
     failure: Option<Error>,
@@ -198,8 +240,8 @@ struct Session {
     mode: Mode,
     pending: Vec<(usize, Range<usize>)>,
     failure: Option<Error>,
-    // The buffer of the session's event sinks, once one has been created.
-    sink: Option<Arc<crate::sync::RwLock<SinkBuffer>>>,
+    // The receivers of the event channels attached to the session.
+    receivers: Vec<EventReceiver>,
 }
 
 enum Mode {
@@ -227,6 +269,9 @@ enum Mode {
         // Whether the embedder has the store, through `Replayer::store`,
         // rather than the replay driver.
         embedder_access: bool,
+        // The exit `(pc, trampoline fp, entry fp)` of the activations whose
+        // frames a debugger sees while replay is stopped.
+        stopped: Vec<(usize, usize, usize)>,
     },
 }
 
@@ -324,7 +369,7 @@ impl<T: 'static> Store<T> {
             },
             pending: Vec::new(),
             failure: None,
-            sink: None,
+            receivers: Vec::new(),
         })?);
         Ok(())
     }
@@ -341,9 +386,6 @@ impl<T: 'static> Store<T> {
         ensure!(store.rr.recording(), "store is not recording");
         let flushed = store.rr_flush();
         let session = store.rr.session.take().unwrap();
-        if let Some(sink) = &session.sink {
-            sink.write().closed = true;
-        }
         if let Some(e) = session.failure {
             return Err(e);
         }
@@ -377,19 +419,25 @@ impl<T: 'static> Store<T> {
         Ok(replayer.into_replay())
     }
 
-    /// Returns a sink for recording events into this store's recording from
-    /// code without access to the store, or `None` if the store is not
-    /// recording.
-    pub fn rr_event_sink(&mut self) -> Option<EventSink> {
+    /// Attaches the receiving end of an [`event_channel`] to this store's
+    /// recording, so that events recorded through its sinks enter the trace.
+    /// Fails if the store is not recording.
+    pub fn rr_attach_events(&mut self, receiver: EventReceiver) -> Result<()> {
         let store = self.as_context_mut().0;
-        if !store.rr.recording() {
-            return None;
-        }
-        let session = store.rr_session();
-        let buffer = session.sink.get_or_insert_with(Default::default);
-        Some(EventSink {
-            buffer: buffer.clone(),
-        })
+        ensure!(store.rr.recording(), "store is not recording");
+        let receivers = &mut store.rr_session().receivers;
+        receivers.try_reserve(1)?;
+        receivers.push(receiver);
+        Ok(())
+    }
+
+    /// Returns a sink attached to this store's recording, as for an
+    /// [`event_channel`] whose receiver is attached right away, or `None` if
+    /// the store is not recording.
+    pub fn rr_event_sink(&mut self) -> Option<EventSink> {
+        let (sink, receiver) = event_channel();
+        self.rr_attach_events(receiver).ok()?;
+        Some(sink)
     }
 
     /// Starts replaying a trace, as for [`Store::replay`], with control over
@@ -443,6 +491,16 @@ impl StoreOpaque {
             unreachable!()
         };
         page_size
+    }
+
+    /// The exit `(pc, trampoline fp, entry fp)` of the activations whose
+    /// frames a debugger sees while replay is stopped at a debug event.
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_stopped_activations(&self) -> &[(usize, usize, usize)] {
+        match self.rr.session.as_deref().map(|s| &s.mode) {
+            Some(Mode::Replaying { stopped, .. }) => stopped,
+            _ => &[],
+        }
     }
 
     /// Whether the embedder, rather than the replay driver or a replay
@@ -756,10 +814,11 @@ impl StoreOpaque {
         };
         let mut bytes = core::mem::take(bytes);
         // Events recorded through sinks since the last boundary.
-        let sunk = session.sink.as_ref().map(|sink| {
-            let mut sink = sink.write();
-            (core::mem::take(&mut sink.bytes), sink.failure.take())
-        });
+        let sunk = session
+            .receivers
+            .iter()
+            .map(|r| r.take())
+            .collect::<Vec<_>>();
         // Emit each written byte once, in a deterministic order.
         pending.sort_unstable_by_key(|(id, range)| (*id, range.start));
         pending.dedup_by(|(id, next), (prev_id, prev)| {
@@ -770,10 +829,8 @@ impl StoreOpaque {
             overlaps
         });
         let result = (|| {
-            if let Some((events, failure)) = sunk {
-                if let Some(e) = failure {
-                    return Err(e);
-                }
+            for events in sunk {
+                let events = events?;
                 codec::reserve(&mut bytes, events.len())?;
                 bytes.extend_from_slice(&events);
             }

@@ -29,7 +29,7 @@ use crate::runtime::vm::{
 use core::mem::MaybeUninit;
 use core::task::Poll;
 use wasmtime_environ::{
-    FuncKey, VM_REPLAY_DEBUG, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED,
+    VM_REPLAY_DEBUG, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED,
 };
 
 mod checkpoint;
@@ -60,8 +60,8 @@ impl Trampolines {
                     .ok_or_else(|| format_err!("engine is not configured for replay"))
             };
             Ok(Trampolines {
-                start: get(FuncKey::ReplayStart)?,
-                host_call: get(FuncKey::ReplayHostCall)?,
+                start: get(wasmtime_environ::FuncKey::ReplayStart)?,
+                host_call: get(wasmtime_environ::FuncKey::ReplayHostCall)?,
                 module,
             })
         }
@@ -221,10 +221,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 page_size: 4096,
                 parked: Vec::new(),
                 embedder_access: false,
+                stopped: Vec::new(),
             },
             pending: Vec::new(),
             failure: None,
-            sink: None,
+            receivers: Vec::new(),
         })?);
         Ok(Replayer {
             driver: Driver {
@@ -267,7 +268,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     pub async fn run(&mut self) -> Result<ReplayStop> {
         let driver = &mut self.driver;
         driver.set_embedder_access(false);
-        core::future::poll_fn(|cx| {
+        driver.publish_stopped(false);
+        let result = core::future::poll_fn(|cx| {
             // Give the executor a chance to cancel long traces between events.
             for _ in 0..256 {
                 if driver.finished && driver.paused.is_none() {
@@ -286,7 +288,9 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             cx.waker().wake_by_ref();
             Poll::Pending
         })
-        .await
+        .await;
+        self.driver.publish_stopped(true);
+        result
     }
 
     /// The frames of the activation stopped at a debug event, as for
@@ -297,31 +301,67 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// empty unless [`Replayer::run`] returned [`ReplayStop::Breakpoint`].
     ///
     /// The frames can be inspected through [`Replayer::store`] until replay
-    /// continues or is restored.
+    /// continues or is restored. While replay is stopped, the store's own
+    /// [`debug_exit_frames`](crate::StoreContextMut::debug_exit_frames)
+    /// returns the same frames.
     #[cfg(feature = "debug")]
     pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
-        let driver = &mut self.driver;
-        let Some(paused) = driver.paused else {
-            return Vec::new();
-        };
-        let store: &mut StoreOpaque = driver.store;
-        // The paused activation is not parked at a host call; order it first.
-        let mut order = driver
-            .activations
-            .iter_mut()
-            .rev()
-            .filter(|a| a.serial == paused || a.host.is_some())
-            .collect::<Vec<_>>();
-        order.sort_by_key(|a| a.serial != paused);
-        let mut frames = Vec::new();
-        for activation in order {
-            activation.context.rr_swap();
-            crate::runtime::vm::with_parked_activation(store, &mut activation.context, |store| {
-                frames.extend(store.debug_exit_frames());
-            });
-            activation.context.rr_swap();
+        self.driver.store.debug_exit_frames().collect()
+    }
+
+    /// Compiles every module in the trace now, rather than when replay
+    /// reaches it, and returns them in trace order. Replay then uses these
+    /// compiled modules. With guest debugging enabled, they are also
+    /// registered for debugging, as with
+    /// [`Store::debug_register_module`](crate::Store::debug_register_module),
+    /// so that a debugger can find them and set breakpoints in them before
+    /// replay starts.
+    pub fn preload_modules(&mut self) -> Result<Vec<crate::Module>> {
+        let engine = self.driver.store.engine().clone();
+        let mut reader = Reader::new(self.driver.reader.bytes());
+        reader.take(codec::MAGIC.len())?;
+        while reader.peek_tag().is_some() {
+            let (tag, mut body) = reader.record()?;
+            if tag != codec::MODULE {
+                continue;
+            }
+            let id = usize::try_from(body.u32()?)?;
+            let wasm = body.blob()?;
+            let modules = &mut self
+                .driver
+                .store
+                .rr
+                .session
+                .as_mut()
+                .unwrap()
+                .objects
+                .modules;
+            ensure!(id <= modules.len(), "invalid module id");
+            if id == modules.len() {
+                let module = super::init::compile_module(&engine, wasm)?;
+                modules.try_reserve(1)?;
+                modules.push(module.clone());
+                #[cfg(feature = "debug")]
+                if engine.tunables().debug_guest {
+                    let (registry, engine, breakpoints) =
+                        self.driver.store.modules_and_engine_and_breakpoints_mut();
+                    registry.register_module(&module, engine, breakpoints)?;
+                }
+            }
         }
-        frames
+        let modules = &self
+            .driver
+            .store
+            .rr
+            .session
+            .as_ref()
+            .unwrap()
+            .objects
+            .modules;
+        let mut result = Vec::new();
+        result.try_reserve_exact(modules.len())?;
+        result.extend(modules.iter().cloned());
+        Ok(result)
     }
 
     /// Sets the granularity, in bytes, at which checkpoints track writes to
@@ -744,6 +784,40 @@ impl<T: 'static> Driver<'_, T> {
             host: None,
             values,
         })
+    }
+
+    /// Publishes the exit state of the activations whose frames a debugger
+    /// sees while replay is stopped (if `stopped`): the activation stopped at
+    /// a debug event, then those parked at host calls, most recently started
+    /// first.
+    fn publish_stopped(&mut self, stopped: bool) {
+        let paused = self.paused.filter(|_| stopped);
+        let mut list = Vec::new();
+        if let Some(paused) = paused {
+            let mut order = self
+                .activations
+                .iter()
+                .rev()
+                .filter(|a| a.serial == paused || a.host.is_some())
+                .collect::<Vec<_>>();
+            order.sort_by_key(|a| a.serial != paused);
+            list = order
+                .into_iter()
+                .map(|a| {
+                    let cx = &a.context;
+                    (
+                        cx.last_wasm_exit_pc,
+                        cx.last_wasm_exit_trampoline_fp,
+                        cx.last_wasm_entry_fp,
+                    )
+                })
+                .collect();
+        }
+        let Mode::Replaying { stopped, .. } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *stopped = list;
     }
 
     fn set_embedder_access(&mut self, access: bool) {

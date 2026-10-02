@@ -11,6 +11,7 @@ use crate::runtime::vm::vmcontext::VMMemoryShadow;
 use core::ptr::NonNull;
 
 /// A shadow bit set for each byte a debugger watches.
+#[cfg(feature = "debug")]
 pub const WATCH_DEBUG: u8 = 1 << 0;
 
 /// A shadow bit set for each byte of a page that record/replay has not seen

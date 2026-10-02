@@ -239,13 +239,96 @@ impl<T: Send + 'static> Debuggee<T> {
     ///
     /// When paused, the holder of this object can access the `Store`
     /// indirectly by providing a closure
-    pub fn new<F>(mut store: Store<T>, inner: F) -> Debuggee<T>
+    pub fn new<F>(store: Store<T>, inner: F) -> Debuggee<T>
     where
         F: for<'a> FnOnce(
                 &'a mut Store<T>,
             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
             + Send
             + 'static,
+    {
+        Self::spawn(store, move |mut store, handler| async move {
+            // Emulate a breakpoint at startup.
+            log::trace!("inner debuggee task: first breakpoint");
+            handler
+                .handle(store.as_context_mut(), DebugEvent::Breakpoint)
+                .await;
+            log::trace!("inner debuggee task: first breakpoint resumed");
+
+            // Now invoke the actual inner body.
+            store.set_debug_handler(handler);
+            log::trace!("inner debuggee task: running `inner`");
+            let result = inner(&mut store).await;
+            log::trace!("inner debuggee task: done with `inner`");
+            (store, result)
+        })
+    }
+
+    /// Create a new Debugger that replays `trace` in `store`, which must be
+    /// empty and use an engine configured for replay with guest debugging.
+    ///
+    /// The replay is debugged like a live execution: it starts paused,
+    /// stops at breakpoints, single steps, and watchpoints, and while paused
+    /// the store shows the replay's state. Modules in the trace are compiled
+    /// and registered before the initial pause, so breakpoints can be set in
+    /// them. The replay cannot be changed: operations that would mutate the
+    /// store fail. `setup` can configure the replayer before it starts, for
+    /// example to observe embedder events such as WASI output.
+    ///
+    /// An interrupt request (see [`Debuggee::interrupt_pending`]) pauses the
+    /// replay as an epoch yield would, the next time it reaches a trace event.
+    #[cfg(feature = "rr")]
+    pub fn new_replay(
+        store: Store<T>,
+        trace: wasmtime::rr::Trace,
+        setup: impl FnOnce(&mut wasmtime::rr::Replayer<'_, T>) + Send + 'static,
+    ) -> Debuggee<T> {
+        Self::spawn(store, move |mut store, handler| async move {
+            let result = async {
+                let mut replayer = store.replayer(&trace)?;
+                replayer.preload_modules()?;
+                setup(&mut replayer);
+                handler
+                    .handle(replayer.store(), DebugEvent::Breakpoint)
+                    .await;
+                loop {
+                    let interrupt = handler.0.interrupt_pending.clone();
+                    let stop = {
+                        let mut run = std::pin::pin!(replayer.run());
+                        // `Replayer::run` yields between trace events, where
+                        // it can be abandoned without losing progress.
+                        core::future::poll_fn(|cx| {
+                            if interrupt.load(Ordering::SeqCst) {
+                                return std::task::Poll::Ready(None);
+                            }
+                            run.as_mut().poll(cx).map(Some)
+                        })
+                        .await
+                    };
+                    let event = match stop.transpose()? {
+                        None => DebugEvent::EpochYield,
+                        Some(wasmtime::rr::ReplayStop::Finished) => break,
+                        Some(wasmtime::rr::ReplayStop::Breakpoint) => DebugEvent::Breakpoint,
+                        Some(wasmtime::rr::ReplayStop::Watchpoint(hit)) => {
+                            DebugEvent::Watchpoint(hit)
+                        }
+                        Some(_) => continue,
+                    };
+                    handler.handle(replayer.store(), event).await;
+                }
+                Ok(())
+            }
+            .await;
+            (store, result)
+        })
+    }
+
+    /// Spawns the task that runs a debuggee's body, `body`, which receives
+    /// the store and the handler for its debug events and returns the store.
+    fn spawn<F, Fut>(store: Store<T>, body: F) -> Debuggee<T>
+    where
+        F: FnOnce(Store<T>, Handler<T>) -> Fut + Send + 'static,
+        Fut: Future<Output = (Store<T>, Result<()>)> + Send,
     {
         let engine = store.engine().clone();
         let (in_tx, in_rx) = mpsc::channel(1);
@@ -255,27 +338,13 @@ impl<T: Send + 'static> Debuggee<T> {
         let handle = tokio::spawn({
             let interrupt_pending = interrupt_pending.clone();
             async move {
-                // Create the handler that's invoked from within the async
-                // debug-event callback.
                 let out_tx_clone = out_tx.clone();
                 let handler = Handler(Arc::new(HandlerInner {
                     in_rx: Mutex::new(in_rx),
                     out_tx,
                     interrupt_pending,
                 }));
-
-                // Emulate a breakpoint at startup.
-                log::trace!("inner debuggee task: first breakpoint");
-                handler
-                    .handle(store.as_context_mut(), DebugEvent::Breakpoint)
-                    .await;
-                log::trace!("inner debuggee task: first breakpoint resumed");
-
-                // Now invoke the actual inner body.
-                store.set_debug_handler(handler);
-                log::trace!("inner debuggee task: running `inner`");
-                let result = inner(&mut store).await;
-                log::trace!("inner debuggee task: done with `inner`");
+                let (store, result) = body(store, handler).await;
                 let _ = out_tx_clone.send(Response::Finished(store)).await;
                 result
             }
@@ -527,6 +596,67 @@ pub enum DebugRunResult {
 mod test {
     use super::*;
     use wasmtime::*;
+
+    #[cfg(feature = "rr")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn replay_debugging() -> wasmtime::Result<()> {
+        let _ = env_logger::try_init();
+        let wat = r#"
+            (module
+              (import "" "host" (func $host (result i32)))
+              (memory (export "memory") 1)
+              (func (export "main") (result i32)
+                (i32.store (i32.const 0) (call $host))
+                (i32.add (i32.load (i32.const 0)) (i32.const 1))))
+        "#;
+        let mut config = Config::new();
+        config.rr(RRConfig::Recording);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, ());
+        store.start_recording()?;
+        let host = Func::wrap(&mut store, || 41);
+        let module = Module::new(&engine, wat)?;
+        let instance = Instance::new(&mut store, &module, &[host.into()])?;
+        let main = instance.get_typed_func::<(), i32>(&mut store, "main")?;
+        assert_eq!(main.call(&mut store, ())?, 42);
+        let trace = store.finish_recording()?;
+
+        let mut config = Config::new();
+        config.rr(RRConfig::Replaying).guest_debug(true);
+        let engine = Engine::new(&config)?;
+        let mut debuggee = Debuggee::new_replay(Store::new(&engine, ()), trace, |_| {});
+        // The trace's module is available at the initial pause.
+        let modules = debuggee
+            .with_store(|mut store| {
+                store
+                    .as_context_mut()
+                    .edit_breakpoints()
+                    .unwrap()
+                    .single_step(true)
+                    .unwrap();
+                store.debug_all_modules().len()
+            })
+            .await?;
+        assert_eq!(modules, 1);
+        let mut steps = 0;
+        loop {
+            match debuggee.run().await? {
+                DebugRunResult::Breakpoint => {
+                    steps += 1;
+                    let frames = debuggee
+                        .with_store(|mut store| store.debug_exit_frames().count())
+                        .await?;
+                    assert!(frames >= 1);
+                }
+                DebugRunResult::Finished => break,
+                e => panic!("unexpected event {e:?}"),
+            }
+        }
+        assert!(steps > 3, "{steps} steps");
+        debuggee.finish().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]

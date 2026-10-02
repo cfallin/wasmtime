@@ -559,7 +559,7 @@ pub(super) fn replay_event<T: 'static>(
     Ok(None)
 }
 
-fn compile_module(engine: &crate::Engine, wasm: &[u8]) -> Result<Module> {
+pub(super) fn compile_module(engine: &crate::Engine, wasm: &[u8]) -> Result<Module> {
     #[cfg(any(feature = "cranelift", feature = "winch"))]
     {
         Module::from_binary(engine, wasm)

@@ -97,9 +97,11 @@ mod malloc;
 pub use self::malloc::MallocMemory;
 
 mod shadow;
+pub use self::shadow::MemoryShadow;
 #[cfg(feature = "rr")]
 pub use self::shadow::WATCH_CLEAN;
-pub use self::shadow::{MemoryShadow, WATCH_DEBUG};
+#[cfg(feature = "debug")]
+pub use self::shadow::WATCH_DEBUG;
 
 #[cfg(feature = "pooling-allocator")]
 mod static_;

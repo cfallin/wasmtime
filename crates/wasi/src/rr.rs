@@ -6,24 +6,19 @@
 //! and replays it with [`replay_output`] or a [`Replayer::on_event`] observer.
 //!
 //! To record, wrap the stdout and stderr streams given to
-//! [`WasiCtxBuilder`](crate::WasiCtxBuilder) in [`RecordedOutput`], using an
-//! event sink from the store being recorded. Sinks only exist while a store is
-//! recording, so the WASI context is built after
-//! [`Store::start_recording`](wasmtime::Store::start_recording); store data
-//! may be replaced with [`Store::data_mut`](wasmtime::Store::data_mut) before
-//! anything is instantiated:
+//! [`WasiCtxBuilder`](crate::WasiCtxBuilder) in [`RecordedOutput`], using the
+//! sink of an [`event_channel`](wasmtime::rr::event_channel), and attach the
+//! channel's receiver to the store once it starts recording:
 //!
 //! ```no_run
 //! # use wasmtime::{Config, Engine, RRConfig, Result, Store};
-//! # use wasmtime_wasi::{WasiCtx, WasiCtxBuilder};
+//! # use wasmtime_wasi::WasiCtxBuilder;
 //! # use wasmtime_wasi::rr::{OutputKind, RecordedOutput};
 //! # fn main() -> Result<()> {
 //! let mut config = Config::new();
 //! config.rr(RRConfig::Recording);
 //! let engine = Engine::new(&config)?;
-//! let mut store = Store::new(&engine, None::<WasiCtx>);
-//! store.start_recording()?;
-//! let sink = store.rr_event_sink().unwrap();
+//! let (sink, receiver) = wasmtime::rr::event_channel();
 //! let wasi = WasiCtxBuilder::new()
 //!     .stdout(RecordedOutput::new(
 //!         wasmtime_wasi::cli::stdout(),
@@ -36,7 +31,9 @@
 //!         OutputKind::Stderr,
 //!     ))
 //!     .build();
-//! *store.data_mut() = Some(wasi);
+//! let mut store = Store::new(&engine, wasi);
+//! store.start_recording()?;
+//! store.rr_attach_events(receiver)?;
 //! // ... instantiate and run the guest, then `store.finish_recording()`.
 //! # Ok(())
 //! # }
@@ -98,8 +95,8 @@ pub struct RecordedOutput<S> {
 
 impl<S> RecordedOutput<S> {
     /// Records writes to `inner` through `sink` (from
-    /// [`Store::rr_event_sink`](wasmtime::Store::rr_event_sink)) as output of
-    /// kind `kind`.
+    /// [`event_channel`](wasmtime::rr::event_channel)) as output of kind
+    /// `kind`.
     pub fn new(inner: S, sink: EventSink, kind: OutputKind) -> Self {
         RecordedOutput { inner, sink, kind }
     }

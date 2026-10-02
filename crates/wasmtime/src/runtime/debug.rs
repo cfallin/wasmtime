@@ -135,11 +135,25 @@ impl<'a, T> Caller<'a, T> {
 
 impl StoreOpaque {
     pub(crate) fn debug_exit_frames(&mut self) -> impl Iterator<Item = FrameHandle> {
-        let activations = if self.engine().tunables().debug_guest {
+        #[allow(unused_mut, reason = "mutated with record/replay")]
+        let mut activations = if self.engine().tunables().debug_guest {
             Backtrace::activations(self)
         } else {
             vec![]
         };
+        // A stopped replay's activations are parked on their own fibers.
+        #[cfg(feature = "rr")]
+        if activations.is_empty() && self.engine().tunables().debug_guest {
+            activations = self
+                .rr_stopped_activations()
+                .iter()
+                // SAFETY: stopped activations' stacks stay intact while
+                // replay is stopped, which our store borrow ensures.
+                .map(|&(pc, fp, entry)| unsafe {
+                    crate::runtime::vm::Activation::from_exit(pc, fp, entry)
+                })
+                .collect();
+        }
 
         activations
             .into_iter()

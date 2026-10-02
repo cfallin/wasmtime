@@ -50,8 +50,6 @@ impl<T> Store<T> {
         + Sync
         + 'static,
     ) {
-        #[cfg(feature = "rr")]
-        self.inner.rr.poison("installing a resource limiter");
         // Apply the limits on instances, tables, and memory given by the limiter:
         let inner = &mut self.inner;
         let (instance_limit, table_limit, memory_limit) = {

@@ -507,25 +507,6 @@ pub(crate) fn catch_replay_traps(
     }
 }
 
-/// Calls `f` with a `CallThreadState` registered for a parked record/replay
-/// activation whose state is installed in `store`, so that `f` can walk its
-/// stack, for example to inspect it at a debug stop.
-#[cfg(all(feature = "rr", feature = "debug"))]
-pub(crate) fn with_parked_activation<R>(
-    store: &mut StoreOpaque,
-    old_state: &mut EntryStoreContext,
-    f: impl FnOnce(&mut StoreOpaque) -> R,
-) -> R {
-    let state = CallThreadState::new(store, old_state);
-    let mut result = None;
-    let completed = state.with(|_| {
-        result = Some(f(store));
-        true
-    });
-    debug_assert!(completed.is_ok());
-    result.unwrap()
-}
-
 // Module to hide visibility of the `CallThreadState::prev` field and force
 // usage of its accessor methods.
 mod call_thread_state {
