@@ -18,6 +18,7 @@ use gdbstub::{
         MultiThreadStopReason,
         state_machine::{GdbStubStateMachine, GdbStubStateMachineInner, state::Running},
     },
+    target::ext::base::reverse_exec::ReplayLogPosition,
     target::ext::breakpoints::WatchKind,
 };
 use gdbstub_arch::wasm::addr::WasmAddr;
@@ -56,6 +57,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
             running: None,
             current_pc: WasmAddr::from_raw(0).unwrap(),
             interrupt: false,
+            reversing: false,
             single_stepping: false,
             frame_cache: vec![],
             addr_space: AddrSpace::new(),
@@ -78,6 +80,8 @@ struct Debugger<'a> {
     addr_space: AddrSpace,
     interrupt: bool,
     single_stepping: bool,
+    /// Whether the current resumption runs backward.
+    reversing: bool,
     current_pc: WasmAddr,
     frame_cache: Vec<api::Frame>,
     /// Active write watchpoints, as requested by the client, without
@@ -216,13 +220,25 @@ impl<'a> Debugger<'a> {
         assert!(self.running.is_none());
         trace!("continuing");
         self.single_stepping = false;
+        self.reversing = false;
         self.running = Some(api::Resumption::continue_(self.debuggee, resumption));
+    }
+
+    /// Runs backward by one step (if `step`) or to the previous breakpoint
+    /// or watchpoint stop.
+    fn start_reverse(&mut self, step: bool) {
+        assert!(self.running.is_none());
+        trace!("reversing (step: {step})");
+        self.single_stepping = step;
+        self.reversing = true;
+        self.running = Some(api::Resumption::reverse(self.debuggee, step));
     }
 
     fn start_single_step(&mut self, resumption: api::ResumptionValue) {
         assert!(self.running.is_none());
         trace!("single-stepping");
         self.single_stepping = true;
+        self.reversing = false;
         self.running = Some(api::Resumption::single_step(self.debuggee, resumption));
     }
 
@@ -274,6 +290,50 @@ impl<'a> Debugger<'a> {
         inner: GdbStubStateMachineInner<'b, Running, Self, Conn>,
     ) -> Result<GdbStubStateMachine<'b, Self, Conn>> {
         match event {
+            // Going backward, a watched write is reported where it is about
+            // to happen: the earlier state, which is where reverse execution
+            // stops for it.
+            api::Event::Watchpoint(hit) if self.reversing => {
+                let addr = self.watch_hit_addr(&hit);
+                self.update_on_stop();
+                let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                let mut regs = core::iter::once((
+                    gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
+                    pc_bytes.as_slice(),
+                ));
+                Ok(inner.report_stop_with_regs(
+                    self,
+                    MultiThreadStopReason::Watch {
+                        tid: self.tid,
+                        kind: WatchKind::Write,
+                        addr: addr.as_raw(),
+                    },
+                    &mut regs,
+                )?)
+            }
+            api::Event::ReplayBegin | api::Event::ReplayEnd => {
+                let pos = if matches!(event, api::Event::ReplayBegin) {
+                    ReplayLogPosition::Begin
+                } else {
+                    ReplayLogPosition::End
+                };
+                trace!("Event::Replay{pos:?}");
+                self.pending_watch = None;
+                self.update_on_stop();
+                let pc_bytes = self.current_pc.as_raw().to_le_bytes();
+                let mut regs = core::iter::once((
+                    gdbstub_arch::wasm::reg::id::WasmRegId::Pc,
+                    pc_bytes.as_slice(),
+                ));
+                Ok(inner.report_stop_with_regs(
+                    self,
+                    MultiThreadStopReason::ReplayLog {
+                        tid: Some(self.tid),
+                        pos,
+                    },
+                    &mut regs,
+                )?)
+            }
             api::Event::Watchpoint(hit) => {
                 // The debuggee pauses *before* the write, but gdb and
                 // LLDB expect watchpoints on this target to trigger

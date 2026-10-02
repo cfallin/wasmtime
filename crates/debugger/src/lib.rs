@@ -59,6 +59,8 @@ pub struct Debuggee<T: Send + 'static> {
     /// the event loop and enacting an explicit interrupt, and this
     /// flag distinguishes those cases.
     interrupt_pending: Arc<AtomicBool>,
+    /// Whether this debuggee can run backward: whether it is a replay.
+    reversible: bool,
 }
 
 /// State machine from the perspective of the outer logic.
@@ -76,7 +78,7 @@ pub struct Debuggee<T: Send + 'static> {
 /// .--->---------. v
 /// |     .----<  Paused  <-----------------------------------------------.
 /// |     |         v                                                     |
-/// |     |         | (async fn run() starts, sends Command::Continue)    |
+/// |     |         | (async fn run() starts, sends Command::Resume)      |
 /// |     |         |                                                     |
 /// |     |         v                                                     ^
 /// |     |      Running                                                  |
@@ -147,7 +149,7 @@ enum DebuggeeState {
 /// the store already and we can run those "with an accessor"
 /// instead.
 enum Command<T: 'static> {
-    Continue,
+    Resume(Resume),
     Query(Box<dyn FnOnce(StoreContextMut<'_, T>) -> Box<dyn Any + Send> + Send>),
 }
 
@@ -192,19 +194,20 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
                 DebugRunResult::EpochYield
             }
         };
+        // Live debuggees only resume forward (see `Debuggee::reversible`).
         self.pause(store, result).await;
     }
 }
 
 impl<T: Send + 'static> Handler<T> {
     /// Reports `result` to the outer `Debuggee` and serves its queries until
-    /// it continues.
-    async fn pause(&self, mut store: StoreContextMut<'_, T>, result: DebugRunResult) {
+    /// it resumes execution, returning how.
+    async fn pause(&self, mut store: StoreContextMut<'_, T>, result: DebugRunResult) -> Resume {
         let mut in_rx = self.0.in_rx.lock().await;
         if self.0.out_tx.send(Response::Paused(result)).await.is_err() {
             // Outer Debuggee has been dropped: just continue
             // executing.
-            return;
+            return Resume::Forward;
         }
 
         while let Some(cmd) = in_rx.recv().await {
@@ -220,15 +223,22 @@ impl<T: Send + 'static> Handler<T> {
                     {
                         // Outer Debuggee has been dropped: just
                         // continue executing.
-                        return;
+                        return Resume::Forward;
                     }
                 }
-                Command::Continue => {
-                    break;
-                }
+                Command::Resume(resume) => return resume,
             }
         }
+        Resume::Forward
     }
+}
+
+/// How to resume a paused debuggee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Resume {
+    Forward,
+    ReverseStep,
+    ReverseContinue,
 }
 
 impl<T: Send + 'static> Debuggee<T> {
@@ -285,37 +295,60 @@ impl<T: Send + 'static> Debuggee<T> {
     /// With an engine configured for epoch interruption, an interrupt request
     /// (see [`Debuggee::interrupt_pending`]) pauses the replay, as an epoch
     /// yield would, once the engine's epoch next advances.
+    ///
+    /// A replay can run backward (see [`Debuggee::reverse_step`] and
+    /// [`Debuggee::reverse_continue`]). At its end it pauses with
+    /// [`DebugRunResult::ReplayEnd`], from where it can still run backward;
+    /// running forward again completes it.
     #[cfg(feature = "rr")]
     pub fn new_replay(
         store: Store<T>,
         trace: wasmtime::rr::Trace,
         setup: impl FnOnce(&mut wasmtime::rr::Replayer<'_, T>) + Send + 'static,
     ) -> Debuggee<T> {
-        Self::spawn(store, move |mut store, handler| async move {
+        let mut debuggee = Self::spawn(store, move |mut store, handler| async move {
             let result = async {
                 let mut replayer = store.replayer(&trace)?;
                 replayer.preload_modules()?;
                 replayer.set_interrupt_flag(handler.0.interrupt_pending.clone());
+                replayer.enable_reverse_execution(REVERSE_SNAPSHOT_INTERVAL)?;
                 setup(&mut replayer);
-                handler
+                let mut resume = handler
                     .pause(replayer.store(), DebugRunResult::Breakpoint)
                     .await;
+                let mut at_end = false;
                 loop {
                     use wasmtime::rr::ReplayStop;
-                    let result = match replayer.run().await? {
-                        ReplayStop::Finished => break,
-                        ReplayStop::Breakpoint => DebugRunResult::Breakpoint,
+                    let stop = match resume {
+                        // Continuing past the end completes the debuggee.
+                        Resume::Forward if at_end => break,
+                        Resume::Forward => replayer.run().await?,
+                        Resume::ReverseStep => replayer.reverse_step().await?,
+                        Resume::ReverseContinue => replayer.reverse_continue().await?,
+                    };
+                    at_end = stop == ReplayStop::Finished;
+                    let result = match stop {
+                        ReplayStop::Finished => DebugRunResult::ReplayEnd,
+                        ReplayStop::Beginning => DebugRunResult::ReplayBegin,
+                        ReplayStop::Breakpoint | ReplayStop::StepTarget => {
+                            DebugRunResult::Breakpoint
+                        }
                         ReplayStop::Interrupted => DebugRunResult::EpochYield,
                         ReplayStop::Watchpoint(hit) => DebugRunResult::Watchpoint(hit),
-                        _ => continue,
+                        _ => {
+                            resume = Resume::Forward;
+                            continue;
+                        }
                     };
-                    handler.pause(replayer.store(), result).await;
+                    resume = handler.pause(replayer.store(), result).await;
                 }
                 Ok(())
             }
             .await;
             (store, result)
-        })
+        });
+        debuggee.reversible = true;
+        debuggee
     }
 
     /// Spawns the task that runs a debuggee's body, `body`, which receives
@@ -353,6 +386,7 @@ impl<T: Send + 'static> Debuggee<T> {
             out_rx,
             interrupt_pending,
             handle: Some(handle),
+            reversible: false,
         }
     }
 
@@ -393,6 +427,39 @@ impl<T: Send + 'static> Debuggee<T> {
     ///
     /// This method is cancel-safe, and no events will be lost.
     pub async fn run(&mut self) -> Result<DebugRunResult> {
+        self.resume(Resume::Forward).await
+    }
+
+    /// Whether this debuggee can run backward (see
+    /// [`Debuggee::reverse_step`]): whether it is a replay.
+    pub fn is_reversible(&self) -> bool {
+        self.reversible
+    }
+
+    /// Run a replay backward to just before the previous instruction
+    /// executed, as a forward single step would stop there. Returns
+    /// [`DebugRunResult::Breakpoint`] there, or
+    /// [`DebugRunResult::ReplayBegin`] at the beginning of the replay.
+    ///
+    /// Fails for debuggees that are not replays. This method is
+    /// cancel-safe like [`Debuggee::run`].
+    pub async fn reverse_step(&mut self) -> Result<DebugRunResult> {
+        wasmtime::ensure!(self.reversible, "only replays can run backward");
+        self.resume(Resume::ReverseStep).await
+    }
+
+    /// Run a replay backward to the last breakpoint or watchpoint stop
+    /// before the present, returning its event, or
+    /// [`DebugRunResult::ReplayBegin`] if there is none.
+    ///
+    /// Fails for debuggees that are not replays. This method is
+    /// cancel-safe like [`Debuggee::run`].
+    pub async fn reverse_continue(&mut self) -> Result<DebugRunResult> {
+        wasmtime::ensure!(self.reversible, "only replays can run backward");
+        self.resume(Resume::ReverseContinue).await
+    }
+
+    async fn resume(&mut self, resume: Resume) -> Result<DebugRunResult> {
         log::trace!("running: state is {:?}", self.state);
 
         self.wait_for_initial().await?;
@@ -400,9 +467,9 @@ impl<T: Send + 'static> Debuggee<T> {
         match self.state {
             DebuggeeState::Initial => unreachable!(),
             DebuggeeState::Paused => {
-                log::trace!("sending Continue");
+                log::trace!("sending Resume");
                 self.in_tx
-                    .send(Command::Continue)
+                    .send(Command::Resume(resume))
                     .await
                     .map_err(|_| wasmtime::format_err!("Failed to send over debug channel"))?;
                 log::trace!("sent Continue");
@@ -431,9 +498,9 @@ impl<T: Send + 'static> Debuggee<T> {
                 self.state = DebuggeeState::Paused;
 
                 // Now send a `Continue`, as above.
-                log::trace!("in Paused; sending Continue");
+                log::trace!("in Paused; sending Resume");
                 self.in_tx
-                    .send(Command::Continue)
+                    .send(Command::Resume(resume))
                     .await
                     .map_err(|_| wasmtime::format_err!("Failed to send over debug channel"))?;
                 self.state = DebuggeeState::Running;
@@ -585,7 +652,17 @@ pub enum DebugRunResult {
     /// Wasm is about to write watched memory; the write happens when
     /// execution continues.
     Watchpoint(WatchpointHit),
+    /// Reverse execution reached the beginning of a replay.
+    ReplayBegin,
+    /// Forward execution reached the end of a replay. It can run backward
+    /// from here; running forward completes it.
+    ReplayEnd,
 }
+
+/// The interval, in guest steps, at which replay debuggees take snapshots
+/// for reverse execution.
+#[cfg(feature = "rr")]
+const REVERSE_SNAPSHOT_INTERVAL: u64 = 1_000_000;
 
 #[cfg(test)]
 mod test {
@@ -644,11 +721,13 @@ mod test {
                         .await?;
                     assert!(frames >= 1);
                 }
-                DebugRunResult::Finished => break,
+                DebugRunResult::ReplayEnd => break,
                 e => panic!("unexpected event {e:?}"),
             }
         }
         assert!(steps > 3, "{steps} steps");
+        // Running past the end completes the replay.
+        assert!(matches!(debuggee.run().await?, DebugRunResult::Finished));
         debuggee.finish().await?;
         Ok(())
     }
@@ -695,8 +774,126 @@ mod test {
             .with_store(|mut store| store.debug_exit_frames().count())
             .await?;
         assert_eq!(frames, 1);
+        assert!(matches!(debuggee.run().await?, DebugRunResult::ReplayEnd));
         assert!(matches!(debuggee.run().await?, DebugRunResult::Finished));
         debuggee.finish().await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "rr")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn replay_reverse_debugging() -> wasmtime::Result<()> {
+        let wat = r#"
+            (module
+              (import "" "host" (func $host (result i32)))
+              (func (export "main") (result i32)
+                (local $i i32) (local $acc i32)
+                loop
+                  (local.set $acc (i32.add (local.get $acc) (call $host)))
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if 0 (i32.lt_u (local.get $i) (i32.const 4)))
+                end
+                local.get $acc))
+        "#;
+        let mut config = Config::new();
+        config.rr(RRConfig::Recording);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, ());
+        store.start_recording()?;
+        let host = Func::wrap(&mut store, || 10);
+        let module = Module::new(&engine, wat)?;
+        let instance = Instance::new(&mut store, &module, &[host.into()])?;
+        let main = instance.get_typed_func::<(), i32>(&mut store, "main")?;
+        assert_eq!(main.call(&mut store, ())?, 40);
+        let trace = store.finish_recording()?;
+
+        let mut config = Config::new();
+        config.rr(RRConfig::Replaying).guest_debug(true);
+        let engine = Engine::new(&config)?;
+        let mut debuggee = Debuggee::new_replay(Store::new(&engine, ()), trace, |_| {});
+        assert!(debuggee.is_reversible());
+        // The PC and `$acc` of the stopped frame.
+        async fn state(debuggee: &mut Debuggee<()>) -> wasmtime::Result<(u32, i32)> {
+            debuggee
+                .with_store(|mut store| {
+                    let frame = store.debug_exit_frames().next().unwrap();
+                    let (_, pc) = frame.wasm_function_index_and_pc(&mut store)?.unwrap();
+                    let acc = frame.local(&mut store, 1)?.unwrap_i32();
+                    wasmtime::Result::<_>::Ok((pc.raw(), acc))
+                })
+                .await?
+        }
+        debuggee
+            .with_store(|store| store.edit_breakpoints().unwrap().single_step(true).unwrap())
+            .await?;
+        let mut forward = Vec::new();
+        for _ in 0..30 {
+            assert!(matches!(debuggee.run().await?, DebugRunResult::Breakpoint));
+            forward.push(state(&mut debuggee).await?);
+        }
+        // Stepping backward retraces the forward steps.
+        for expected in forward.iter().rev().skip(1) {
+            assert!(matches!(
+                debuggee.reverse_step().await?,
+                DebugRunResult::Breakpoint
+            ));
+            assert_eq!(state(&mut debuggee).await?, *expected);
+        }
+
+        // Run to the end, hitting a breakpoint in every loop iteration, and
+        // find each hit again backward.
+        // A PC in the loop body: one that the forward steps visited twice.
+        let pc = forward
+            .iter()
+            .map(|(pc, _)| *pc)
+            .find(|pc| forward.iter().filter(|(p, _)| p == pc).count() > 1)
+            .unwrap();
+        debuggee
+            .with_store(move |mut store| {
+                let module = store.as_context_mut().debug_all_modules()[0].clone();
+                let mut breakpoints = store.edit_breakpoints().unwrap();
+                breakpoints.single_step(false).unwrap();
+                breakpoints
+                    .add_breakpoint(&module, wasmtime::ModulePC::new(pc))
+                    .unwrap();
+            })
+            .await?;
+        let mut hits = 0;
+        loop {
+            match debuggee.run().await? {
+                DebugRunResult::Breakpoint => hits += 1,
+                DebugRunResult::ReplayEnd => break,
+                e => panic!("unexpected event {e:?}"),
+            }
+        }
+        // Breakpoints apply to the whole replay, so there are also hits from
+        // before the breakpoint was set: one per loop iteration in all.
+        let mut reverse_hits = 0;
+        loop {
+            match debuggee.reverse_continue().await? {
+                DebugRunResult::Breakpoint => {
+                    reverse_hits += 1;
+                    assert_eq!(state(&mut debuggee).await?.0, pc);
+                }
+                DebugRunResult::ReplayBegin => break,
+                e => panic!("unexpected event {e:?}"),
+            }
+        }
+        assert_eq!((hits, reverse_hits), (4, 4));
+        // Forward to the end again, and past it to completion.
+        while !matches!(debuggee.run().await?, DebugRunResult::ReplayEnd) {}
+        assert!(matches!(debuggee.run().await?, DebugRunResult::Finished));
+        debuggee.finish().await?;
+
+        // Live debuggees cannot run backward.
+        let mut config = Config::new();
+        config.guest_debug(true);
+        let engine = Engine::new(&config)?;
+        let mut live = Debuggee::new(Store::new(&engine, ()), |_| Box::pin(async { Ok(()) }));
+        assert!(!live.is_reversible());
+        assert!(live.reverse_step().await.is_err());
+        live.finish().await?;
         Ok(())
     }
 
