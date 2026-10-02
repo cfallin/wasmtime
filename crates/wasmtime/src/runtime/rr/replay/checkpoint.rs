@@ -103,6 +103,9 @@ pub struct Checkpoint {
     finished: bool,
     paused: Option<u64>,
     pending_write: Option<(Memory, Range<usize>)>,
+    // The guest step count, and the position of the replay.
+    steps: u64,
+    replay_position: ReplayPosition,
     growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
     objects: Objects,
     instance_list: Vec<crate::Instance>,
@@ -290,6 +293,8 @@ impl<T: 'static> Driver<'_, T> {
             finished: driver.finished,
             paused: driver.paused,
             pending_write: driver.pending_write.clone(),
+            steps: driver.store.debug_steps(),
+            replay_position: driver.position,
             growth_failures,
             objects: identities,
             activations,
@@ -398,6 +403,11 @@ impl<T: 'static> Driver<'_, T> {
         driver.finished = checkpoint.finished;
         driver.paused = checkpoint.paused;
         driver.pending_write = checkpoint.pending_write.clone();
+        driver.position = checkpoint.replay_position;
+        driver.store.set_debug_steps(checkpoint.steps);
+        driver
+            .store
+            .set_debug_step_target(driver.user_target.unwrap_or(u64::MAX));
         driver.observed = None;
         driver.stop = None;
         *driver.growth_failures() = try_copy(&checkpoint.growth_failures)?;

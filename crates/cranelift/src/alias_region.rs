@@ -93,6 +93,7 @@ enum VmType {
     VMAsanStackSupport,
     VMDefinedShadowMemory,
     VMReplayControl,
+    VMDebugSteps,
 }
 
 /// A key that uniquely identifies an alias region across an entire compilation.

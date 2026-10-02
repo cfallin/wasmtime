@@ -136,6 +136,7 @@ pub use crate::runtime::vm::vmcontext::VMArrayCallFunction;
 pub(crate) use crate::runtime::vm::vmcontext::VMCopyingHeader;
 #[cfg(feature = "gc-copying")]
 pub use crate::runtime::vm::vmcontext::VMCopyingHeapData;
+pub use crate::runtime::vm::vmcontext::VMDebugSteps;
 #[cfg(feature = "gc-drc")]
 pub(crate) use crate::runtime::vm::vmcontext::VMDrcHeader;
 #[cfg(feature = "gc-drc")]
