@@ -34,10 +34,19 @@ fn new_component(engine: &Engine, wasm: impl AsRef<[u8]>) -> Result<component::C
 /// compile, skipping any that the replaying engine rejects (such as
 /// components that need features it does not enable).
 trait ReplayAll<T: Send + 'static> {
+    fn replayer_all<'a>(&'a mut self, trace: &'a Trace) -> Result<rr::Replayer<'a, T>>;
     async fn replay_all(&mut self, trace: &Trace) -> Result<rr::Replay>;
 }
 
 impl<T: Send + 'static> ReplayAll<T> for Store<T> {
+    fn replayer_all<'a>(&'a mut self, trace: &'a Trace) -> Result<rr::Replayer<'a, T>> {
+        let mut replayer = Store::replayer(self, trace)?;
+        for wasm in BYTECODE.lock().unwrap().iter() {
+            let _ = replayer.add_bytecode(wasm);
+        }
+        Ok(replayer)
+    }
+
     async fn replay_all(&mut self, trace: &Trace) -> Result<rr::Replay> {
         let bytecode = BYTECODE.lock().unwrap().clone();
         let bytecode = bytecode
@@ -514,6 +523,202 @@ fn replay_requires_a_native_target() -> Result<()> {
     config.target("pulley64")?.rr(RRConfig::Replaying);
     let error = Engine::new(&config).unwrap_err();
     assert!(error.to_string().contains("native"), "{error:?}");
+    Ok(())
+}
+
+/// Program output, as a WASI implementation could record it.
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Output {
+    stream: u8,
+    text: String,
+}
+
+impl rr::TraceEvent for Output {
+    const TAG: u32 = 1;
+}
+
+/// A guest that prints through a host function which records its output.
+fn printing() -> Result<(Store<()>, TypedFunc<i32, ()>)> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let print = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, ()>, stream: i32, ptr: i32, len: i32| -> Result<()> {
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let bytes = &memory.data(&caller)[ptr as usize..][..len as usize];
+            let text = String::from_utf8(bytes.to_vec())?;
+            rr::record_event(
+                &mut caller,
+                &Output {
+                    stream: stream as u8,
+                    text,
+                },
+            )
+        },
+    );
+    let module = new_module(
+        &recording,
+        r#"(module
+        (import "" "print" (func $print (param i32 i32 i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "tick err")
+        (func (export "run") (param $n i32)
+            (loop $l
+                (call $print (i32.const 1) (i32.const 0) (i32.const 4))
+                (call $print (i32.const 2) (i32.const 5) (i32.const 3))
+                (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1)))))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    Ok((store, run))
+}
+
+#[tokio::test]
+async fn embedder_events_are_replayed_in_order() -> Result<()> {
+    let (mut store, run) = printing()?;
+    let start = Output {
+        stream: 0,
+        text: "start".to_string(),
+    };
+    rr::record_event(&mut store, &start)?;
+    run.call(&mut store, 2)?;
+    let trace = store.finish_recording()?;
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = replay.replayer_all(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output));
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    drop(replayer);
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            start,
+            tick(1, "tick"),
+            tick(2, "err"),
+            tick(1, "tick"),
+            tick(2, "err"),
+        ]
+    );
+    // Recording outside of a session does nothing.
+    rr::record_event(&mut replay, &tick(0, "ignored"))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replays_read_function_tables_and_look_up_functions() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = new_module(
+        &recording,
+        r#"(module
+        (import "" "report" (func $report (param i32)))
+        (table (export "table") 2 funcref)
+        (elem (i32.const 1) func $f)
+        (func $f (export "f") (param i32) (result i32) local.get 0)
+        (func (export "run") (call $report (i32.const 0))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    instance
+        .get_typed_func::<(), ()>(&mut store, "run")?
+        .call(&mut store, ())?;
+    let trace = store.finish_recording()?;
+
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer_all(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    let instance = replayer.instances()[0];
+    // Replays initialize tables eagerly, so reading them needs no more than
+    // the replayer's shared access to the store.
+    let s = replayer.store();
+    let table = instance.get_table(&s, "table").unwrap();
+    assert!(
+        table
+            .get_if_initialized(&s, 0)
+            .unwrap()
+            .unwrap_func()
+            .is_none()
+    );
+    let element = *table
+        .get_if_initialized(&s, 1)
+        .unwrap()
+        .unwrap_func()
+        .unwrap();
+    // Function exports are initialized lazily, so the replayer looks them up.
+    let f = replayer
+        .get_export(instance, "f")
+        .unwrap()
+        .into_func()
+        .unwrap();
+    let s = replayer.store();
+    assert_eq!(f.ty(&s).params().len(), 1);
+    assert_eq!(f.to_raw(&s), element.to_raw(&s));
+    assert!(replayer.get_export(instance, "missing").is_none());
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    // The sink is handed out before recording starts, like the two ends of
+    // a channel; events before the receiver is attached are buffered.
+    let (sink, receiver) = rr::event_channel();
+    let mut store = Store::new(&recording, Some(sink.clone()));
+    assert!(store.rr_event_sink().is_none());
+    sink.record(&tick(9, "early"));
+    store.start_recording()?;
+    store.rr_attach_events(receiver)?;
+    // A host function records through a sink, as code without access to
+    // the store would, on another thread.
+    let print = Func::wrap(
+        &mut store,
+        move |caller: Caller<'_, Option<rr::EventSink>>, stream: i32| {
+            let sink = caller.data().clone().unwrap();
+            std::thread::spawn(move || sink.record(&tick(stream as u8, "sunk")))
+                .join()
+                .unwrap();
+        },
+    );
+    let module = new_module(
+        &recording,
+        r#"(module (import "" "print" (func $print (param i32)))
+             (func (export "run") (call $print (i32.const 1)) (call $print (i32.const 2))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call(&mut store, ())?;
+    rr::record_event(&mut store, &tick(0, "direct"))?;
+    sink.record(&tick(3, "last"));
+    let trace = store.finish_recording()?;
+    // Recording after the end does nothing.
+    sink.record(&tick(4, "ignored"));
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = replay.replayer_all(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output.stream));
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    // Direct events are recorded immediately; sunk ones at the next boundary,
+    // which for the last one is the end of the recording.
+    assert_eq!(*seen.lock().unwrap(), [9, 1, 2, 0, 3]);
     Ok(())
 }
 
@@ -2012,4 +2217,11 @@ async fn initialization_preserves_import_aliases_across_instances() -> Result<()
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     assert_eq!(replay.replay_all(&trace).await?.instances().len(), 2);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Step(i32);
+
+impl rr::TraceEvent for Step {
+    const TAG: u32 = 2;
 }

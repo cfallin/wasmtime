@@ -19,13 +19,13 @@
 //! driver; suspended trampolines only borrow them.
 
 use super::*;
-use crate::StoreContextMut;
 use crate::runtime::func::EntryStoreContext;
 use crate::runtime::vm::mpk::{self, ProtectionMask};
 use crate::runtime::vm::{
     SendSyncPtr, VMArrayCallHostFuncContext, VMArrayCallNative, VMCommonStackInformation,
     VMOpaqueContext, VMReplayControl, VmPtr,
 };
+use crate::{StoreContext, StoreContextMut};
 use core::mem::MaybeUninit;
 use core::task::Poll;
 use wasmtime_environ::{VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED};
@@ -147,73 +147,174 @@ struct Driver<'a, T: 'static> {
     // A newly allocated instance must run its startup before any other code
     // can observe it, including when the trace is malformed.
     pending_startup: Option<usize>,
+    // Observers of embedder-defined events, by tag.
+    observers: Vec<(u32, Box<dyn FnMut(&[u8]) -> Result<()> + Send>)>,
+    stop_at_events: bool,
     finished: bool,
+    // Why the current `run` should return, once the current step completes.
+    stop: Option<ReplayStop>,
 }
 
-pub(super) async fn run<T: Send>(
-    store: &mut StoreInner<T>,
-    trace: &Trace,
-    wasm: &[&[u8]],
-) -> Result<Replay> {
-    store.rr_validate()?;
-    ensure!(
-        store.engine().is_replaying(),
-        "replay requires RRConfig::Replaying"
-    );
-    ensure!(
-        !store.engine().tunables().debug_guest,
-        "replay does not support guest debugging"
-    );
-    // `Trace` construction checked the version and framing.
-    let mut reader = Reader::new(&trace.bytes);
-    reader.take(codec::MAGIC.len())?;
-    let trampolines = Trampolines::new(store.engine())?;
-    let mut bytecode = alloc::collections::BTreeMap::new();
-    for wasm in wasm {
-        for (checksum, wasm) in core_modules(store.engine(), wasm)? {
+/// Replays a trace in a store, one stop at a time.
+///
+/// Created by [`Store::replayer`](crate::Store::replayer). Dropping a replayer
+/// frees all of its suspended activations; the store then remains available
+/// for inspection, but its functions cannot be called.
+pub struct Replayer<'a, T: 'static> {
+    driver: Driver<'a, T>,
+}
+
+/// Why [`Replayer::run`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReplayStop {
+    /// The entire trace was replayed.
+    Finished,
+    /// An embedder event with this tag was replayed, after its observers ran.
+    /// Only reported when enabled with [`Replayer::stop_at_events`].
+    Event(u32),
+}
+
+impl<'a, T: Send + 'static> Replayer<'a, T> {
+    pub(super) fn new(store: &'a mut StoreInner<T>, trace: &'a Trace) -> Result<Self> {
+        store.rr_validate()?;
+        ensure!(
+            store.engine().is_replaying(),
+            "replay requires RRConfig::Replaying"
+        );
+        ensure!(
+            !store.engine().tunables().debug_guest,
+            "replay does not support guest debugging"
+        );
+        // `Trace` construction checked the version and framing.
+        let mut reader = Reader::new(&trace.bytes);
+        reader.take(codec::MAGIC.len())?;
+        let trampolines = Trampolines::new(store.engine())?;
+        store.rr.session = Some(try_new::<Box<_>>(Session {
+            objects: Objects::default(),
+            mode: Mode::Replaying {
+                bytecode: Default::default(),
+                growth_failures: Vec::new(),
+            },
+            pending: Vec::new(),
+            failure: None,
+            receivers: Vec::new(),
+        })?);
+        Ok(Replayer {
+            driver: Driver {
+                store,
+                trampolines,
+                reader,
+                activations: Vec::new(),
+                observed: None,
+                scratch: Vec::new(),
+                instances: Vec::new(),
+                pending_startup: None,
+                observers: Vec::new(),
+                stop_at_events: false,
+                finished: false,
+                stop: None,
+            },
+        })
+    }
+
+    /// Provides the bytecode of modules that the trace instantiates, which
+    /// traces identify only by checksum (see [`Trace::module_checksums`]).
+    ///
+    /// `wasm` is a core module or a component, in the binary or (with the
+    /// `wat` feature) text format; a component provides every core module
+    /// nested in it, and its adapter modules (see [`core_modules`]). Modules
+    /// that the trace does not instantiate are ignored. Replay fails if it
+    /// reaches the first instantiation of a module whose bytecode has not
+    /// been provided.
+    pub fn add_bytecode(&mut self, wasm: &[u8]) -> Result<()> {
+        let modules = core_modules(self.driver.store.engine(), wasm)?;
+        let Mode::Replaying { bytecode, .. } =
+            &mut self.driver.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        for (checksum, wasm) in modules {
             bytecode.insert(checksum, wasm);
         }
+        Ok(())
     }
-    store.rr.session = Some(try_new::<Box<_>>(Session {
-        objects: Objects::default(),
-        mode: Mode::Replaying {
-            bytecode,
-            growth_failures: Vec::new(),
-        },
-        pending: Vec::new(),
-        failure: None,
-    })?);
-    let mut driver = Driver {
-        store,
-        trampolines,
-        reader,
-        activations: Vec::new(),
-        observed: None,
-        scratch: Vec::new(),
-        instances: Vec::new(),
-        pending_startup: None,
-        finished: false,
-    };
-    core::future::poll_fn(|cx| {
-        // Give the executor a chance to cancel long traces between events.
-        for _ in 0..256 {
-            if driver.finished {
-                return Poll::Ready(Ok(()));
+
+    /// Calls `observer` with each recorded event of type `E` as replay reaches
+    /// it, including again after rewinding. Observers cannot affect replay.
+    pub fn on_event<E: TraceEvent>(&mut self, mut observer: impl FnMut(E) + Send + 'static) {
+        self.driver.observers.push((
+            E::TAG,
+            Box::new(move |bytes| {
+                observer(postcard::from_bytes(bytes)?);
+                Ok(())
+            }),
+        ));
+    }
+
+    /// Replays until the next stop.
+    ///
+    /// This yields to the async executor periodically, so a long replay can
+    /// be cancelled by dropping the future.
+    pub async fn run(&mut self) -> Result<ReplayStop> {
+        let driver = &mut self.driver;
+        core::future::poll_fn(|cx| {
+            // Give the executor a chance to cancel long traces between events.
+            for _ in 0..256 {
+                if driver.finished {
+                    return Poll::Ready(Ok(ReplayStop::Finished));
+                }
+                if let Err(e) = driver.step() {
+                    return Poll::Ready(Err(e.context(format!(
+                        "replaying trace at byte {}",
+                        driver.reader.position()
+                    ))));
+                }
+                if let Some(stop) = driver.stop.take() {
+                    return Poll::Ready(Ok(stop));
+                }
             }
-            if let Err(e) = driver.step() {
-                return Poll::Ready(Err(e.context(format!(
-                    "replaying trace at byte {}",
-                    driver.reader.position()
-                ))));
-            }
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        })
+        .await
+    }
+
+    /// Also stop [`Replayer::run`] after each embedder event is replayed.
+    pub fn stop_at_events(&mut self, enabled: bool) {
+        self.driver.stop_at_events = enabled;
+    }
+
+    /// Core instances constructed so far, in their recorded construction
+    /// order. Components replay as their constituent core instances.
+    pub fn instances(&self) -> &[crate::Instance] {
+        &self.driver.instances
+    }
+
+    /// The store being replayed into, for inspection.
+    ///
+    /// Only the replay may change the store's state, so this gives only
+    /// shared access to it.
+    pub fn store(&self) -> StoreContext<'_, T> {
+        StoreContext(self.driver.store)
+    }
+
+    /// Looks up `instance`'s export `name`, as [`Instance::get_export`] does.
+    ///
+    /// Function exports are initialized lazily, which [`Replayer::store`]'s
+    /// shared access cannot do, so the replayer looks them up instead. A
+    /// replay's functions can be inspected, but not called.
+    ///
+    /// [`Instance::get_export`]: crate::Instance::get_export
+    pub fn get_export(&mut self, instance: crate::Instance, name: &str) -> Option<crate::Extern> {
+        instance.get_export(StoreContextMut(self.driver.store), name)
+    }
+
+    pub(super) fn into_replay(mut self) -> Replay {
+        Replay {
+            instances: core::mem::take(&mut self.driver.instances),
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    })
-    .await?;
-    Ok(Replay {
-        instances: core::mem::take(&mut driver.instances),
-    })
+    }
 }
 
 impl<T: 'static> Driver<'_, T> {
@@ -247,6 +348,20 @@ impl<T: 'static> Driver<'_, T> {
                 body.end()?;
                 self.reader.end()?;
                 self.finished = true;
+            }
+            codec::EVENT => {
+                self.require_idle(
+                    "event before matching guest execution",
+                    "event while guest is running",
+                )?;
+                let tag = body.u32()?;
+                let payload = body.rest();
+                for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
+                    observer(payload).context("failed to observe a trace event")?;
+                }
+                if self.stop_at_events {
+                    self.stop = Some(ReplayStop::Event(tag));
+                }
             }
             codec::HOST
             | codec::MODULE

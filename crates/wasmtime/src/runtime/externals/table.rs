@@ -228,7 +228,9 @@ impl Table {
     /// store whose execution is stopped. It returns `None` for an element that
     /// has yet to be initialized, as well as when `index` is out of bounds.
     /// Elements are always initialized when [`Config::table_lazy_init`] is
-    /// disabled, and for tables of GC references.
+    /// disabled, and for tables of GC references. Engines that replay traces
+    /// do not initialize tables lazily, so in a replay every element can be
+    /// read.
     ///
     /// # Panics
     ///
