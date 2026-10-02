@@ -2919,10 +2919,13 @@ impl Config {
 
         self.tunables.configure(&mut tunables);
 
-        // Debuggers set watchpoints through linear memories' shadows.
+        // Debuggers set watchpoints, and replay tracks the memory written
+        // since each checkpoint, through linear memories' shadows.
         tunables.memory_watchpoints = tunables.debug_guest;
         #[cfg(feature = "rr")]
         if matches!(self.rr_config, RRConfig::Replaying) {
+            tunables.memory_watchpoints = true;
+            tunables.table_write_tracking = true;
             // A replay's store is read-only to the embedder, so reading a
             // table must not have to initialize its elements.
             tunables.table_lazy_init = false;
