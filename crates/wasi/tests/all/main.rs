@@ -13,3 +13,5 @@ mod p1;
 mod p2;
 #[cfg(feature = "p3")]
 mod p3;
+#[cfg(all(feature = "rr", feature = "p3"))]
+mod rr;

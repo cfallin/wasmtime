@@ -31,6 +31,8 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true, features = ['std_rng', 'thread_rng'] }
+serde = { workspace = true, optional = true }
+serde_derive = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time", "sync", "io-std", "io-util", "rt", "rt-multi-thread", "net", "macros", "fs"] }
@@ -70,6 +72,8 @@ p3 = [
     "wasmtime/component-model-async",
     "wasmtime/component-model-bytes",
 ]
+# Capture of guest output in record/replay traces; see `wasmtime_wasi::rr`.
+rr = ["wasmtime/rr", "dep:serde", "dep:serde_derive"]
 
 [[test]]
 name = "process_stdin"
