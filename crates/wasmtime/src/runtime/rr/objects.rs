@@ -25,6 +25,7 @@ pub(super) struct Objects {
     pub globals_by_key: TryHashMap<usize, usize>,
     pub tables: Vec<crate::Table>,
     pub tables_by_key: TryHashMap<(u32, u32), usize>,
+    pub flags: Vec<usize>,
     pub modules: Vec<crate::Module>,
 }
 
