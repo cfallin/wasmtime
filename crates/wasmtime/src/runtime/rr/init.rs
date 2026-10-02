@@ -88,6 +88,7 @@ impl StoreOpaque {
         if !self.rr.active() {
             return Ok(());
         }
+        self.rr_reject_in_replay("create objects")?;
         self.rr_flush()?;
         let mut session = self.rr.session.take().unwrap();
         let result = f(self, &mut session);
@@ -470,7 +471,9 @@ pub(super) fn replay_event<T: 'static>(
                     Kind::F32 => crate::Val::F32(raw[0].get_f32()),
                     Kind::F64 => crate::Val::F64(raw[0].get_f64()),
                     Kind::V128 => crate::Val::V128(raw[0].get_v128().into()),
-                    Kind::FuncRef => unreachable!("reference globals are decoded separately"),
+                    Kind::FuncRef | Kind::Unsupported => {
+                        unreachable!("reference globals are decoded separately")
+                    }
                 };
                 (kind.ty(), value)
             };

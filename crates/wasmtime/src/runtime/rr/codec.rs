@@ -30,6 +30,8 @@ pub(super) const GROWTH_FAILED_LEN: usize = 21;
 /// An embedder-defined event: `[tag, postcard payload]`.
 pub(super) const EVENT: u8 = 15;
 
+const UNSUPPORTED: &str = "record/replay does not support GC or typed reference boundaries";
+
 // Reference-valued globals carry a nullable flag and a function ID.
 pub(super) const FUNCREF: u8 = Kind::FuncRef as u8;
 
@@ -42,6 +44,9 @@ pub(super) enum Kind {
     F64,
     V128,
     FuncRef,
+    /// GC and typed references, which functions may use internally but which
+    /// cannot cross the record/replay boundary.
+    Unsupported,
 }
 
 impl Kind {
@@ -53,9 +58,7 @@ impl Kind {
             ValType::F64 => Self::F64,
             ValType::V128 => Self::V128,
             ValType::Ref(r) if r.is_nullable() && r.heap_type().is_func() => Self::FuncRef,
-            ValType::Ref(_) => {
-                bail!("record/replay does not support GC or typed reference boundaries")
-            }
+            ValType::Ref(_) => Self::Unsupported,
         })
     }
 
@@ -67,6 +70,7 @@ impl Kind {
             3 => Self::F64,
             4 => Self::V128,
             5 => Self::FuncRef,
+            6 => Self::Unsupported,
             _ => bail!("invalid value type"),
         })
     }
@@ -78,6 +82,7 @@ impl Kind {
             Self::F64 => ValType::F64,
             Self::V128 => ValType::V128,
             Self::FuncRef => ValType::FUNCREF,
+            Self::Unsupported => unreachable!("unsupported values have no type"),
         }
     }
 
@@ -86,6 +91,7 @@ impl Kind {
             Self::I32 | Self::F32 | Self::FuncRef => 4,
             Self::I64 | Self::F64 => 8,
             Self::V128 => 16,
+            Self::Unsupported => 0,
         }
     }
 }
@@ -141,6 +147,7 @@ pub(super) unsafe fn values(
             Kind::FuncRef => {
                 bytes.extend_from_slice(&encode_ref(value.get_funcref())?.to_le_bytes())
             }
+            Kind::Unsupported => bail!(UNSUPPORTED),
         }
     }
     Ok(())
@@ -277,6 +284,7 @@ impl<'a> Reader<'a> {
             Kind::F64 => ValRaw::f64(self.u64()?),
             Kind::V128 => ValRaw::v128(u128::from_le_bytes(self.take(16)?.try_into().unwrap())),
             Kind::FuncRef => decode_ref(self.u32()?)?,
+            Kind::Unsupported => bail!(UNSUPPORTED),
         })
     }
 

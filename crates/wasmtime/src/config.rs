@@ -2730,6 +2730,7 @@ impl Config {
         #[cfg(feature = "rr")]
         if matches!(self.rr_config, RRConfig::Replaying) {
             tunables.memory_watchpoints = true;
+            tunables.table_write_tracking = true;
         }
 
         // If no GC heap tunables are explicitly configured, copy the memory

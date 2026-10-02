@@ -156,6 +156,8 @@ impl<'a, T> StoreContextMut<'a, T> {
     ///
     /// Same as [`Store::gc`].
     pub fn gc(&mut self, why: Option<&GcHeapOutOfMemory<()>>) -> Result<()> {
+        #[cfg(feature = "rr")]
+        self.0.rr_reject_in_replay("collect garbage")?;
         let (mut limiter, store) = self.0.validate_sync_resource_limiter_and_store_opaque()?;
         vm::assert_ready(store.gc(
             limiter.as_mut(),
@@ -426,6 +428,8 @@ impl StoreOpaque {
     where
         T: Send + Sync + 'static,
     {
+        #[cfg(feature = "rr")]
+        self.rr_reject_in_replay("allocate GC objects")?;
         self.ensure_gc_store(limiter.as_deref_mut()).await?;
 
         match alloc_func(self, value) {
@@ -789,6 +793,9 @@ impl StoreOpaque {
                 .concurrent_state_mut()
                 .trace_fiber_roots(modules, unwind, gc_roots_list);
         }
+
+        #[cfg(feature = "rr")]
+        self.rr_trace_parked_roots(gc_roots_list);
 
         log::trace!("End trace GC roots :: Wasm stack");
     }

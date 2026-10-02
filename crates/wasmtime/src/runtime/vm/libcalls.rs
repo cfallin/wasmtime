@@ -337,6 +337,12 @@ unsafe fn table_grow(
         if store.rr_replay_growth_fails(&object, delta)? {
             return Ok(None);
         }
+        // Growth writes the slots it adds.
+        #[cfg(feature = "rr")]
+        if let crate::rr::Growable::Table(table) = &object {
+            let size = table.size_(store);
+            store.rr_table_dirty(*table, size, delta)?;
+        }
         let result = store
             .instance_mut(instance)
             .defined_table_grow(defined_table_index, limiter, delta)
@@ -437,6 +443,18 @@ fn table_get_lazy_init_func_ref(
     index: u64,
 ) -> *mut u8 {
     let table_index = TableIndex::from_u32(table_index);
+    // Initialization writes the slot.
+    #[cfg(feature = "rr")]
+    {
+        let opaque = store.store_opaque_mut();
+        let id = opaque.id();
+        let table = opaque
+            .instance_mut(instance)
+            .get_exported_table(id, table_index);
+        if let Err(e) = opaque.rr_table_dirty(table, index, 1) {
+            opaque.rr.fail(e);
+        }
+    }
     let (instance, registry) = store.instance_and_module_registry_mut(instance);
     let table = instance.get_table_with_lazy_init(registry, table_index, core::iter::once(index));
     let elem = table
@@ -1250,6 +1268,29 @@ fn watched_write(
         store.block_on_debug_handler(crate::DebugEvent::Watchpoint(hit))?;
     }
     let _ = (bits, value);
+    Ok(())
+}
+
+/// Reports that guest code is about to write `len` slots of a table starting
+/// at `index`, for record/replay checkpoints.
+fn table_written(
+    store: &mut dyn VMStore,
+    instance: InstanceId,
+    table: u32,
+    index: u64,
+    len: u64,
+) -> Result<()> {
+    #[cfg(feature = "rr")]
+    {
+        let store = store.store_opaque_mut();
+        let id = store.id();
+        let table = store
+            .instance_mut(instance)
+            .get_exported_table(id, TableIndex::from_u32(table));
+        store.rr_table_dirty(table, index, len)?;
+    }
+    #[cfg(not(feature = "rr"))]
+    let _ = (store, instance, table, index, len);
     Ok(())
 }
 

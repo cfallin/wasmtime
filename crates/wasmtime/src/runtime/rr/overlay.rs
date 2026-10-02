@@ -102,10 +102,11 @@ impl Layer {
     }
 }
 
-/// A memory whose contents a [`History`] tracks.
+/// A memory, or another object viewed as bytes, whose contents a [`History`]
+/// tracks.
 pub(crate) trait TrackedMemory {
     /// The memory's bytes.
-    fn bytes(&self) -> &[u8];
+    fn bytes(&mut self) -> &[u8];
     /// The memory's bytes.
     fn bytes_mut(&mut self) -> &mut [u8];
     /// The memory's shadow, one byte per byte of the memory.
@@ -117,30 +118,71 @@ pub(crate) trait TrackedMemory {
     fn set_shadow_fill(&mut self, fill: u8);
 }
 
-/// A memory of a store, with its shadow.
-pub(crate) struct StoreMemory<'a> {
-    pub(crate) store: &'a mut StoreOpaque,
-    pub(crate) memory: Memory,
+/// An object of a store whose contents checkpoints track.
+#[derive(Clone, Copy)]
+pub(crate) enum Tracked {
+    /// A linear memory, whose shadow reports guest writes.
+    Memory(Memory),
+    /// A table, viewed as the bytes of its elements, whose writes are always
+    /// reported.
+    Table(crate::Table),
 }
 
-impl TrackedMemory for StoreMemory<'_> {
-    fn bytes(&self) -> &[u8] {
-        self.memory.rr_data(self.store)
+/// Identifies a tracked object within its store.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TrackedKey {
+    Memory(usize),
+    Table(u32, u32),
+}
+
+impl Tracked {
+    pub(crate) fn key(&self, store: &StoreOpaque) -> TrackedKey {
+        match self {
+            Tracked::Memory(memory) => TrackedKey::Memory(memory.rr_key(store)),
+            Tracked::Table(table) => {
+                let (instance, index) = table.rr_key();
+                TrackedKey::Table(instance, index)
+            }
+        }
+    }
+}
+
+/// A tracked object of a store.
+pub(crate) struct StoreObject<'a> {
+    pub(crate) store: &'a mut StoreOpaque,
+    pub(crate) object: Tracked,
+}
+
+impl TrackedMemory for StoreObject<'_> {
+    fn bytes(&mut self) -> &[u8] {
+        self.bytes_mut()
     }
     fn bytes_mut(&mut self) -> &mut [u8] {
-        self.memory.rr_data_mut(self.store)
+        match self.object {
+            Tracked::Memory(memory) => memory.rr_data_mut(self.store),
+            // Only function and GC reference tables are checkpointed.
+            Tracked::Table(table) => table.rr_slots(self.store).unwrap_or_default(),
+        }
     }
     fn shadow_mut(&mut self) -> &mut [u8] {
-        match self.memory.vm_shadow_mut(self.store) {
-            Some(shadow) => shadow.bytes_mut(),
-            None => &mut [],
+        match self.object {
+            Tracked::Memory(memory) => match memory.vm_shadow_mut(self.store) {
+                Some(shadow) => shadow.bytes_mut(),
+                None => &mut [],
+            },
+            Tracked::Table(_) => &mut [],
         }
     }
     fn resize(&mut self, len: usize) -> Result<()> {
-        self.memory.rr_resize(self.store, len)
+        match self.object {
+            Tracked::Memory(memory) => memory.rr_resize(self.store, len),
+            Tracked::Table(table) => table.rr_resize(self.store, len),
+        }
     }
     fn set_shadow_fill(&mut self, fill: u8) {
-        if let Some(shadow) = self.memory.vm_shadow_mut(self.store) {
+        if let Tracked::Memory(memory) = self.object
+            && let Some(shadow) = memory.vm_shadow_mut(self.store)
+        {
             shadow.set_fill(fill);
         }
     }
@@ -160,7 +202,7 @@ pub(crate) struct History {
 
 impl History {
     /// Starts tracking `memory`, whose current contents become its base.
-    pub(crate) fn new(page_size: usize, memory: &mut impl TrackedMemory) -> Self {
+    pub(crate) fn new(page_size: usize, memory: &mut dyn TrackedMemory) -> Self {
         assert!(page_size > 0);
         memory
             .shadow_mut()
@@ -193,7 +235,7 @@ impl History {
         Ok(page.into())
     }
 
-    fn set_clean(&self, memory: &mut impl TrackedMemory, index: usize, clean: bool) {
+    fn set_clean(&self, memory: &mut dyn TrackedMemory, index: usize, clean: bool) {
         let range = self.page_bytes(index, memory.shadow_mut().len());
         for byte in &mut memory.shadow_mut()[range] {
             if clean {
@@ -207,7 +249,7 @@ impl History {
     /// Records that `range` of the memory is about to be written.
     pub(crate) fn write(
         &mut self,
-        memory: &mut impl TrackedMemory,
+        memory: &mut dyn TrackedMemory,
         range: Range<usize>,
     ) -> Result<()> {
         for index in self.pages(range) {
@@ -225,7 +267,7 @@ impl History {
     }
 
     /// Captures the memory's current contents as a new image.
-    pub(crate) fn checkpoint(&mut self, memory: &mut impl TrackedMemory) -> Result<Image> {
+    pub(crate) fn checkpoint(&mut self, memory: &mut dyn TrackedMemory) -> Result<Image> {
         let len = memory.bytes().len();
         let mut pages = BTreeMap::new();
         for &index in &self.dirty {
@@ -247,7 +289,7 @@ impl History {
 
     /// Restores the memory's contents to `image`, which this history created.
     /// Only pages that may differ are written.
-    pub(crate) fn restore(&mut self, memory: &mut impl TrackedMemory, image: &Image) -> Result<()> {
+    pub(crate) fn restore(&mut self, memory: &mut dyn TrackedMemory, image: &Image) -> Result<()> {
         let mut changed = Layer::changed_between(self.head.as_ref(), Some(image));
         changed.extend(self.dirty.iter().copied());
         memory.resize(image.len)?;
@@ -286,6 +328,91 @@ impl History {
     }
 }
 
+/// The raw value of a global.
+pub(crate) type Value = [u8; 16];
+
+/// The globals whose values changed between a checkpoint and its parent, as
+/// they were at the checkpoint, by key.
+pub(crate) struct ValuesLayer {
+    parent: Option<Arc<ValuesLayer>>,
+    values: BTreeMap<usize, Value>,
+}
+
+impl ValuesLayer {
+    /// The number of values this layer holds.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+}
+
+/// The checkpointed values of a set of globals. Global writes are not
+/// tracked: checkpoints and restores compare values instead, since globals
+/// are few and some (such as a shadow stack pointer) are written constantly.
+#[derive(Default)]
+pub(crate) struct ValuesHistory {
+    head: Option<Arc<ValuesLayer>>,
+    /// The values at `head`.
+    head_values: BTreeMap<usize, Value>,
+}
+
+impl ValuesHistory {
+    /// Captures the current `values`, keeping only those that differ from the
+    /// previous checkpoint's.
+    pub(crate) fn checkpoint(
+        &mut self,
+        values: impl IntoIterator<Item = (usize, Value)>,
+    ) -> Result<Arc<ValuesLayer>> {
+        let mut changed = BTreeMap::new();
+        for (key, value) in values {
+            if self.head_values.get(&key) != Some(&value) {
+                changed.insert(key, value);
+                self.head_values.insert(key, value);
+            }
+        }
+        let layer = try_new::<Arc<_>>(ValuesLayer {
+            parent: self.head.take(),
+            values: changed,
+        })?;
+        self.head = Some(layer.clone());
+        Ok(layer)
+    }
+
+    /// Restores `image`'s values of `keys`, calling `write` for each value
+    /// that differs from its current one, as given by `read`.
+    pub(crate) fn restore(
+        &mut self,
+        image: &Arc<ValuesLayer>,
+        keys: impl IntoIterator<Item = usize>,
+        mut read: impl FnMut(usize) -> Value,
+        mut write: impl FnMut(usize, &Value),
+    ) {
+        let mut wanted = keys.into_iter().collect::<BTreeSet<_>>();
+        let mut values = BTreeMap::new();
+        let mut layer = Some(&**image);
+        while let Some(current) = layer {
+            if wanted.is_empty() {
+                break;
+            }
+            for (key, value) in &current.values {
+                if wanted.remove(key) {
+                    values.insert(*key, *value);
+                }
+            }
+            layer = current.parent.as_deref();
+        }
+        // Every global of a checkpoint has a value in its chain.
+        debug_assert!(wanted.is_empty());
+        for (key, value) in &values {
+            if read(*key) != *value {
+                write(*key, value);
+            }
+        }
+        self.head_values = values;
+        self.head = Some(image.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,7 +429,7 @@ mod tests {
     }
 
     impl TrackedMemory for TestMemory {
-        fn bytes(&self) -> &[u8] {
+        fn bytes(&mut self) -> &[u8] {
             &self.bytes
         }
         fn bytes_mut(&mut self) -> &mut [u8] {
@@ -348,6 +475,41 @@ mod tests {
             let len = self.bytes.len() + by;
             self.resize(len).unwrap();
         }
+    }
+
+    #[test]
+    fn values_keep_only_changes() {
+        let mut current = BTreeMap::from([(1, [1; 16]), (2, [2; 16])]);
+        let mut history = ValuesHistory::default();
+        let first = history.checkpoint(current.clone()).unwrap();
+        assert_eq!(first.len(), 2);
+        current.insert(2, [3; 16]);
+        let second = history.checkpoint(current.clone()).unwrap();
+        assert_eq!(second.len(), 1);
+        current.insert(3, [4; 16]);
+        let third = history.checkpoint(current.clone()).unwrap();
+        assert_eq!(third.len(), 1);
+
+        let mut writes = Vec::new();
+        history.restore(
+            &first,
+            [1, 2],
+            |key| current[&key],
+            |key, value| writes.push((key, *value)),
+        );
+        assert_eq!(writes, [(2, [2; 16])]);
+        current.insert(2, [2; 16]);
+        // Unchanged values after a restore are not stored again.
+        let again = history.checkpoint(current.clone()).unwrap();
+        assert_eq!(again.len(), 1); // Global 3, which `first` did not have.
+        writes.clear();
+        history.restore(
+            &second,
+            [1, 2],
+            |key| current[&key],
+            |key, value| writes.push((key, *value)),
+        );
+        assert_eq!(writes, [(2, [3; 16])]);
     }
 
     #[test]

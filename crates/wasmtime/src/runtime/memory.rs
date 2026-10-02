@@ -393,6 +393,10 @@ impl Memory {
     ) -> Result<(), MemoryAccessError> {
         let mut context = store.as_context_mut();
         #[cfg(feature = "rr")]
+        if context.0.rr_reject_in_replay("write memory").is_err() {
+            return Err(MemoryAccessError { _private: () });
+        }
+        #[cfg(feature = "rr")]
         if context.0.rr.recording() {
             let end = offset
                 .checked_add(buffer.len())
@@ -445,6 +449,7 @@ impl Memory {
             let store = store.into();
             #[cfg(feature = "rr")]
             {
+                store.0.rr_poison_in_replay("access memory mutably");
                 let len = self.internal_data_size(store.0);
                 store.0.rr_track_memory(*self, 0..len);
             }
@@ -656,6 +661,8 @@ impl Memory {
     /// ```
     pub fn grow(&self, mut store: impl AsContextMut, delta: u64) -> Result<u64> {
         let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr_reject_in_replay("grow memory")?;
         let (mut limiter, store) = store.validate_sync_resource_limiter_and_store_opaque()?;
         vm::assert_ready(self._grow(store, limiter.as_mut(), delta))
     }
@@ -676,6 +683,8 @@ impl Memory {
     #[cfg(feature = "async")]
     pub async fn grow_async(&self, mut store: impl AsContextMut, delta: u64) -> Result<u64> {
         let store = store.as_context_mut();
+        #[cfg(feature = "rr")]
+        store.0.rr_reject_in_replay("grow memory")?;
         let (mut limiter, store) = store.0.resource_limiter_and_store_opaque();
         self._grow(store, limiter.as_mut(), delta).await
     }

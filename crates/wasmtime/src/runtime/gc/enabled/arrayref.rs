@@ -996,6 +996,8 @@ impl ArrayRef {
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, index: u32, value: Val) -> Result<()> {
+        #[cfg(feature = "rr")]
+        store.rr_reject_in_replay("modify GC objects")?;
         assert!(
             self.comes_from_same_store(store),
             "attempted to use an array with the wrong store",

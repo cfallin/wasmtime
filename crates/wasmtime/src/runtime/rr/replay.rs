@@ -219,9 +219,12 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 watchpoint: None,
                 histories: Default::default(),
                 page_size: 4096,
+                parked: Vec::new(),
+                embedder_access: false,
             },
             pending: Vec::new(),
             failure: None,
+            sink: None,
         })?);
         Ok(Replayer {
             driver: Driver {
@@ -263,6 +266,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// be cancelled by dropping the future.
     pub async fn run(&mut self) -> Result<ReplayStop> {
         let driver = &mut self.driver;
+        driver.set_embedder_access(false);
         core::future::poll_fn(|cx| {
             // Give the executor a chance to cancel long traces between events.
             for _ in 0..256 {
@@ -355,8 +359,14 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
 
     /// The store being replayed into, for inspection.
     ///
-    /// Modifying its state invalidates the rest of the replay.
+    /// Only the replay may change the store's state. Through this context,
+    /// operations that would (calling functions, writing or growing memory,
+    /// creating objects, allocating GC objects or collecting garbage) fail;
+    /// infallible ones, such as [`Memory::data_mut`](crate::Memory::data_mut),
+    /// instead make the replay fail when it continues. Debugger configuration,
+    /// such as breakpoints and watchpoints, may be changed.
     pub fn store(&mut self) -> StoreContextMut<'_, T> {
+        self.driver.set_embedder_access(true);
         StoreContextMut(self.driver.store)
     }
 
@@ -736,6 +746,16 @@ impl<T: 'static> Driver<'_, T> {
         })
     }
 
+    fn set_embedder_access(&mut self, access: bool) {
+        let Mode::Replaying {
+            embedder_access, ..
+        } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *embedder_access = access;
+    }
+
     fn growth_failures(&mut self) -> &mut Vec<[u8; codec::GROWTH_FAILED_LEN]> {
         let Mode::Replaying {
             growth_failures, ..
@@ -777,6 +797,29 @@ impl<T: 'static> Driver<'_, T> {
             }
             *self.growth_failures() = failures;
         }
+
+        // A collection while this activation runs must find the GC roots of
+        // the others, which are parked on their own fibers.
+        let Mode::Replaying { parked, .. } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        parked.clear();
+        parked.try_reserve(self.activations.len())?;
+        parked.extend(
+            self.activations
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| *i != index && (a.host.is_some() || Some(a.serial) == self.paused))
+                .map(|(_, a)| {
+                    let cx = &a.context;
+                    (
+                        cx.last_wasm_exit_pc,
+                        cx.last_wasm_exit_trampoline_fp,
+                        cx.last_wasm_entry_fp,
+                    )
+                }),
+        );
 
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
@@ -829,6 +872,11 @@ impl<T: 'static> Driver<'_, T> {
             fiber.stack().range().unwrap(),
         );
         verify_suspended_stack(fiber)?;
+        // Failures from code that ran on the activation and could not return
+        // them, such as checkpoint tracking of host-side writes.
+        if let Some(e) = store.rr.session.as_mut().unwrap().failure.take() {
+            return Err(e);
+        }
         let serial = activation.serial;
         let call = activation.call;
 

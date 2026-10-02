@@ -28,6 +28,7 @@ use crate::prelude::*;
 use crate::runtime::vm::VMFuncRef;
 use crate::store::{StoreInner, StoreOpaque};
 use crate::{AsContextMut, Func, Memory, Store, ValRaw};
+use alloc::sync::Arc;
 use core::ops::Range;
 use core::ptr::NonNull;
 
@@ -62,9 +63,14 @@ impl Replay {
 pub trait TraceEvent: serde::Serialize + serde::de::DeserializeOwned + 'static {
     /// Identifies this type of event in traces. It must be unique among an
     /// embedding's event types and stable between the processes that record
-    /// and replay a trace.
+    /// and replay a trace. Tags with the high bit set
+    /// ([`RESERVED_TAGS`]) are reserved for Wasmtime's own crates, such as
+    /// `wasmtime-wasi`.
     const TAG: u32;
 }
+
+/// The event tags reserved for Wasmtime's own crates; see [`TraceEvent::TAG`].
+pub const RESERVED_TAGS: core::ops::RangeInclusive<u32> = 0x8000_0000..=u32::MAX;
 
 /// Records `event` at the current point of a recording. This does nothing if
 /// the store is not recording.
@@ -73,20 +79,60 @@ pub fn record_event<E: TraceEvent>(mut store: impl AsContextMut, event: &E) -> R
     if !store.rr.recording() {
         return Ok(());
     }
-    let result = (|| {
-        let Mode::Recording { bytes, .. } = &mut store.rr_session().mode else {
-            unreachable!()
-        };
-        let start = bytes.len();
-        codec::record(bytes, codec::EVENT, 4)?;
-        bytes.extend_from_slice(&E::TAG.to_le_bytes());
-        // Serialize in place; the length is patched afterwards.
-        *bytes = postcard::to_extend(event, core::mem::take(bytes))?;
-        let len = u32::try_from(bytes.len() - start - 5)?;
-        bytes[start + 1..start + 5].copy_from_slice(&len.to_le_bytes());
-        Ok(())
-    })();
+    let Mode::Recording { bytes, .. } = &mut store.rr_session().mode else {
+        unreachable!()
+    };
+    let result = encode_event(bytes, event);
     store.rr_poison_on_err(result)
+}
+
+fn encode_event<E: TraceEvent>(bytes: &mut Vec<u8>, event: &E) -> Result<()> {
+    let start = bytes.len();
+    codec::record(bytes, codec::EVENT, 4)?;
+    bytes.extend_from_slice(&E::TAG.to_le_bytes());
+    // Serialize in place; the length is patched afterwards.
+    *bytes = postcard::to_extend(event, core::mem::take(bytes))?;
+    let len = u32::try_from(bytes.len() - start - 5)?;
+    bytes[start + 1..start + 5].copy_from_slice(&len.to_le_bytes());
+    Ok(())
+}
+
+/// Records events into a store's recording from code that has no access to
+/// the store, such as a host stream's implementation or a background task.
+///
+/// Created by [`Store::rr_event_sink`]. Events recorded through a sink enter
+/// the trace at the store's next boundary: the next guest entry, host
+/// return, or the end of the recording. Recording through a sink after its
+/// recording has finished does nothing. Sinks can be cloned and sent to other
+/// threads.
+#[derive(Clone)]
+pub struct EventSink {
+    buffer: Arc<crate::sync::RwLock<SinkBuffer>>,
+}
+
+#[derive(Default)]
+struct SinkBuffer {
+    // Encoded event records, in the order they were recorded.
+    bytes: Vec<u8>,
+    // Set when the recording ends.
+    closed: bool,
+    // The first encoding failure, which fails the recording.
+    failure: Option<Error>,
+}
+
+impl EventSink {
+    /// Records `event`, as for [`record_event`].
+    pub fn record<E: TraceEvent>(&self, event: &E) {
+        let mut buffer = self.buffer.write();
+        if buffer.closed || buffer.failure.is_some() {
+            return;
+        }
+        let start = buffer.bytes.len();
+        if let Err(e) = encode_event(&mut buffer.bytes, event) {
+            buffer.bytes.truncate(start);
+            buffer.failure = Some(e);
+        }
+    }
 }
 
 /// A complete execution trace, including object construction and startup.
@@ -152,6 +198,8 @@ struct Session {
     mode: Mode,
     pending: Vec<(usize, Range<usize>)>,
     failure: Option<Error>,
+    // The buffer of the session's event sinks, once one has been created.
+    sink: Option<Arc<crate::sync::RwLock<SinkBuffer>>>,
 }
 
 enum Mode {
@@ -170,9 +218,15 @@ enum Mode {
         watchpoint: Option<crate::WatchpointHit>,
         // The checkpointed contents of each memory that has been
         // checkpointed, by `rr_key`.
-        histories: alloc::collections::BTreeMap<usize, overlay::History>,
+        histories: alloc::collections::BTreeMap<overlay::TrackedKey, overlay::History>,
         // The granularity at which checkpoints track memory writes.
         page_size: usize,
+        // The exit `(pc, trampoline fp, entry fp)` of each activation that is
+        // parked while another runs, whose frames hold GC roots.
+        parked: Vec<(usize, usize, usize)>,
+        // Whether the embedder has the store, through `Replayer::store`,
+        // rather than the replay driver.
+        embedder_access: bool,
     },
 }
 
@@ -199,6 +253,15 @@ impl State {
     pub(crate) fn poison(&mut self, operation: &'static str) {
         if let Some(session) = &mut self.session {
             session.fail(format_err!("record/replay does not support {operation}"));
+        }
+    }
+
+    /// Fails the active session with `error`, from code that cannot return
+    /// it. Recording reports it when finishing; replay when the running
+    /// activation next yields.
+    pub(crate) fn fail(&mut self, error: Error) {
+        if let Some(session) = &mut self.session {
+            session.fail(error);
         }
     }
 
@@ -261,6 +324,7 @@ impl<T: 'static> Store<T> {
             },
             pending: Vec::new(),
             failure: None,
+            sink: None,
         })?);
         Ok(())
     }
@@ -277,6 +341,9 @@ impl<T: 'static> Store<T> {
         ensure!(store.rr.recording(), "store is not recording");
         let flushed = store.rr_flush();
         let session = store.rr.session.take().unwrap();
+        if let Some(sink) = &session.sink {
+            sink.write().closed = true;
+        }
         if let Some(e) = session.failure {
             return Err(e);
         }
@@ -308,6 +375,21 @@ impl<T: 'static> Store<T> {
         let mut replayer = self.replayer(trace)?;
         while replayer.run().await? != ReplayStop::Finished {}
         Ok(replayer.into_replay())
+    }
+
+    /// Returns a sink for recording events into this store's recording from
+    /// code without access to the store, or `None` if the store is not
+    /// recording.
+    pub fn rr_event_sink(&mut self) -> Option<EventSink> {
+        let store = self.as_context_mut().0;
+        if !store.rr.recording() {
+            return None;
+        }
+        let session = store.rr_session();
+        let buffer = session.sink.get_or_insert_with(Default::default);
+        Some(EventSink {
+            buffer: buffer.clone(),
+        })
     }
 
     /// Starts replaying a trace, as for [`Store::replay`], with control over
@@ -355,24 +437,80 @@ impl StoreOpaque {
         Ok(record)
     }
 
+    /// Whether the embedder, rather than the replay driver or a replay
+    /// activation, is using a replaying store.
+    fn rr_embedder_replaying(&self) -> bool {
+        matches!(
+            self.rr.session.as_deref().map(|s| &s.mode),
+            Some(Mode::Replaying {
+                embedder_access: true,
+                ..
+            })
+        ) && self.vm_store_context().replay_control.is_none()
+    }
+
+    /// Rejects a host operation that would change a replaying store's state,
+    /// which only the replay driver may do.
+    pub(crate) fn rr_reject_in_replay(&self, operation: &'static str) -> Result<()> {
+        ensure!(
+            !self.rr_embedder_replaying(),
+            "cannot {operation} while replaying: replay reproduces the recorded execution"
+        );
+        Ok(())
+    }
+
+    /// Like `rr_reject_in_replay`, for infallible operations: fails the
+    /// replay instead.
+    pub(crate) fn rr_poison_in_replay(&mut self, operation: &'static str) {
+        if self.rr_embedder_replaying() {
+            self.rr.fail(format_err!(
+                "cannot {operation} while replaying: replay reproduces the recorded execution"
+            ));
+        }
+    }
+
     /// Records that `range` of `memory` is about to be written during replay,
     /// for checkpoints.
     pub(crate) fn rr_dirty(&mut self, memory: Memory, range: Range<usize>) -> Result<()> {
         if range.is_empty() {
             return Ok(());
         }
-        self.rr_with_history(memory, |history, memory| history.write(memory, range))
-            .map(|_| ())
+        self.rr_with_history(overlay::Tracked::Memory(memory), |history, memory| {
+            history.write(memory, range)
+        })
+        .map(|_| ())
     }
 
-    /// Runs `f` on the checkpoint history of `memory`, if it has one. The
+    /// Records that `len` slots of `table` starting at `index` are about to be
+    /// written during replay, for checkpoints. Slots beyond the table's size
+    /// are being added by growth.
+    pub(crate) fn rr_table_dirty(
+        &mut self,
+        table: crate::Table,
+        index: u64,
+        len: u64,
+    ) -> Result<()> {
+        if len == 0 || !self.rr.active() || self.rr.recording() {
+            return Ok(());
+        }
+        let size = table.rr_slot_size(self);
+        let start = usize::try_from(index).unwrap_or(usize::MAX);
+        let end = start.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+        let range = start.saturating_mul(size)..end.saturating_mul(size);
+        self.rr_with_history(overlay::Tracked::Table(table), |history, table| {
+            history.write(table, range)
+        })
+        .map(|_| ())
+    }
+
+    /// Runs `f` on the checkpoint history of `object`, if it has one. The
     /// history is detached from the session meanwhile.
     fn rr_with_history<R>(
         &mut self,
-        memory: Memory,
-        f: impl FnOnce(&mut overlay::History, &mut overlay::StoreMemory<'_>) -> Result<R>,
+        object: overlay::Tracked,
+        f: impl FnOnce(&mut overlay::History, &mut dyn overlay::TrackedMemory) -> Result<R>,
     ) -> Result<Option<R>> {
-        let key = memory.rr_key(self);
+        let key = object.key(self);
         let Some(Mode::Replaying { histories, .. }) =
             self.rr.session.as_deref_mut().map(|s| &mut s.mode)
         else {
@@ -383,9 +521,9 @@ impl StoreOpaque {
         };
         let result = f(
             &mut history,
-            &mut overlay::StoreMemory {
+            &mut overlay::StoreObject {
                 store: self,
-                memory,
+                object,
             },
         );
         let Mode::Replaying { histories, .. } = &mut self.rr_session().mode else {
@@ -393,6 +531,28 @@ impl StoreOpaque {
         };
         histories.insert(key, history);
         result.map(Some)
+    }
+
+    /// Traces the GC roots in the frames of parked replay activations, which
+    /// are on other fibers than the running one.
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_trace_parked_roots(&mut self, gc_roots_list: &mut crate::vm::GcRootsList) {
+        let Some(Mode::Replaying { parked, .. }) = self.rr.session.as_deref().map(|s| &s.mode)
+        else {
+            return;
+        };
+        let unwind = self.unwinder();
+        for &(pc, trampoline_fp, entry_fp) in parked {
+            // SAFETY: parked activations' stacks are intact while another
+            // runs, and their exit state describes their Wasm frames.
+            let _ = unsafe {
+                let fp = crate::vm::VMStoreContext::wasm_exit_fp_from_trampoline_fp(trampoline_fp);
+                wasmtime_unwinder::visit_frames::<()>(unwind, pc, fp, entry_fp, |frame| {
+                    StoreOpaque::trace_wasm_stack_frame(self.modules(), gc_roots_list, frame);
+                    core::ops::ControlFlow::Continue(())
+                })
+            };
+        }
     }
 
     /// Requests that the running replay activation, if any, stop at a
@@ -587,6 +747,11 @@ impl StoreOpaque {
             unreachable!()
         };
         let mut bytes = core::mem::take(bytes);
+        // Events recorded through sinks since the last boundary.
+        let sunk = session.sink.as_ref().map(|sink| {
+            let mut sink = sink.write();
+            (core::mem::take(&mut sink.bytes), sink.failure.take())
+        });
         // Emit each written byte once, in a deterministic order.
         pending.sort_unstable_by_key(|(id, range)| (*id, range.start));
         pending.dedup_by(|(id, next), (prev_id, prev)| {
@@ -597,6 +762,13 @@ impl StoreOpaque {
             overlaps
         });
         let result = (|| {
+            if let Some((events, failure)) = sunk {
+                if let Some(e) = failure {
+                    return Err(e);
+                }
+                codec::reserve(&mut bytes, events.len())?;
+                bytes.extend_from_slice(&events);
+            }
             for (id, range) in &pending {
                 let memory = self.rr.session.as_ref().unwrap().objects.memories[*id];
                 let data = memory
@@ -630,7 +802,7 @@ impl StoreOpaque {
         if !self.rr.recording() {
             // Replay reproduces the write, but checkpoints must see it.
             if let Err(e) = self.rr_dirty(memory, range) {
-                self.rr_session().fail(e);
+                self.rr.fail(e);
             }
             return;
         }

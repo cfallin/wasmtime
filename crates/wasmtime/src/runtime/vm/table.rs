@@ -828,34 +828,71 @@ impl Table {
         }
     }
 
-    /// The raw elements of a function table, including lazy-initialization
-    /// tags, for record/replay checkpoints.
+    /// The raw bytes of a function or GC reference table's elements,
+    /// including lazy-initialization tags, for record/replay checkpoints.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_func_elements(&self) -> &[FuncTableElem] {
-        let (funcrefs, _) = self.funcrefs();
-        // SAFETY: `MaybeTaggedFuncRef` is a transparent `FuncTableElem`.
-        unsafe { slice::from_raw_parts(funcrefs.as_ptr().cast(), funcrefs.len()) }
+    pub(crate) fn rr_slots(&mut self) -> Result<&mut [u8]> {
+        fn bytes<T>(data: *mut T, len: usize) -> &'static mut [u8] {
+            // SAFETY: the elements are plain data, which checkpoints copy and
+            // restore without barriers, together with what they refer to.
+            unsafe { slice::from_raw_parts_mut(data.cast(), len * core::mem::size_of::<T>()) }
+        }
+        Ok(match self {
+            Self::Dynamic(DynamicTable::Func(t)) => {
+                bytes(t.elements.as_mut_ptr(), t.elements.len())
+            }
+            Self::Dynamic(DynamicTable::GcRef(t)) => {
+                bytes(t.elements.as_mut_ptr(), t.elements.len())
+            }
+            Self::Static(StaticTable::Func(t)) => {
+                bytes(t.data.as_ptr().cast::<FuncTableElem>(), t.size)
+            }
+            Self::Static(StaticTable::GcRef(t)) => {
+                bytes(t.data.as_ptr().cast::<Option<VMGcRef>>(), t.size)
+            }
+            _ => bail!("record/replay does not support continuation tables"),
+        })
     }
 
-    /// Restores a function table's size and raw elements, as returned by
-    /// `rr_func_elements`.
+    /// Resizes a function or GC reference table to `len` bytes of elements,
+    /// for record/replay checkpoints. Added elements are null.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore_func_elements(&mut self, elements: &[FuncTableElem]) -> Result<()> {
+    pub(crate) fn rr_resize_slots(&mut self, len: usize) -> Result<()> {
+        fn resize_static<T>(
+            data: &mut SendSyncPtr<[Option<T>]>,
+            size: &mut usize,
+            n: usize,
+        ) -> Result<()> {
+            // SAFETY: the table owns `data`, and nothing borrows it.
+            let data = unsafe { data.as_mut() };
+            ensure!(n <= data.len(), "table capacity exceeded");
+            // Elements beyond the size are always null, as `grow` expects.
+            for element in data.get_mut(n..*size).unwrap_or_default() {
+                *element = None;
+            }
+            *size = n;
+            Ok(())
+        }
         match self {
-            Self::Dynamic(DynamicTable::Func(DynamicFuncTable { elements: dst, .. })) => {
-                dst.resize_with(elements.len(), || None)?;
-                dst.copy_from_slice(elements);
+            Self::Dynamic(DynamicTable::Func(t)) => {
+                let n = len / core::mem::size_of::<FuncTableElem>();
+                t.elements.resize_with(n, || None)?;
             }
-            Self::Static(StaticTable::Func(StaticFuncTable { data, size, .. })) => {
-                // SAFETY: the table owns `data`, and nothing borrows it.
-                let data = unsafe { data.as_mut() };
-                ensure!(elements.len() <= data.len(), "table capacity exceeded");
-                // Elements beyond the size are always null, as `grow` expects.
-                data[elements.len()..*size].fill(None);
-                data[..elements.len()].copy_from_slice(elements);
-                *size = elements.len();
+            Self::Dynamic(DynamicTable::GcRef(t)) => {
+                let n = len / core::mem::size_of::<Option<VMGcRef>>();
+                t.elements.resize_with(n, || None)?;
             }
-            _ => bail!("only function tables can be restored"),
+            Self::Static(StaticTable::Func(t)) => resize_static(
+                &mut t.data,
+                &mut t.size,
+                len / core::mem::size_of::<FuncTableElem>(),
+            )?,
+            Self::Static(StaticTable::GcRef(t)) => resize_static(
+                &mut t.data,
+                &mut t.size,
+                len / core::mem::size_of::<Option<VMGcRef>>(),
+            )?,
+            _ => bail!("record/replay does not support continuation tables"),
         }
         Ok(())
     }

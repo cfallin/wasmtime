@@ -155,6 +155,10 @@ define_tunables! {
         /// store, for watchpoints (see `VMMemoryShadow`).
         pub memory_watchpoints: bool,
 
+        /// Whether compiled code reports the table slots it writes to the
+        /// runtime before writing them, for record/replay checkpoints.
+        pub table_write_tracking: bool,
+
         /// Whether record/replay compilation is enabled. Retains core Wasm
         /// bytecode, preserves component builtin calls for interception, and
         /// (for native targets) includes the replay trampolines.
@@ -288,6 +292,7 @@ impl Tunables {
             debug_guest: false,
             concurrency_support: true,
             memory_watchpoints: false,
+            table_write_tracking: false,
             recording: false,
             gc_zeal_alloc_counter: None,
             gc_heap_reservation: 0,

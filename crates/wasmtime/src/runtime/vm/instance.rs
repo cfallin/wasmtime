@@ -809,17 +809,16 @@ impl Instance {
         Ok(())
     }
 
-    /// Restores a defined function table's size and raw elements, for
-    /// record/replay checkpoints, updating this instance's
-    /// `VMTableDefinition`.
+    /// Resizes a defined table to `len` bytes of elements, for record/replay
+    /// checkpoints, updating this instance's `VMTableDefinition`.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore_table(
+    pub(crate) fn rr_resize_table(
         mut self: Pin<&mut Self>,
         idx: DefinedTableIndex,
-        elements: &[crate::vm::FuncTableElem],
+        len: usize,
     ) -> Result<()> {
         let table = self.as_mut().get_defined_table(idx);
-        table.rr_restore_func_elements(elements)?;
+        table.rr_resize_slots(len)?;
         let element = table.vmtable();
         self.set_table(idx, element);
         Ok(())

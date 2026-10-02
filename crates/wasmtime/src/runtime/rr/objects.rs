@@ -67,6 +67,15 @@ impl Objects {
         let ty = func.load_ty(store);
         let params = ty.params().map(Kind::new).collect::<Result<Vec<_>>>()?;
         let results = ty.results().map(Kind::new).collect::<Result<Vec<_>>>()?;
+        // Replay reconstructs host functions from their signatures.
+        ensure!(
+            !host
+                || !params
+                    .iter()
+                    .chain(&results)
+                    .any(|k| *k == Kind::Unsupported),
+            "record/replay does not support GC or typed reference boundaries"
+        );
         let id = self.funcs.len();
         self.functions_by_key.insert(func_key(raw), id)?;
         self.funcs.push(RecordedFunc {

@@ -1721,6 +1721,26 @@ impl FuncEnvironment<'_> {
         builder.ins().call(watch, &[vmctx, memory, dst, len]);
     }
 
+    /// Reports that `len` slots of `table` starting at `index` are about to
+    /// be written, when tracking table writes.
+    fn watch_table(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        table: TableIndex,
+        index: ir::Value,
+        len: ir::Value,
+    ) {
+        if !self.tunables.table_write_tracking {
+            return;
+        }
+        let vmctx = self.vmctx_val(&mut builder.cursor());
+        let table = builder.ins().iconst(I32, i64::from(table.as_u32()));
+        let index = Self::to_u64(builder, index);
+        let len = Self::to_u64(builder, len);
+        let written = self.builtin_functions.table_written(builder.func);
+        builder.ins().call(written, &[vmctx, table, index, len]);
+    }
+
     fn to_u64(builder: &mut FunctionBuilder<'_>, value: ir::Value) -> ir::Value {
         if builder.func.dfg.value_type(value) == I64 {
             value
@@ -2878,6 +2898,10 @@ impl FuncEnvironment<'_> {
     ) -> WasmResult<()> {
         let table_data = self.get_or_create_table(builder.func, table_index);
         let (dst, flags) = table_data.prepare_table_addr(self, builder, index, table_index);
+        if self.tunables.table_write_tracking {
+            let one = builder.ins().iconst(I64, 1);
+            self.watch_table(builder, table_index, index, one);
+        }
         self.emit_table_set(builder, table_index, dst, flags, value, true)
     }
 
@@ -3934,6 +3958,9 @@ impl FuncEnvironment<'_> {
 
         // Bounds check `dst+len` and convert it to a raw heap address.
         let raw_dst_addr = self.translate_entity_bounds_check(builder, entity, dst, len)?;
+        if let CheckedEntity::Table { table, .. } = entity {
+            self.watch_table(builder, table, dst, len);
+        }
 
         // Fit the `len` value to `pointer_type`. Note that at this point it's
         // guaranteed inbounds so there's no loss in precision.
@@ -4265,6 +4292,9 @@ impl FuncEnvironment<'_> {
         let src_entity = src_entity.into();
         let dst_idx_ty = dst_entity.index_type(self);
         let src_idx_ty = src_entity.index_type(self);
+        if let CheckedEntity::Table { table, .. } = dst_entity {
+            self.watch_table(builder, table, dst, len);
+        }
 
         // The length is 32-bit if either is 32-bit, but if they're both 64-bit
         // then it's 64-bit.

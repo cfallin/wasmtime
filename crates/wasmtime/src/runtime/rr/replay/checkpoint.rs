@@ -27,8 +27,6 @@
 //! modules are immutable and shared between timelines.
 
 use super::*;
-use crate::Val;
-use crate::runtime::vm::FuncTableElem;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use wasmtime_fiber::RawFiberSnapshot;
@@ -40,6 +38,7 @@ pub(super) struct Checkpoints {
     live: Vec<(Weak<()>, Vec<u64>)>,
     // Completed activations that a live checkpoint can restore.
     retired: Vec<Activation>,
+    globals: overlay::ValuesHistory,
 }
 
 impl Default for Checkpoints {
@@ -49,6 +48,7 @@ impl Default for Checkpoints {
             replayer: NEXT.fetch_add(1, Ordering::Relaxed),
             live: Vec::new(),
             retired: Vec::new(),
+            globals: Default::default(),
         }
     }
 }
@@ -103,8 +103,8 @@ pub struct Checkpoint {
     instance_list: Vec<crate::Instance>,
     activations: Vec<ActivationImage>,
     memories: Vec<overlay::Image>,
-    tables: Vec<Vec<FuncTableElem>>,
-    globals: Vec<Option<Val>>,
+    tables: Vec<overlay::Image>,
+    globals: Arc<overlay::ValuesLayer>,
 }
 
 // SAFETY: the raw pointers in a checkpoint are only used, by the replayer
@@ -129,6 +129,12 @@ impl Checkpoint {
     /// contents are shared with earlier checkpoints.
     pub fn memory_bytes(&self) -> usize {
         self.memories.iter().map(|m| m.stored_bytes()).sum()
+    }
+
+    /// The number of bytes of table elements copied for this checkpoint:
+    /// those in groups of 64 slots written since the previous checkpoint.
+    pub fn table_bytes(&self) -> usize {
+        self.tables.iter().map(|t| t.stored_bytes()).sum()
     }
 }
 
@@ -204,7 +210,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         let mut memory_images = Vec::new();
         memory_images.try_reserve_exact(memories.len())?;
         for memory in memories {
-            memory_images.push(checkpoint_memory(store, memory)?);
+            memory_images.push(checkpoint_object(store, overlay::Tracked::Memory(memory))?);
         }
         if let Some((memory, range)) = &driver.pending_write {
             store.rr_dirty(*memory, range.clone())?;
@@ -212,14 +218,14 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         let mut table_images = Vec::new();
         table_images.try_reserve_exact(tables.len())?;
         for table in tables {
-            table_images.push(table.rr_elements(store)?);
+            table_images.push(checkpoint_object(store, overlay::Tracked::Table(table))?);
         }
-        let mut global_images = Vec::new();
-        global_images.try_reserve_exact(globals.len())?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(globals.len())?;
         for global in globals {
-            let mutable = global._ty(store).mutability() == crate::Mutability::Var;
-            global_images.push(mutable.then(|| global.rr_read(store)));
+            values.push((global.rr_key(store), global.rr_raw(store)));
         }
+        let global_images = driver.checkpoints.globals.checkpoint(values)?;
 
         let live = try_new::<Arc<_>>(())?;
         let serials = activations.iter().map(|a| a.serial).collect();
@@ -310,20 +316,31 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         );
         for (memory, image) in memories.iter().zip(&checkpoint.memories) {
             store
-                .rr_with_history(*memory, |history, memory| history.restore(memory, image))?
+                .rr_with_history(overlay::Tracked::Memory(*memory), |history, memory| {
+                    history.restore(memory, image)
+                })?
                 .expect("a checkpointed memory has a history");
         }
         if let Some((memory, range)) = &checkpoint.pending_write {
             store.rr_dirty(*memory, range.clone())?;
         }
         for (table, elements) in tables.iter().zip(&checkpoint.tables) {
-            table.rr_restore(store, elements)?;
+            store
+                .rr_with_history(overlay::Tracked::Table(*table), |history, table| {
+                    history.restore(table, elements)
+                })?
+                .expect("a checkpointed table has a history");
         }
-        for (global, value) in globals.iter().zip(&checkpoint.globals) {
-            if let Some(value) = value {
-                global._set(store, *value)?;
-            }
+        let mut by_key = alloc::collections::BTreeMap::new();
+        for global in &globals {
+            by_key.insert(global.rr_key(store), *global);
         }
+        driver.checkpoints.globals.restore(
+            &checkpoint.globals,
+            by_key.keys().copied(),
+            |key| by_key[&key].rr_raw(store),
+            |key, value| by_key[&key].rr_set_raw(store, value),
+        );
         // Invalidate frame handles into the replaced stacks.
         store.vm_store_context_mut().execution_version += 1;
 
@@ -340,28 +357,40 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     }
 }
 
-/// Captures the contents of `memory`, starting to track its writes if this
+/// Captures the contents of `object`, starting to track its writes if this
 /// is its first checkpoint.
-fn checkpoint_memory(store: &mut StoreOpaque, memory: Memory) -> Result<overlay::Image> {
-    if let Some(image) =
-        store.rr_with_history(memory, |history, memory| history.checkpoint(memory))?
-    {
+fn checkpoint_object(store: &mut StoreOpaque, object: overlay::Tracked) -> Result<overlay::Image> {
+    let checkpoint = |history: &mut overlay::History, object: &mut dyn overlay::TrackedMemory| {
+        history.checkpoint(object)
+    };
+    if let Some(image) = store.rr_with_history(object, checkpoint)? {
         return Ok(image);
     }
-    ensure!(
-        memory.vm_shadow(store).is_some(),
-        "replay checkpoints do not support this memory"
-    );
-    let key = memory.rr_key(store);
-    let Mode::Replaying { page_size, .. } = store.rr_session().mode else {
-        unreachable!()
+    let page_size = match object {
+        overlay::Tracked::Memory(memory) => {
+            ensure!(
+                memory.vm_shadow(store).is_some(),
+                "replay checkpoints do not support this memory"
+            );
+            let Mode::Replaying { page_size, .. } = store.rr_session().mode else {
+                unreachable!()
+            };
+            page_size
+        }
+        overlay::Tracked::Table(table) => {
+            // Check that the table's elements can be checkpointed.
+            table.rr_slots(store)?;
+            TABLE_PAGE_SLOTS * table.rr_slot_size(store)
+        }
     };
-    let history = overlay::History::new(page_size, &mut overlay::StoreMemory { store, memory });
+    let key = object.key(store);
+    let history = overlay::History::new(page_size, &mut overlay::StoreObject { store, object });
     let Mode::Replaying { histories, .. } = &mut store.rr_session().mode else {
         unreachable!()
     };
     histories.insert(key, history);
-    Ok(store
-        .rr_with_history(memory, |history, memory| history.checkpoint(memory))?
-        .unwrap())
+    Ok(store.rr_with_history(object, checkpoint)?.unwrap())
 }
+
+/// The number of table slots that checkpoints track together.
+const TABLE_PAGE_SLOTS: usize = 64;

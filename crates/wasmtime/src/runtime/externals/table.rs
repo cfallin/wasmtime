@@ -531,30 +531,34 @@ impl Table {
         Table { instance, index }
     }
 
-    /// This function table's raw elements, for record/replay checkpoints.
+    /// The raw bytes of this table's elements, for record/replay
+    /// checkpoints.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_elements(
-        &self,
-        store: &mut StoreOpaque,
-    ) -> Result<Vec<crate::vm::FuncTableElem>> {
-        let (table, _) = self.wasmtime_table(store, None);
-        let elements = table.rr_func_elements();
-        let mut copy = Vec::new();
-        copy.try_reserve_exact(elements.len())?;
-        copy.extend_from_slice(elements);
-        Ok(copy)
-    }
-
-    /// Restores this function table's size and raw elements.
-    #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore(
-        &self,
-        store: &mut StoreOpaque,
-        elements: &[crate::vm::FuncTableElem],
-    ) -> Result<()> {
+    pub(crate) fn rr_slots<'a>(&self, store: &'a mut StoreOpaque) -> Result<&'a mut [u8]> {
         self.instance
             .get_mut(store)
-            .rr_restore_table(self.index, elements)
+            .get_defined_table(self.index)
+            .rr_slots()
+    }
+
+    /// The size in bytes of one of this table's raw elements.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_slot_size(&self, store: &StoreOpaque) -> usize {
+        let top = self.wasmtime_ty(store).ref_type.heap_type.top();
+        if top == wasmtime_environ::WasmHeapTopType::Func {
+            core::mem::size_of::<crate::vm::FuncTableElem>()
+        } else {
+            core::mem::size_of::<Option<crate::vm::VMGcRef>>()
+        }
+    }
+
+    /// Resizes this table to `len` bytes of elements, for record/replay
+    /// checkpoints. Added elements are null.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize(&self, store: &mut StoreOpaque, len: usize) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_resize_table(self.index, len)
     }
 
     #[cfg(feature = "rr")]

@@ -464,6 +464,55 @@ async fn embedder_events_are_replayed_in_order() -> Result<()> {
 }
 
 #[tokio::test]
+async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, None::<rr::EventSink>);
+    assert!(store.rr_event_sink().is_none());
+    store.start_recording()?;
+    let sink = store.rr_event_sink().unwrap();
+    *store.data_mut() = Some(sink.clone());
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    // A host function records through a sink, as code without access to
+    // the store would, on another thread.
+    let print = Func::wrap(
+        &mut store,
+        move |caller: Caller<'_, Option<rr::EventSink>>, stream: i32| {
+            let sink = caller.data().clone().unwrap();
+            std::thread::spawn(move || sink.record(&tick(stream as u8, "sunk")))
+                .join()
+                .unwrap();
+        },
+    );
+    let module = Module::new(
+        &recording,
+        r#"(module (import "" "print" (func $print (param i32)))
+             (func (export "run") (call $print (i32.const 1)) (call $print (i32.const 2))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call(&mut store, ())?;
+    rr::record_event(&mut store, &tick(0, "direct"))?;
+    sink.record(&tick(3, "last"));
+    let trace = store.finish_recording()?;
+    // Recording after the end does nothing.
+    sink.record(&tick(4, "ignored"));
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = replay.replayer(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output.stream));
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    // Direct events are recorded immediately; sunk ones at the next boundary,
+    // which for the last one is the end of the recording.
+    assert_eq!(*seen.lock().unwrap(), [1, 2, 0, 3]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_guest_growth_is_replayed() -> Result<()> {
     // Growth beyond a small, immovable reservation fails when recording but
     // would succeed with the replaying engine's default configuration.
@@ -2356,5 +2405,133 @@ async fn watchpoints_stop_replay_before_writes() -> Result<()> {
         again.push((hit.address, hit.len, hit.value));
     }
     assert_eq!(again, hits);
+    Ok(())
+}
+
+const TABLES: &str = r#"
+(module
+  (import "" "report" (func $report (param i32)))
+  (type $t (func (result i32)))
+  (table $t0 (export "table") 1000 funcref)
+  (elem (table $t0) (i32.const 0) func $f0 $f1 $f2 $f3)
+  (elem $passive func $f3 $f2 $f1)
+  (func $f0 (result i32) i32.const 0)
+  (func $f1 (result i32) i32.const 1)
+  (func $f2 (result i32) i32.const 2)
+  (func $f3 (result i32) i32.const 3)
+  (func (export "step") (param $k i32) (result i32)
+    (table.set $t0 (i32.add (i32.const 100) (local.get $k))
+      (table.get $t0 (i32.rem_u (local.get $k) (i32.const 4))))
+    (table.fill $t0 (i32.add (i32.const 500) (i32.mul (local.get $k) (i32.const 3)))
+      (ref.func $f2) (i32.const 3))
+    (table.copy $t0 $t0 (i32.add (i32.const 700) (local.get $k)) (i32.const 0) (i32.const 2))
+    (table.init $t0 $passive (i32.add (i32.const 900) (local.get $k)) (i32.const 0) (i32.const 3))
+    (if (i32.eq (local.get $k) (i32.const 2))
+      (then (drop (table.grow $t0 (ref.func $f1) (i32.const 10)))))
+    (call $report (local.get $k))
+    ;; Lazily initializes a slot of the initial segment.
+    (call_indirect $t0 (type $t) (i32.rem_u (local.get $k) (i32.const 4)))))
+"#;
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_table_slots() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = Module::new(&recording, TABLES)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    for k in 0..6 {
+        step.call(&mut store, k)?;
+    }
+    let trace = store.finish_recording()?;
+
+    // The raw function references of every slot.
+    let contents = |replayer: &mut rr::Replayer<'_, ()>| {
+        let instance = replayer.instances()[0];
+        let mut store = replayer.store();
+        let table = instance.get_table(&mut store, "table").unwrap();
+        (0..table.size(&store))
+            .map(|i| match table.get(&mut store, i).unwrap() {
+                Ref::Func(f) => f.map(|f| f.to_raw(&mut store) as usize),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.stop_at_events(true);
+    let mut checkpoints = Vec::new();
+    let mut images = Vec::new();
+    while let rr::ReplayStop::Event(_) = replayer.run().await? {
+        let checkpoint = replayer.checkpoint()?;
+        let slots = checkpoint.table_bytes() / std::mem::size_of::<usize>();
+        if checkpoints.is_empty() {
+            assert_eq!(slots, 0);
+        } else {
+            // A few groups of 64 slots, not the whole table.
+            assert!(slots > 0 && slots <= 6 * 64, "{slots}");
+        }
+        checkpoints.push(checkpoint);
+        images.push(contents(&mut replayer));
+    }
+    let end = contents(&mut replayer);
+    assert_eq!(end.len(), 1010);
+    for &which in &[4, 0, 5, 1, 3, 2, 0] {
+        replayer.restore(&checkpoints[which])?;
+        assert!(
+            contents(&mut replayer) == images[which],
+            "checkpoint {which}"
+        );
+    }
+    replayer.restore(&checkpoints[1])?;
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    assert_eq!(contents(&mut replayer), end);
+    Ok(())
+}
+
+#[tokio::test]
+async fn embedder_cannot_mutate_a_replaying_store() -> Result<()> {
+    let trace = record_pages()?;
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    let instance = replayer.instances()[0];
+    let mut s = replayer.store();
+    let memory = instance.get_memory(&mut s, "memory").unwrap();
+    let step = instance.get_func(&mut s, "step").unwrap();
+
+    // Rejected operations leave the replay intact.
+    assert!(memory.write(&mut s, 0, &[7]).is_err());
+    assert!(memory.grow(&mut s, 1).is_err());
+    assert!(step.call(&mut s, &[Val::I32(0)], &mut []).is_err());
+    assert!(Memory::new(&mut s, MemoryType::new(1, None)).is_err());
+    let module = Module::new(s.engine(), "(module)")?;
+    assert!(Instance::new(&mut s, &module, &[]).is_err());
+    // Reading is fine.
+    assert_eq!(&memory.data(&s)[..4], &1_u32.to_le_bytes());
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    drop(replayer);
+
+    // An infallible mutable borrow fails the replay when it continues.
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    let instance = replayer.instances()[0];
+    let mut s = replayer.store();
+    let memory = instance.get_memory(&mut s, "memory").unwrap();
+    memory.data_mut(&mut s)[0] = 9;
+    let error = replayer.run().await.unwrap_err();
+    assert!(
+        format!("{error:?}").contains("while replaying"),
+        "{error:?}"
+    );
     Ok(())
 }
