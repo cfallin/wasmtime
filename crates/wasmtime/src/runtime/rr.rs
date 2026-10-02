@@ -118,7 +118,17 @@ enum Mode {
         outstanding: Vec<(usize, usize)>,
         next_call: u32,
     },
-    Replaying,
+    Replaying {
+        // Recorded guest growth failures that the running activation has yet
+        // to reproduce, in order.
+        growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
+    },
+}
+
+/// An object that guest code can grow.
+pub(crate) enum Growable {
+    Memory(Memory),
+    Table(crate::Table),
 }
 
 impl State {
@@ -251,6 +261,72 @@ impl<T: 'static> Store<T> {
 impl StoreOpaque {
     fn rr_session(&mut self) -> &mut Session {
         self.rr.session.as_deref_mut().unwrap()
+    }
+
+    fn rr_growth_record(
+        &mut self,
+        object: &Growable,
+        delta: u64,
+    ) -> Result<[u8; codec::GROWTH_FAILED_LEN]> {
+        let (kind, id, size) = match object {
+            Growable::Memory(memory) => {
+                let key = memory.rr_key(self);
+                let id = self.rr_session().objects.memories_by_key.get(&key).copied();
+                (0, id, memory.internal_data_size(self))
+            }
+            Growable::Table(table) => {
+                let id = self
+                    .rr_session()
+                    .objects
+                    .tables_by_key
+                    .get(&table.rr_key())
+                    .copied();
+                (1, id, usize::try_from(table.size_(self))?)
+            }
+        };
+        let id = id.ok_or_else(|| format_err!("guest grew an unregistered object"))?;
+        let mut record = [0; codec::GROWTH_FAILED_LEN];
+        record[0] = kind;
+        record[1..5].copy_from_slice(&u32::try_from(id)?.to_le_bytes());
+        record[5..13].copy_from_slice(&u64::try_from(size)?.to_le_bytes());
+        record[13..].copy_from_slice(&delta.to_le_bytes());
+        Ok(record)
+    }
+
+    /// Whether replay must fail this guest growth because it failed when it
+    /// was recorded. Called before attempting the growth.
+    pub(crate) fn rr_replay_growth_fails(&mut self, object: &Growable, delta: u64) -> Result<bool> {
+        if !self.rr.active() || self.rr.recording() {
+            return Ok(false);
+        }
+        let record = self.rr_growth_record(object, delta)?;
+        let Mode::Replaying {
+            growth_failures, ..
+        } = &mut self.rr_session().mode
+        else {
+            unreachable!()
+        };
+        if growth_failures.first() == Some(&record) {
+            growth_failures.remove(0);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Records a failed guest growth, or reports a divergence if it failed
+    /// during replay without having failed when recorded.
+    pub(crate) fn rr_growth_failed(&mut self, object: &Growable, delta: u64) -> Result<()> {
+        if !self.rr.active() {
+            return Ok(());
+        }
+        ensure!(
+            self.rr.recording(),
+            "replay diverged: guest growth failed that succeeded when recorded"
+        );
+        let result = self
+            .rr_growth_record(object, delta)
+            .and_then(|record| self.rr_session().append(codec::GROWTH_FAILED, &record));
+        self.rr_poison_on_err(result)
     }
 
     /// Poisons an active session if recording failed, so that the trace can
