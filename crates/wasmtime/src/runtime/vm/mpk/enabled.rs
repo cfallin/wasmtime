@@ -145,6 +145,7 @@ impl ProtectionKey {
 /// with the PKRU register. When bits `n` and `n+1` are set, it means the
 /// protection key is *not* allowed (see the PKRU write and access disabled
 /// bits).
+#[derive(Clone, Copy, Debug)]
 pub struct ProtectionMask(u32);
 impl ProtectionMask {
     /// Allow access from all protection keys.

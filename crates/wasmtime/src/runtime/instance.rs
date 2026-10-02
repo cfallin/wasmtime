@@ -208,7 +208,7 @@ impl Instance {
         unsafe { Instance::new_started(&mut store, module, imports.as_ref(), Asyncness::Yes).await }
     }
 
-    fn typecheck_externs(
+    pub(crate) fn typecheck_externs(
         store: &mut StoreOpaque,
         module: &Module,
         imports: &[Extern],
