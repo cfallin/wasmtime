@@ -27,6 +27,9 @@ pub(super) struct Objects {
     pub tables_by_key: TryHashMap<(u32, u32), usize>,
     pub flags: Vec<usize>,
     pub modules: Vec<crate::Module>,
+    // During replay, how many of `modules` have been defined so far. Modules
+    // remain compiled across checkpoint restores.
+    pub modules_defined: usize,
 }
 
 impl Objects {
