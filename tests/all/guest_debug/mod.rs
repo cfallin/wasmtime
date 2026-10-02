@@ -446,6 +446,111 @@ check: exited with status = 0
     Ok(())
 }
 
+/// Records `GUEST_DEBUG_FIB` with `wasmtime run --record`, returning the
+/// directory holding the trace and the trace's path.
+fn record_fib() -> Result<(tempfile::TempDir, String)> {
+    let dir = tempfile::tempdir()?;
+    let trace = dir.path().join("fib.trace").to_str().unwrap().to_string();
+    let status = Command::new(wasmtime_binary())
+        .args([
+            "run",
+            "-Ccache=n",
+            &format!("--record={trace}"),
+            GUEST_DEBUG_FIB,
+        ])
+        .stdout(Stdio::null())
+        .status()?;
+    assert!(status.success());
+    Ok((dir, trace))
+}
+
+/// Test that a replay can be debugged like a live run: breakpoints set at
+/// the initial stop are hit, and variables can be inspected.
+#[test]
+#[ignore]
+fn guest_debug_replay_fib_breakpoint() -> Result<()> {
+    let (_dir, trace) = record_fib()?;
+    let port = free_port();
+    let mut wt = WasmtimeWithGdbstub::spawn(
+        "replay",
+        port,
+        &["-Ccache=n", &trace],
+        Duration::from_secs(30),
+    )?;
+    let output = lldb_with_gdbstub_script(
+        port,
+        r#"
+b fib
+c
+fr v
+n
+n
+fr v
+br disable 1
+c
+"#,
+    )?;
+    wt.child.kill().ok();
+    wt.child.wait()?;
+    check_output(
+        &output,
+        r#"
+check: stop reason
+check: fib
+check: n =
+check: exited with status = 0
+"#,
+    )?;
+    Ok(())
+}
+
+/// Test write watchpoints on a replay, as for a live run.
+#[test]
+#[ignore]
+fn guest_debug_replay_fib_watchpoint() -> Result<()> {
+    let (_dir, trace) = record_fib()?;
+    let port = free_port();
+    let mut wt = WasmtimeWithGdbstub::spawn(
+        "replay",
+        port,
+        &["-Ccache=n", &trace],
+        Duration::from_secs(30),
+    )?;
+    let output = lldb_with_gdbstub_script(
+        port,
+        r#"
+b fib
+c
+br disable 1
+watchpoint set variable a
+c
+fr v
+c
+fr v
+watchpoint delete 1
+c
+"#,
+    )?;
+    wt.child.kill().ok();
+    wt.child.wait()?;
+    check_output(
+        &output,
+        r#"
+check: Watchpoint created: Watchpoint 1
+check: old value: 0
+check: new value: 1
+check: stop reason = watchpoint 1
+check: a = 1
+check: old value: 1
+check: new value: 2
+check: stop reason = watchpoint 1
+check: a = 2
+check: exited with status = 0
+"#,
+    )?;
+    Ok(())
+}
+
 /// A minimal GDB remote serial protocol client, for tests that need
 /// precise control over the packets sent.
 struct RspClient {

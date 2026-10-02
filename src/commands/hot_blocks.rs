@@ -94,6 +94,10 @@ impl HotBlocksCommand {
     /// Executes the command.
     pub fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
+        #[cfg(feature = "rr")]
+        if self.run.record.is_some() {
+            bail!("`wasmtime hot-blocks` does not support --record");
+        }
 
         if !(0.0..=100.0).contains(&self.percent) {
             bail!("--percent must be between 0 and 100 inclusive");
@@ -1129,6 +1133,8 @@ mod test {
                 vars: Vec::new(),
                 #[cfg(feature = "gdbstub")]
                 gdbstub: None,
+                #[cfg(feature = "rr")]
+                record: None,
             },
             percent: 100.0,
             event: Event::CpuCycles,

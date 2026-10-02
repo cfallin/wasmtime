@@ -528,6 +528,7 @@ default = [
   "winch",
   "pulley",
   "debug",
+  "rr",
 
   # Enable some nice features of clap by default, but they come at a binary size
   # cost, so allow disabling this through disabling of our own `default`
@@ -554,7 +555,17 @@ component-model-async = [
   "wasmtime-wasi-tls?/p3",
   "dep:futures",
 ]
-rr = ["wasmtime/rr", "component-model", "wasmtime-cli-flags/rr", "run", "wasmtime-wast?/rr"]
+# Record/replay: `wasmtime run --record`, `wasmtime serve --record`, and
+# `wasmtime replay`.
+rr = [
+  "wasmtime/rr",
+  "component-model",
+  "wasmtime-cli-flags/rr",
+  "run",
+  "wasmtime-wast?/rr",
+  "wasmtime-wasi?/rr",
+  "wasmtime-debugger?/rr",
+]
 
 # Enabled in release builds. We cannot enable the built-in gdbstub component in
 # the default build because the published-to-crates.io crates cannot build the

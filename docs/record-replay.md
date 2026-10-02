@@ -9,6 +9,15 @@ replay activations contain no Rust frames, so a replay can be checkpointed and
 rewound, and guest debugging (breakpoints, single-stepping, frame inspection)
 works on replay. Together these support reversible debugging.
 
+From the command line, `wasmtime run --record=TRACE ...` records a program's
+execution, including its WASI output and how it exited, and
+`wasmtime replay TRACE` replays it, printing the recorded output again and
+exiting the same way. `wasmtime serve --record=TRACE ...` records each
+instance to `TRACE.N` (one request per instance by default). `wasmtime replay`
+takes `-g` and `-D` options as `wasmtime run` does, to debug the replay, for
+example with LLDB through the built-in gdbstub. Recording rejects options that
+it cannot reproduce (`-W timeout`, `-W fuel`, `--profile`, and debuggers).
+
 The entrypoints are `Store::start_recording()`,
 `Store::finish_recording() -> Result<rr::Trace>`, and
 `Store::replay(&rr::Trace).await -> Result<rr::Replay>`. `Store::replayer`
@@ -84,9 +93,12 @@ In addition to construction, the execution stream contains:
   implementation's output. During replay, `Replayer::on_event` observers
   receive them as replay reaches them, including again after rewinding;
   observers cannot affect the replay. Code without store access, such as a
-  WASI stream or a host task, records through an `rr::EventSink`
-  (`Store::rr_event_sink`), whose events enter the trace at the store's next
-  boundary. Tags with the high bit set are reserved for Wasmtime's crates:
+  WASI stream or a host task, records through the `rr::EventSink` end of an
+  `rr::event_channel()`; the `rr::EventReceiver` end is attached to the
+  recording store with `Store::rr_attach_events`, so producers (a WASI context,
+  say) can be built before recording starts. Events recorded before the
+  receiver is attached are buffered, and sunk events enter the trace at the
+  store's next boundary. Tags with the high bit set are reserved for Wasmtime's crates:
   `wasmtime-wasi`'s `rr` feature records guest stdout/stderr this way
   (`wasmtime_wasi::rr::RecordedOutput`) and replays it with
   `wasmtime_wasi::rr::replay_output`.
@@ -213,6 +225,12 @@ mask, and value buffer, and the guest state of every object: memory sizes and
 contents, table sizes and raw elements, global values (including component
 instance flags), and the GC heap.
 
+Only replays are checkpointed, never live (recording or ordinary)
+executions: the trace stands in for the entire outside world, so restoring a
+replay never has to reconcile live host state. Live execution therefore keeps
+ordinary Rust frames on guest stacks, for example during asynchronous host
+calls, and rewinding a live session means replaying its trace so far.
+
 Restoring puts all of this back in place. Fibers, control blocks, and buffers
 keep their addresses, so completed activations are retained while a live
 checkpoint can restore them. Memories and tables shrink back when restored;
@@ -282,13 +300,22 @@ stopped stack therefore holds no host frames and can be checkpointed.
 `Replayer::run` returns `ReplayStop::Breakpoint`; the next `run` resumes the
 stopped activation before processing further trace events.
 
-While stopped, `Replayer::debug_exit_frames` installs the parked activation's
-`VMStoreContext` state and a `CallThreadState` just long enough to collect
-frame handles, which are then inspected through `Replayer::store`. It returns
-the stopped activation's exit frame followed by those of activations parked
-at host calls, most recent first: for a callback beneath a host frame, its
-guest callers. `ReplayStop::Event` (enabled by `Replayer::stop_at_events`)
-stops after embedder events.
+While stopped, the driver publishes the exit registers of the stopped
+activation and of those parked at host calls, so the store's ordinary
+`debug_exit_frames` (and `Replayer::debug_exit_frames`) return their frames:
+the stopped activation's exit frame, then those parked at host calls, most
+recent first (for a callback beneath a host frame, its guest callers). The
+frames are inspected through `Replayer::store` until replay continues or is
+restored. `Replayer::preload_modules` compiles the trace's modules up front and
+registers them for debugging, so breakpoints can be set before replay starts;
+replay then uses those compiled modules. `ReplayStop::Event` (enabled by
+`Replayer::stop_at_events`) stops after embedder events.
+
+The debugger crate's `Debuggee::new_replay` drives a replay like a live
+debuggee: it preloads modules, pauses initially, and reports breakpoints,
+single steps, and watchpoints as debug events, so debugger components (and the
+gdbstub component) work unchanged on replays. An interrupt request pauses the
+replay at its next trace event.
 
 Memory watchpoints (`Memory::debug_watch`) stop replay with
 `ReplayStop::Watchpoint` before the watched write happens: the watchpoint
@@ -309,9 +336,11 @@ Restrictions:
   numeric core handles and are supported.
 * Hosts may not mutate tables or globals; constructing numeric or abstract
   funcref globals and abstract funcref tables is supported.
-* Resource limiters, call hooks, custom signal handlers, fuel, and epochs are
-  rejected, as is recording with guest debugging. Installing a limiter, hook,
-  or handler during a recording poisons the recording.
+* Call hooks, custom signal handlers, fuel, and epochs are rejected, as is
+  recording with guest debugging. Installing a hook or handler during a
+  recording poisons the recording. Resource limiters are supported: a growth
+  they deny is recorded as a growth failure and fails again on replay (a
+  limiter that returns an error, trapping the guest, makes replay diverge).
 * Rust error objects are represented by their root cause's message.
 * Replay requires a native compilation target: Pulley interprets guest code
   in Rust. Raw fibers require this crate's own stack switching, which Windows
@@ -339,17 +368,17 @@ The remaining implementation work is:
    (with driver-owned payload storage) before unwinding.
 3. CLI support for recording (`wasmtime run --record`) and replaying with
    WASI output.
-4. Ordinary (non-replay) asynchronous execution does not use raw fibers. To
-   participate in snapshots, asynchronous host work would run on an owned
-   child fiber whose Rust frames are never copied as guest snapshots.
-5. Deterministic interruption, Windows and sanitizer support, verifying
+4. Deterministic interruption, Windows and sanitizer support, verifying
    suspended stacks on architectures other than x86-64 and aarch64, and
    measuring append overhead and trace volume.
 
 Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
 behavior, checkpoints, and debugging), `crates/fiber/src/raw.rs` (raw fiber
-lifecycle and snapshots), `crates/wasi/tests/all/rr.rs` (WASI output), and
-the `.wast` runner, which with `--features rr`
+lifecycle and snapshots), `crates/wasi/tests/all/rr.rs` (WASI output),
+`crates/debugger` (`replay_debugging`), `tests/all/cli_tests.rs` (`record_*`:
+`run`/`serve --record` and `replay`), `tests/all/guest_debug` (LLDB on
+replays; ignored by default, and run with `--features gdbstub -- --ignored`),
+and the `.wast` runner, which with `--features rr`
 records the component-model async suites, replays them, and single-steps and
 rewinds the replays:
 

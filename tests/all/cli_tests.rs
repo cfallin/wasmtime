@@ -159,6 +159,59 @@ fn assert_trap_code(status: &ExitStatus) {
     assert_eq!(code, 3);
 }
 
+/// Runs `wasmtime run --record` with `args` (options, then the program and
+/// its arguments), then `wasmtime replay` on the trace, checking that replay
+/// reproduces the output and exit status. Returns the recorded run's output.
+#[cfg(feature = "rr")]
+pub fn record_and_replay(args: &[&str]) -> Result<Output> {
+    let dir = TempDir::new()?;
+    let trace = dir.path().join("trace");
+    let record = format!("--record={}", trace.display());
+    let mut run = vec!["run", record.as_str()];
+    run.extend_from_slice(args);
+    let recorded = wasmtime(&run)?.output()?;
+    let replayed = wasmtime(&["replay", trace.to_str().unwrap()])?.output()?;
+    assert_eq!(
+        String::from_utf8_lossy(&replayed.stdout),
+        String::from_utf8_lossy(&recorded.stdout)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&replayed.stderr),
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_eq!(replayed.status.code(), recorded.status.code());
+    Ok(recorded)
+}
+
+#[test]
+#[cfg(feature = "rr")]
+fn record_and_replay_wasi_output_and_exit() -> Result<()> {
+    let output = record_and_replay(&["tests/all/cli_tests/hello_wasi_snapshot1.wat"])?;
+    assert_eq!(output.stdout, b"Hello, world!\n");
+    assert!(output.status.success());
+
+    let output = record_and_replay(&["tests/all/cli_tests/exit2_wasi_snapshot1.wat"])?;
+    assert_eq!(output.status.code(), Some(2));
+
+    let output = record_and_replay(&["tests/all/cli_tests/unreachable.wat"])?;
+    assert_trap_code(&output.status);
+    Ok(())
+}
+
+#[test]
+#[cfg(feature = "rr")]
+fn record_rejects_incompatible_options() -> Result<()> {
+    let dir = TempDir::new()?;
+    let record = format!("--record={}", dir.path().join("trace").display());
+    let wat = "tests/all/cli_tests/hello_wasi_snapshot1.wat";
+    for option in ["-Wtimeout=1s", "-Wfuel=1000"] {
+        let output = wasmtime(&["run", &record, option, wat])?.output()?;
+        assert!(!output.status.success(), "{option}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--record"));
+    }
+    Ok(())
+}
+
 // Run a simple WASI hello world, snapshot0 edition.
 #[test]
 fn hello_wasi_snapshot0() -> Result<()> {
@@ -2123,6 +2176,33 @@ start a print 1234
     }
 
     #[test]
+    #[cfg(feature = "rr")]
+    fn record_and_replay_components() -> Result<()> {
+        use super::record_and_replay;
+        let output = record_and_replay(&["-Wcomponent-model", P2_CLI_HELLO_STDOUT_COMPONENT])?;
+        assert_eq!(output.stdout, b"hello, world\n");
+        // The CLI's own output of `--invoke` results is replayed too.
+        let output = record_and_replay(&[
+            "-Wcomponent-model",
+            "--invoke",
+            "run()",
+            P2_CLI_HELLO_STDOUT_COMPONENT,
+        ])?;
+        assert_eq!(output.stdout, b"hello, world\nok\n");
+        let output = record_and_replay(&[P1_CLI_MUCH_STDOUT_COMPONENT, "abc", "100"])?;
+        assert_eq!(output.stdout, "abc".repeat(100).as_bytes());
+        if cfg!(feature = "component-model-async") {
+            let output = record_and_replay(&[
+                "-Wcomponent-model-async",
+                "-Sp3",
+                P3_CLI_HELLO_STDOUT_COMPONENT,
+            ])?;
+            assert_eq!(output.stdout, b"hello, world\n");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn p3_cli_hello_stdout() -> Result<()> {
         let output = run_wasmtime(&[
             "run",
@@ -2463,6 +2543,53 @@ start a print 1234
             cmd.arg("-Sp3,cli");
         })
         .await
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "rr")]
+    async fn record_serve_requests() -> Result<()> {
+        let mut cases = vec![(P2_CLI_SERVE_HELLO_WORLD_COMPONENT, vec!["-Scli"])];
+        if cfg!(feature = "component-model-async") {
+            cases.push((
+                P3_CLI_SERVE_HELLO_WORLD_COMPONENT,
+                vec!["-Wcomponent-model-async", "-Sp3,cli"],
+            ));
+        }
+        for (component, args) in cases {
+            let dir = tempfile::tempdir()?;
+            let trace = dir.path().join("trace");
+            let server = WasmtimeServe::new(component, |cmd| {
+                cmd.args(&args);
+                cmd.arg(format!("--record={}", trace.display()));
+            })?;
+            for _ in 0..2 {
+                let response = server
+                    .send_request(
+                        hyper::Request::builder()
+                            .uri("http://localhost/")
+                            .body(String::new())
+                            .context("failed to make request")?,
+                    )
+                    .await?;
+                assert!(response.status().is_success());
+                assert_eq!(response.body(), "Hello, WASI!");
+            }
+            server.finish()?;
+
+            // Each request was handled by its own instance, recorded to its
+            // own trace, which replays.
+            for i in 0..2 {
+                let trace = format!("{}.{i}", trace.display());
+                let output = get_wasmtime_command()?.args(["replay", &trace]).output()?;
+                assert!(
+                    output.status.success(),
+                    "{trace}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(!std::path::Path::new(&format!("{}.2", trace.display())).exists());
+        }
+        Ok(())
     }
 
     #[tokio::test]
