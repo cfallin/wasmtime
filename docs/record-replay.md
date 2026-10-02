@@ -144,9 +144,14 @@ The trace currently stays in memory until finalization.
 Host writes to guest memory are recorded through the ordinary APIs, so that an
 embedding runtime needs no record/replay-specific code. Handing out a mutable
 view registers its range as pending: `Memory::data_mut` and
-`data_and_store_mut` register the whole memory, `Memory::write` its
-destination, and component lowering (the code that `bindgen!` host bindings
-use) and builtins only the bytes they write. The public
+`data_and_store_mut` register the whole memory, while `Memory::write`,
+`Memory::data_range_mut`, and `MemoryRanges::data_range_mut` (from
+`Memory::data_ranges_and_store_mut`, for host code that also borrows the
+store's data) register only their ranges. These range APIs are ordinary
+public APIs, available without the `rr` feature. Wiggle's Wasmtime bindings,
+and so WASIp1, access memory by range (`GuestMemory::Ranges`), as do
+component lowering (the code that `bindgen!` host bindings use) and builtins,
+so only the bytes the host writes are recorded. The public
 `LowerContext::as_slice_mut` registers the whole memory. Registration is
 constant time; at the next guest entry, host return, host growth, or
 finalization, pending ranges are sorted, merged, and their current contents
@@ -314,8 +319,18 @@ replay then uses those compiled modules. `ReplayStop::Event` (enabled by
 The debugger crate's `Debuggee::new_replay` drives a replay like a live
 debuggee: it preloads modules, pauses initially, and reports breakpoints,
 single steps, and watchpoints as debug events, so debugger components (and the
-gdbstub component) work unchanged on replays. An interrupt request pauses the
-replay at its next trace event.
+gdbstub component) work unchanged on replays.
+
+A replaying engine may also enable epoch interruption, to let a debugger
+interrupt a running replay. Replay's epoch checks never trap, yield, or call
+the store's deadline callback, so they do not affect the replay: the epoch
+builtin only checks the flag given to `Replayer::set_interrupt_flag` and, if
+it is set, stops the running activation with `ReplayStop::Interrupted`,
+through the same trampoline yield as breakpoints. Setting the flag and
+advancing the engine's epoch (as the debugger API's `interrupt` does) thus
+stops replay at the next epoch check, even in a loop without trace events.
+`wasmtime replay` with a debugger enables epoch interruption, as `wasmtime run`
+does.
 
 Memory watchpoints (`Memory::debug_watch`) stop replay with
 `ReplayStop::Watchpoint` before the watched write happens: the watchpoint
@@ -366,11 +381,9 @@ The remaining implementation work is:
 2. Trap, host-error, and exception debug events on replay. Traps are raised
    from the synchronous `raise` libcall, which would need to yield a stop
    (with driver-owned payload storage) before unwinding.
-3. CLI support for recording (`wasmtime run --record`) and replaying with
-   WASI output.
-4. Deterministic interruption, Windows and sanitizer support, verifying
-   suspended stacks on architectures other than x86-64 and aarch64, and
-   measuring append overhead and trace volume.
+3. Windows and sanitizer support, verifying suspended stacks on
+   architectures other than x86-64 and aarch64, and measuring append
+   overhead and trace volume.
 
 Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
 behavior, checkpoints, and debugging), `crates/fiber/src/raw.rs` (raw fiber

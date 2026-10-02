@@ -164,6 +164,12 @@ fn assert_trap_code(status: &ExitStatus) {
 /// reproduces the output and exit status. Returns the recorded run's output.
 #[cfg(feature = "rr")]
 pub fn record_and_replay(args: &[&str]) -> Result<Output> {
+    Ok(record_and_replay_with_size(args)?.0)
+}
+
+/// Like `record_and_replay`, also returning the trace's size.
+#[cfg(feature = "rr")]
+pub fn record_and_replay_with_size(args: &[&str]) -> Result<(Output, u64)> {
     let dir = TempDir::new()?;
     let trace = dir.path().join("trace");
     let record = format!("--record={}", trace.display());
@@ -180,15 +186,19 @@ pub fn record_and_replay(args: &[&str]) -> Result<Output> {
         String::from_utf8_lossy(&recorded.stderr)
     );
     assert_eq!(replayed.status.code(), recorded.status.code());
-    Ok(recorded)
+    let size = std::fs::metadata(&trace)?.len();
+    Ok((recorded, size))
 }
 
 #[test]
 #[cfg(feature = "rr")]
 fn record_and_replay_wasi_output_and_exit() -> Result<()> {
-    let output = record_and_replay(&["tests/all/cli_tests/hello_wasi_snapshot1.wat"])?;
+    let (output, size) =
+        record_and_replay_with_size(&["tests/all/cli_tests/hello_wasi_snapshot1.wat"])?;
     assert_eq!(output.stdout, b"Hello, world!\n");
     assert!(output.status.success());
+    // WASIp1 records only the memory it writes, not all of memory.
+    assert!(size < 4096, "{size}");
 
     let output = record_and_replay(&["tests/all/cli_tests/exit2_wasi_snapshot1.wat"])?;
     assert_eq!(output.status.code(), Some(2));

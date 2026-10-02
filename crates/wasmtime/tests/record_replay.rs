@@ -278,6 +278,39 @@ async fn memory_growth_flushes_old_borrows_and_records_new_extent() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+async fn memory_ranges_record_only_what_they_borrow() -> Result<()> {
+    let (mut store, _, memory) = identity()?;
+    memory
+        .data_range_mut(&mut store, 100..104)?
+        .copy_from_slice(b"abcd");
+    assert!(memory.data_range_mut(&mut store, 65530..65540).is_err());
+    {
+        let (mut ranges, ()) = memory.data_ranges_and_store_mut(&mut store);
+        assert_eq!(ranges.len(), 65536);
+        assert_eq!(ranges.data_range(100..104)?, b"abcd");
+        ranges.data_range_mut(2000..2002)?.copy_from_slice(b"xy");
+        ranges.data_range_mut(5000..5001)?[0] = 7;
+        assert!(ranges.data_range_mut(65536..65537).is_err());
+    }
+    let trace = store.finish_recording()?;
+    // Only the three borrowed ranges were recorded, not all of memory.
+    let writes = frames(trace.as_bytes())
+        .into_iter()
+        .filter(|(tag, _)| *tag == WRITE)
+        .count();
+    assert_eq!(writes, 3);
+    assert!(trace.as_bytes().len() < 1000, "{}", trace.as_bytes().len());
+
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let output = replay.replay(&trace).await?;
+    let replay_memory = output.instances()[0]
+        .get_memory(&mut replay, "memory")
+        .unwrap();
+    assert_eq!(replay_memory.data(&replay), memory.data(&store));
+    Ok(())
+}
+
 #[test]
 fn rr_config_enables_determinism_but_rejects_explicit_conflicts() -> Result<()> {
     engine(RRConfig::Recording)?;
