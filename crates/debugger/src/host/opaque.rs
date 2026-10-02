@@ -33,6 +33,9 @@ pub(crate) trait OpaqueDebugger {
     async fn handle_resumption(&mut self, resumption: &wit::ResumptionValue) -> Result<()>;
     async fn single_step(&mut self) -> Result<crate::DebugRunResult>;
     async fn continue_(&mut self) -> Result<crate::DebugRunResult>;
+    fn is_reversible(&self) -> bool;
+    async fn reverse_step(&mut self) -> Result<crate::DebugRunResult>;
+    async fn reverse_continue(&mut self) -> Result<crate::DebugRunResult>;
     async fn exit_frames(&mut self) -> Result<Vec<FrameHandle>>;
     async fn get_instance_module(&mut self, instance: Instance) -> Result<Module>;
 
@@ -149,6 +152,27 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         .await?;
 
         self.run().await
+    }
+
+    fn is_reversible(&self) -> bool {
+        crate::Debuggee::is_reversible(self)
+    }
+
+    async fn reverse_step(&mut self) -> Result<crate::DebugRunResult> {
+        crate::Debuggee::reverse_step(self).await
+    }
+
+    async fn reverse_continue(&mut self) -> Result<crate::DebugRunResult> {
+        // As for `continue`, stop only at breakpoints and watchpoints.
+        self.with_store(|store| {
+            store
+                .edit_breakpoints()
+                .unwrap()
+                .single_step(false)
+                .unwrap()
+        })
+        .await?;
+        crate::Debuggee::reverse_continue(self).await
     }
 
     async fn handle_resumption(&mut self, resumption: &wit::ResumptionValue) -> Result<()> {

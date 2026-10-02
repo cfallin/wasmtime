@@ -134,6 +134,7 @@ pub use crate::runtime::vm::traphandlers::*;
 pub use crate::runtime::vm::vmcontext::VMArrayCallFunction;
 #[cfg(feature = "gc-copying")]
 pub use crate::runtime::vm::vmcontext::VMCopyingHeapData;
+pub use crate::runtime::vm::vmcontext::VMDebugSteps;
 #[cfg(feature = "gc-drc")]
 pub use crate::runtime::vm::vmcontext::VMDrcHeapData;
 #[cfg(feature = "component-model-async")]

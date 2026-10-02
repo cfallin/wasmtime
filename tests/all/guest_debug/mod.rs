@@ -492,13 +492,15 @@ c
     )?;
     wt.child.kill().ok();
     wt.child.wait()?;
+    // The end of the replay is a stop at the end of its history, from where
+    // it can run backward.
     check_output(
         &output,
         r#"
 check: stop reason
 check: fib
 check: n =
-check: exited with status = 0
+check: stop reason = history boundary
 "#,
     )?;
     Ok(())
@@ -545,7 +547,7 @@ check: old value: 1
 check: new value: 2
 check: stop reason = watchpoint 1
 check: a = 2
-check: exited with status = 0
+check: stop reason = history boundary
 "#,
     )?;
     Ok(())
@@ -604,6 +606,103 @@ impl RspClient {
         eprintln!("RSP: {payload} -> {reply}");
         Ok(reply)
     }
+}
+
+/// Test reverse continuing through a replay with LLDB: back through the
+/// previous breakpoint hits, forward again, and back to the beginning of
+/// the replay. (LLDB stops running a batch script at a history boundary.)
+#[test]
+#[ignore]
+fn guest_debug_replay_fib_reverse_continue() -> Result<()> {
+    let (_dir, trace) = record_fib()?;
+    let port = free_port();
+    let mut wt = WasmtimeWithGdbstub::spawn(
+        "replay",
+        port,
+        &["-Ccache=n", &trace],
+        Duration::from_secs(30),
+    )?;
+    let output = lldb_with_gdbstub_script(
+        port,
+        r#"
+b guest_debug_fib.c:8
+c
+c
+c
+fr v i
+process continue --reverse
+fr v i
+process continue --reverse
+fr v i
+process continue -F
+fr v i
+process continue --reverse
+fr v i
+process continue --reverse
+"#,
+    )?;
+    wt.child.kill().ok();
+    wt.child.wait()?;
+    check_output(
+        &output,
+        r#"
+check: (int) i = 2
+check: (int) i = 1
+check: (int) i = 0
+check: (int) i = 1
+check: (int) i = 0
+check: stop reason = history boundary
+"#,
+    )?;
+    Ok(())
+}
+
+/// Test reverse stepping at the protocol level: each `bs` moves back one
+/// instruction, retracing forward single steps.
+#[test]
+#[ignore]
+fn guest_debug_replay_rsp_reverse_step() -> Result<()> {
+    let (_dir, trace) = record_fib()?;
+    let port = free_port();
+    let mut wt = WasmtimeWithGdbstub::spawn(
+        "replay",
+        port,
+        &["-Ccache=n", &trace],
+        Duration::from_secs(30),
+    )?;
+    let result = (|| -> Result<()> {
+        let mut rsp = RspClient::connect(port)?;
+        rsp.request("?")?;
+        let pc = |rsp: &mut RspClient| rsp.request("p0");
+        let mut forward = Vec::new();
+        for _ in 0..20 {
+            let reply = rsp.request("s")?;
+            assert!(reply.starts_with('T'), "unexpected step reply: {reply}");
+            forward.push(pc(&mut rsp)?);
+        }
+        for expected in forward.iter().rev().skip(1) {
+            let reply = rsp.request("bs")?;
+            assert!(
+                reply.starts_with('T'),
+                "unexpected reverse step reply: {reply}"
+            );
+            assert_eq!(&pc(&mut rsp)?, expected);
+        }
+        // Stepping back from the first stop reaches the beginning of the
+        // replay, before any Wasm executed.
+        let mut reply = rsp.request("bs")?;
+        while !reply.contains("replaylog:begin") {
+            assert!(
+                reply.starts_with('T'),
+                "unexpected reverse step reply: {reply}"
+            );
+            reply = rsp.request("bs")?;
+        }
+        Ok(())
+    })();
+    wt.child.kill().ok();
+    wt.child.wait()?;
+    result
 }
 
 /// A long loop with no host calls, which only an interrupt can stop early.

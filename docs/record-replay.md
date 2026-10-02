@@ -330,7 +330,10 @@ through the same trampoline yield as breakpoints. Setting the flag and
 advancing the engine's epoch (as the debugger API's `interrupt` does) thus
 stops replay at the next epoch check, even in a loop without trace events.
 `wasmtime replay` with a debugger enables epoch interruption, as `wasmtime run`
-does.
+does. Epoch checks sit at loop headers and function entries, where frame state
+is not described for inspection, so with guest debugging an interrupt is
+settled by replaying on to the next operator boundary (a step target, below)
+and reported there.
 
 Memory watchpoints (`Memory::debug_watch`) stop replay with
 `ReplayStop::Watchpoint` before the watched write happens: the watchpoint
@@ -341,7 +344,69 @@ exceptions) are not reported on replay, and the store's async
 `DebugHandler` is not invoked. Recording with guest debugging is rejected,
 since a debug handler would run unrecorded host code.
 
-Restrictions:
+## Reverse execution
+
+Replaying engines with guest debugging count the Wasm operators guest code
+executes. The count lives in a `VMDebugSteps` pair (`steps`, `target`)
+reached through `VMStoreContext::debug_steps`; each operator increments
+`steps` before its breakpoint check, and after the check, compares it with
+`target` and, in a cold block, calls the `debug_step_target` builtin when it
+is reached. That builtin clears the target and yields to the driver like a
+breakpoint, as `ReplayStop::StepTarget`. Unlike fuel, the count is exact at
+every operator and is unaffected by the engine's fuel or epoch settings, so a
+stop's `ReplayPosition` (operator count plus a rank: at the breakpoint check,
+just before the operator executes, during it at a watchpoint, or at the end)
+is the same in every replay of the trace. `Replayer::position` reports it,
+`Replayer::set_step_target` stops replay at a given count, and
+`Replayer::run_until` runs on until a filter closure accepts a stop; the
+closure sees every stop and its position as replay reaches it, on the
+driver's thread, and replay continues past the rest without returning.
+
+`Replayer::enable_reverse_execution(interval)`, before replay starts, adds
+`reverse_step` and `reverse_continue` (`rr/replay/reverse.rs`), following
+Boothe's approach (PLDI 2000) of moving backward by replaying forward from an
+earlier snapshot:
+
+* While running forward, `run` takes a checkpoint at every stop and every
+  `interval` operators, and thins them: from the present backward, it keeps a
+  checkpoint only if it is at least twice as far away as the last one kept
+  (and at least `interval`), and always keeps the beginning. Checkpoints after
+  the present are dropped when execution moves back.
+* `reverse_step` seeks to just before the previous operator: it restores the
+  latest checkpoint at or before it and replays with a step target.
+* `reverse_continue` searches backward in windows. It restores the latest
+  checkpoint before the present and replays to the present, noting
+  breakpoint and watchpoint stops; if there were any, it restores the
+  checkpoint again and replays to the last one. Otherwise it searches the
+  window that ends at that checkpoint (including a stop exactly there, which
+  replaying from it does not reach), and so on back to the beginning,
+  where it stops with `ReplayStop::Beginning`.
+
+Moving backward is quiet: the re-execution it does to reach an earlier
+position delivers no embedder events. Running forward delivers events every
+time replay passes them, so after moving backward, running forward again
+repeats the guest's output, as re-running the program would. Replay re-creates objects (instances,
+memories, tables, globals) when it passes their creation again, which would
+invalidate a debugger's handles to them, so with reverse execution enabled
+the replay checkpoints the store after each creation the first time and
+restores that checkpoint, with the original objects, when it reaches the
+creation again. Watchpoints are logged and re-applied to memories that replay
+re-creates.
+
+The debugger crate exposes this as `Debuggee::reverse_step` and
+`Debuggee::reverse_continue` (and the WIT `debuggee.reverse-step` and
+`reverse-continue`, which fail with `not-reversible` on live debuggees).
+`Debuggee::new_replay` enables reverse execution, and reports the replay's
+beginning and end as `replay-begin` and `replay-end` events; forward
+execution from the end completes the debuggee. The gdbstub component
+implements the GDB remote protocol's `bs` and `bc` and reports both
+boundaries as history-boundary (`replaylog`) stops, so `reverse-stepi` and
+`reverse-continue` in GDB and `process continue --reverse` in LLDB work on
+replays. (LLDB has no reverse-step command; after a reverse continue, its
+`process continue` keeps going backward until `-F` is given; and it does not
+continue forward from the end of history.)
+
+## Restrictions
 
 * GC and typed function references may be used inside the guest, but no
   such value may cross the host boundary (as an argument, result, or
@@ -388,7 +453,7 @@ The remaining implementation work is:
 Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
 behavior, checkpoints, and debugging), `crates/fiber/src/raw.rs` (raw fiber
 lifecycle and snapshots), `crates/wasi/tests/all/rr.rs` (WASI output),
-`crates/debugger` (`replay_debugging`), `tests/all/cli_tests.rs` (`record_*`:
+`crates/debugger` (`replay_debugging`, `replay_reverse_debugging`), `tests/all/cli_tests.rs` (`record_*`:
 `run`/`serve --record` and `replay`), `tests/all/guest_debug` (LLDB on
 replays; ignored by default, and run with `--features gdbstub -- --ignored`),
 and the `.wast` runner, which with `--features rr`

@@ -5380,6 +5380,14 @@ impl FuncEnvironment<'_> {
         if self.tunables.consume_fuel {
             self.fuel_before_op(op, builder, self.is_reachable());
         }
+        // Count the operator before its breakpoint check, so that a stop there
+        // sees a count that includes it, and check for a step target after
+        // the breakpoint check.
+        let steps = if self.tunables.debug_step_counter && self.is_reachable() {
+            Some(self.debug_step(builder))
+        } else {
+            None
+        };
         if self.is_reachable() && self.state_slot.is_some() {
             let builtin = self.builtin_functions.patchable_breakpoint(builder.func);
             let vmctx = self.vmctx_val(&mut builder.cursor());
@@ -5387,8 +5395,66 @@ impl FuncEnvironment<'_> {
             let tags = self.debug_tags(builder.srcloc());
             builder.func.debug_tags.set(inst, tags);
         }
+        if let Some((counter, steps)) = steps {
+            self.debug_step_target_check(builder, counter, steps);
+        }
 
         Ok(())
+    }
+
+    /// Increments the store's debug step counter, returning a pointer to the
+    /// counter and the new count.
+    fn debug_step(&mut self, builder: &mut FunctionBuilder) -> (ir::Value, ir::Value) {
+        let vmstore_ctx = self.get_vmstore_context_ptr(builder);
+        let counter = self
+            .alias_regions
+            .vm_store_context()
+            .debug_steps()
+            .load(&mut builder.cursor(), vmstore_ctx);
+        let steps = self
+            .alias_regions
+            .vm_debug_steps()
+            .steps()
+            .load(&mut builder.cursor(), counter);
+        let steps = builder.ins().iadd_imm_u(steps, 1);
+        self.alias_regions
+            .vm_debug_steps()
+            .steps()
+            .store(&mut builder.cursor(), counter, steps);
+        (counter, steps)
+    }
+
+    /// Calls the `debug_step_target` builtin if `steps` has reached the
+    /// counter's target.
+    fn debug_step_target_check(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        counter: ir::Value,
+        steps: ir::Value,
+    ) {
+        let target = self
+            .alias_regions
+            .vm_debug_steps()
+            .target()
+            .load(&mut builder.cursor(), counter);
+        let reached = builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, steps, target);
+        let hit = builder.create_block();
+        let done = builder.create_block();
+        builder.ins().brif(reached, hit, &[], done, &[]);
+        builder.set_cold_block(hit);
+        builder.switch_to_block(hit);
+        builder.seal_block(hit);
+        let vmctx = self.vmctx_val(&mut builder.cursor());
+        let builtin = self.builtin_functions.debug_step_target(builder.func);
+        let inst = builder.ins().call(builtin, &[vmctx]);
+        // A stop here is inspected like one at the operator's breakpoint.
+        let tags = self.debug_tags(builder.srcloc());
+        builder.func.debug_tags.set(inst, tags);
+        builder.ins().jump(done, &[]);
+        builder.switch_to_block(done);
+        builder.seal_block(done);
     }
 
     pub fn after_translate_operator(

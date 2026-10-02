@@ -33,7 +33,9 @@ use wasmtime_environ::{
 };
 
 mod checkpoint;
+mod reverse;
 pub use checkpoint::Checkpoint;
+pub use reverse::ReplayPosition;
 use wasmtime_fiber::RawFiber;
 
 /// The generated code that replay activations run. It is compiled into an
@@ -167,6 +169,18 @@ struct Driver<'a, T: 'static> {
     // Why the current `run` should return, once the current step completes.
     stop: Option<ReplayStop>,
     next_serial: u64,
+    // The position of the current stop.
+    position: ReplayPosition,
+    // While set, embedder events are not delivered to observers and do not
+    // stop replay: the driver is re-executing to move replay backward.
+    quiet: bool,
+    // The step target the embedder set, if any.
+    user_target: Option<u64>,
+    // With reverse execution, a checkpoint taken just after each run of
+    // records creating objects, by the trace position of its first record.
+    // Re-executing them restores the checkpoint instead, so that every
+    // timeline uses the same objects, and handles to them stay valid.
+    creation: Option<Vec<(usize, Checkpoint)>>,
     checkpoints: checkpoint::Checkpoints,
 }
 
@@ -177,6 +191,8 @@ struct Driver<'a, T: 'static> {
 /// for inspection, but its functions cannot be called.
 pub struct Replayer<'a, T: 'static> {
     driver: Driver<'a, T>,
+    // Snapshots for reverse execution, once enabled.
+    reverse: Option<reverse::Reverse>,
 }
 
 /// Why [`Replayer::run`] returned.
@@ -189,6 +205,13 @@ pub enum ReplayStop {
     /// through the store's breakpoint API. The stopped frames are available
     /// from `Replayer::debug_exit_frames`.
     Breakpoint,
+    /// The guest reached the step count given to
+    /// [`Replayer::set_step_target`]. Guest code is stopped as for
+    /// breakpoints.
+    StepTarget,
+    /// Reverse execution reached the beginning of the replay (see
+    /// [`Replayer::reverse_step`]).
+    Beginning,
     /// Replay was interrupted through the flag given to
     /// [`Replayer::set_interrupt_flag`]. Guest code is stopped as for
     /// breakpoints.
@@ -228,6 +251,9 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 stopped: Vec::new(),
                 interrupt: None,
                 interrupted: false,
+                step_target: false,
+                #[cfg(feature = "debug")]
+                watches: Vec::new(),
             },
             pending: Vec::new(),
             failure: None,
@@ -238,6 +264,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             store.set_epoch_deadline(1);
         }
         Ok(Replayer {
+            reverse: None,
             driver: Driver {
                 store,
                 trampolines,
@@ -254,6 +281,10 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 pending_write: None,
                 stop: None,
                 next_serial: 0,
+                position: ReplayPosition::BEGINNING,
+                quiet: false,
+                user_target: None,
+                creation: None,
                 checkpoints: Default::default(),
             },
         })
@@ -276,6 +307,77 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// This yields to the async executor periodically, so a long replay can
     /// be cancelled by dropping the future.
     pub async fn run(&mut self) -> Result<ReplayStop> {
+        if self.reverse.is_some() {
+            return self.run_recording_snapshots().await;
+        }
+        let stop = self.run_raw().await?;
+        if stop == ReplayStop::Interrupted {
+            return self.settle_interrupt().await;
+        }
+        Ok(stop)
+    }
+
+    /// Interrupts stop at epoch checks, which are neither exact positions
+    /// nor points with exact frame state: with guest debugging, move on to
+    /// just before the next operator, and report the interrupt there.
+    async fn settle_interrupt(&mut self) -> Result<ReplayStop> {
+        if !self.driver.store.engine().tunables().debug_step_counter {
+            return Ok(ReplayStop::Interrupted);
+        }
+        let next = self.position().steps() + 1;
+        self.driver.store.set_debug_step_target(next);
+        let stop = self.run_raw().await?;
+        self.driver
+            .store
+            .set_debug_step_target(self.driver.user_target.unwrap_or(u64::MAX));
+        Ok(match stop {
+            ReplayStop::Finished => ReplayStop::Finished,
+            _ => ReplayStop::Interrupted,
+        })
+    }
+
+    /// Replays until the next stop for which `stop` returns true, or the end
+    /// of the trace. `stop` sees every stop, and its position, as replay
+    /// reaches it; replay continues past those it returns false for without
+    /// returning to the caller.
+    pub async fn run_until(
+        &mut self,
+        mut stop: impl FnMut(&ReplayStop, ReplayPosition) -> bool,
+    ) -> Result<ReplayStop> {
+        loop {
+            let reached = self.run().await?;
+            if reached == ReplayStop::Finished || stop(&reached, self.position()) {
+                return Ok(reached);
+            }
+        }
+    }
+
+    /// The position of the replay: of the stop it is at, or its beginning or
+    /// end. Positions are ordered by execution, and are the same in every
+    /// replay of a trace.
+    pub fn position(&self) -> ReplayPosition {
+        self.driver.position
+    }
+
+    /// Makes replay stop with [`ReplayStop::StepTarget`] once the guest has
+    /// executed `steps` Wasm operators in total, just before executing the
+    /// next. This requires an engine with guest debugging, which counts the
+    /// operators guest code executes (see [`ReplayPosition::steps`]). `None`
+    /// clears the target.
+    pub fn set_step_target(&mut self, steps: Option<u64>) -> Result<()> {
+        ensure!(
+            self.driver.store.engine().tunables().debug_step_counter,
+            "step targets require a replaying engine with guest debugging"
+        );
+        self.driver.user_target = steps;
+        self.driver
+            .store
+            .set_debug_step_target(steps.unwrap_or(u64::MAX));
+        Ok(())
+    }
+
+    /// Replays until the next stop, as `run` does without reverse execution.
+    async fn run_raw(&mut self) -> Result<ReplayStop> {
         let driver = &mut self.driver;
         driver.set_embedder_access(false);
         driver.publish_stopped(false);
@@ -283,9 +385,10 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             // Give the executor a chance to cancel long traces between events.
             for _ in 0..256 {
                 if driver.finished && driver.paused.is_none() {
+                    driver.position = ReplayPosition::end(driver.store.debug_steps());
                     return Poll::Ready(Ok(ReplayStop::Finished));
                 }
-                if let Err(e) = driver.step() {
+                if let Err(e) = driver.step_reusing_objects() {
                     return Poll::Ready(Err(e.context(format!(
                         "replaying trace at byte {}",
                         driver.reader.position()
@@ -455,6 +558,51 @@ impl<T: 'static> Driver<'_, T> {
         Ok(())
     }
 
+    /// Steps, reusing the objects of earlier timelines (see `creation`).
+    fn step_reusing_objects(&mut self) -> Result<()> {
+        let creates_objects = |driver: &Self| {
+            matches!(
+                driver.reader.peek_tag(),
+                Some(
+                    codec::HOST
+                        | codec::MODULE
+                        | codec::INSTANCE
+                        | codec::GLOBAL
+                        | codec::MEMORY
+                        | codec::TABLE
+                )
+            )
+        };
+        if self.creation.is_none() || self.paused.is_some() || !creates_objects(self) {
+            return self.step();
+        }
+        let start = self.reader.position();
+        let creation = self.creation.take().unwrap();
+        let result = match creation.iter().find(|(position, _)| *position == start) {
+            Some((_, checkpoint)) => {
+                // Keep the step target of the operation in progress.
+                let target = self.store.debug_step_target();
+                let result = self.restore(checkpoint);
+                self.store.set_debug_step_target(target);
+                result
+            }
+            None => Ok(()),
+        };
+        let reused = creation.iter().any(|(position, _)| *position == start);
+        self.creation = Some(creation);
+        if reused {
+            return result;
+        }
+        while creates_objects(self) {
+            self.step()?;
+        }
+        let checkpoint = self.checkpoint()?;
+        let creation = self.creation.as_mut().unwrap();
+        creation.try_reserve(1)?;
+        creation.push((start, checkpoint));
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<()> {
         if let Some(serial) = self.paused.take() {
             self.pending_write = None;
@@ -487,11 +635,14 @@ impl<T: 'static> Driver<'_, T> {
                 )?;
                 let tag = body.u32()?;
                 let payload = body.rest();
-                for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
-                    observer(payload).context("failed to observe a trace event")?;
-                }
-                if self.stop_at_events {
-                    self.stop = Some(ReplayStop::Event(tag));
+                if !self.quiet {
+                    for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
+                        observer(payload).context("failed to observe a trace event")?;
+                    }
+                    if self.stop_at_events {
+                        self.position = ReplayPosition::new(self.store.debug_steps(), 1);
+                        self.stop = Some(ReplayStop::Event(tag));
+                    }
                 }
             }
             codec::HOST
@@ -985,6 +1136,7 @@ impl<T: 'static> Driver<'_, T> {
         let control = unsafe { &*control };
         if control.reason == VM_REPLAY_DEBUG {
             self.paused = Some(serial);
+            let steps = self.store.debug_steps();
             #[cfg(feature = "debug")]
             let Mode::Replaying { watchpoint, .. } =
                 &mut self.store.rr.session.as_mut().unwrap().mode
@@ -996,19 +1148,27 @@ impl<T: 'static> Driver<'_, T> {
                 let start = usize::try_from(hit.address).unwrap_or(usize::MAX);
                 let end = start.saturating_add(usize::try_from(hit.len).unwrap_or(usize::MAX));
                 self.pending_write = Some((hit.memory, start..end));
+                self.position = ReplayPosition::new(steps, 2);
                 self.stop = Some(ReplayStop::Watchpoint(hit));
                 return Ok(());
             }
-            let Mode::Replaying { interrupted, .. } =
-                &mut self.store.rr.session.as_mut().unwrap().mode
+            let Mode::Replaying {
+                interrupted,
+                step_target,
+                ..
+            } = &mut self.store.rr.session.as_mut().unwrap().mode
             else {
                 unreachable!()
             };
-            self.stop = Some(if core::mem::take(interrupted) {
-                ReplayStop::Interrupted
+            let (stop, rank) = if core::mem::take(step_target) {
+                (ReplayStop::StepTarget, 1)
+            } else if core::mem::take(interrupted) {
+                (ReplayStop::Interrupted, 1)
             } else {
-                ReplayStop::Breakpoint
-            });
+                (ReplayStop::Breakpoint, 0)
+            };
+            self.position = ReplayPosition::new(steps, rank);
+            self.stop = Some(stop);
             return Ok(());
         }
         ensure!(

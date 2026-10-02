@@ -145,6 +145,8 @@ impl StoreOpaque {
                 .memories_by_key
                 .insert(memory.rr_key(store), id)?;
             session.objects.memories.push(memory);
+            #[cfg(feature = "debug")]
+            session.apply_watches(store, id);
             Ok(())
         })
     }
@@ -241,7 +243,12 @@ impl StoreOpaque {
                 }
                 session.append(codec::INSTANCE, &body)?;
             }
+            let first = session.objects.memories.len();
             session.objects.register_instance(store, instance)?;
+            #[cfg(feature = "debug")]
+            session.apply_watches(store, first);
+            #[cfg(not(feature = "debug"))]
+            let _ = first;
             Ok(())
         })
     }

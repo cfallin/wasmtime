@@ -331,11 +331,13 @@ impl History {
 /// The contents of untracked bytes, as pages shared with the previous image
 /// where they are unchanged. Capturing compares every page with the previous
 /// image, and restoring compares every page with the current contents.
+#[cfg(feature = "gc")]
 pub(crate) struct PagedImage {
     len: usize,
     pages: Vec<Arc<[u8]>>,
 }
 
+#[cfg(feature = "gc")]
 impl PagedImage {
     /// Captures `bytes`, sharing the pages unchanged since `prev`.
     pub(crate) fn capture(
@@ -544,6 +546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "gc")]
     fn paged_images_share_unchanged_pages() {
         let mut data = vec![0_u8; 4 * PAGE + 10];
         let first = PagedImage::capture(&data, PAGE, None).unwrap();

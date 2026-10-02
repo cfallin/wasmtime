@@ -517,6 +517,8 @@ pub struct StoreOpaque {
 
     engine: Engine,
     vm_store_context: VMStoreContext,
+    /// The guest step counter that `vm_store_context.debug_steps` points to.
+    debug_steps: Box<crate::runtime::vm::VMDebugSteps>,
 
     #[cfg(feature = "rr")]
     pub(crate) rr: crate::rr::State,
@@ -786,6 +788,7 @@ impl<T> Store<T> {
             _marker: marker::PhantomPinned,
             engine: engine.clone(),
             vm_store_context: Default::default(),
+            debug_steps: Default::default(),
             #[cfg(feature = "rr")]
             rr: Default::default(),
             #[cfg(feature = "stack-switching")]
@@ -834,6 +837,8 @@ impl<T> Store<T> {
         let store_data =
             <NonNull<ManuallyDrop<T>>>::from(&mut inner.data_no_provenance).cast::<()>();
         inner.inner.vm_store_context.store_data = store_data.into();
+        inner.inner.vm_store_context.debug_steps =
+            NonNull::from(&mut *inner.inner.debug_steps).into();
 
         inner.traitobj = StorePtr(Some(NonNull::from(&mut *inner)));
 
@@ -2306,6 +2311,33 @@ at https://bytecodealliance.org/security.
         let current_epoch = self.engine().current_epoch();
         let epoch_deadline = self.vm_store_context.epoch_deadline.get_mut();
         *epoch_deadline = current_epoch + delta;
+    }
+
+    /// The number of Wasm operators executed, with
+    /// `Tunables::debug_step_counter`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn debug_steps(&self) -> u64 {
+        // SAFETY: no compiled code runs while the store is borrowed.
+        unsafe { *self.debug_steps.steps.get() }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn set_debug_steps(&mut self, steps: u64) {
+        *self.debug_steps.steps.get_mut() = steps;
+    }
+
+    /// The step count at which compiled code calls the `debug_step_target`
+    /// builtin.
+    #[cfg(feature = "rr")]
+    pub(crate) fn debug_step_target(&self) -> u64 {
+        // SAFETY: no compiled code runs while the store is borrowed.
+        unsafe { *self.debug_steps.target.get() }
+    }
+
+    /// Sets the step count at which compiled code calls the
+    /// `debug_step_target` builtin (`u64::MAX` for never).
+    pub(crate) fn set_debug_step_target(&mut self, target: u64) {
+        *self.debug_steps.target.get_mut() = target;
     }
 
     pub(crate) fn get_epoch_deadline(&mut self) -> u64 {

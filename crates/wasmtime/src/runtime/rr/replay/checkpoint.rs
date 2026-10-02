@@ -103,6 +103,9 @@ pub struct Checkpoint {
     finished: bool,
     paused: Option<u64>,
     pending_write: Option<(Memory, Range<usize>)>,
+    // The guest step count, and the position of the replay.
+    steps: u64,
+    replay_position: ReplayPosition,
     growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
     objects: Objects,
     instance_list: Vec<crate::Instance>,
@@ -187,7 +190,23 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// pages that changed since the previous one. Completed guest activations
     /// are retained while a checkpoint that can restore them is alive.
     pub fn checkpoint(&mut self) -> Result<Checkpoint> {
-        let driver = &mut self.driver;
+        self.driver.checkpoint()
+    }
+
+    /// Returns the replay to a checkpoint taken by this replayer.
+    ///
+    /// Embedder events replayed after the checkpoint are delivered to
+    /// observers again as replay proceeds. Breakpoints and other debugger
+    /// configuration are not part of the replay and are left unchanged. Frame
+    /// handles obtained before restoring become invalid.
+    pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<()> {
+        self.driver.restore(checkpoint)
+    }
+}
+
+impl<T: 'static> Driver<'_, T> {
+    pub(super) fn checkpoint(&mut self) -> Result<Checkpoint> {
+        let driver = self;
         ensure!(
             driver.observed.is_none(),
             "replay is between a guest stop and its trace event"
@@ -274,6 +293,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             finished: driver.finished,
             paused: driver.paused,
             pending_write: driver.pending_write.clone(),
+            steps: driver.store.debug_steps(),
+            replay_position: driver.position,
             growth_failures,
             objects: identities,
             activations,
@@ -286,14 +307,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         })
     }
 
-    /// Returns the replay to a checkpoint taken by this replayer.
-    ///
-    /// Embedder events replayed after the checkpoint are delivered to
-    /// observers again as replay proceeds. Breakpoints and other debugger
-    /// configuration are not part of the replay and are left unchanged. Frame
-    /// handles obtained before restoring become invalid.
-    pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<()> {
-        let driver = &mut self.driver;
+    pub(super) fn restore(&mut self, checkpoint: &Checkpoint) -> Result<()> {
+        let driver = self;
         ensure!(
             checkpoint.replayer == driver.checkpoints.replayer,
             "checkpoint belongs to a different replay"
@@ -388,6 +403,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         driver.finished = checkpoint.finished;
         driver.paused = checkpoint.paused;
         driver.pending_write = checkpoint.pending_write.clone();
+        driver.position = checkpoint.replay_position;
+        driver.store.set_debug_steps(checkpoint.steps);
+        driver
+            .store
+            .set_debug_step_target(driver.user_target.unwrap_or(u64::MAX));
         driver.observed = None;
         driver.stop = None;
         *driver.growth_failures() = try_copy(&checkpoint.growth_failures)?;

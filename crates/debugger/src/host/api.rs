@@ -119,6 +119,19 @@ impl EventFuture {
         }
     }
 
+    fn new_reverse(mut inner: Box<dyn OpaqueDebugger + Send + 'static>, step: bool) -> Self {
+        EventFuture {
+            state: EventFutureState::Running(Box::pin(async move {
+                let result = if step {
+                    inner.reverse_step().await
+                } else {
+                    inner.reverse_continue().await
+                };
+                (inner, result)
+            })),
+        }
+    }
+
     fn new_continue(
         mut inner: Box<dyn OpaqueDebugger + Send + 'static>,
         resumption: wit::ResumptionValue,
@@ -234,6 +247,20 @@ impl wit::HostDebuggee for ResourceTable {
         Ok(self.push_child(EventFuture::new_continue(d, resumption), &debuggee)?)
     }
 
+    async fn reverse_step(
+        &mut self,
+        debuggee: Resource<Debuggee>,
+    ) -> Result<Resource<EventFuture>> {
+        self.reverse(debuggee, true)
+    }
+
+    async fn reverse_continue(
+        &mut self,
+        debuggee: Resource<Debuggee>,
+    ) -> Result<Resource<EventFuture>> {
+        self.reverse(debuggee, false)
+    }
+
     async fn exit_frames(&mut self, debuggee: Resource<Debuggee>) -> Result<Vec<Resource<Frame>>> {
         let d = debugger(self, &debuggee)?;
         let frames = d.exit_frames().await?;
@@ -247,6 +274,29 @@ impl wit::HostDebuggee for ResourceTable {
     async fn drop(&mut self, debuggee: Resource<Debuggee>) -> Result<()> {
         self.delete(debuggee)?;
         Ok(())
+    }
+}
+
+trait Reverse {
+    fn reverse(
+        &mut self,
+        debuggee: Resource<Debuggee>,
+        step: bool,
+    ) -> Result<Resource<EventFuture>>;
+}
+
+impl Reverse for ResourceTable {
+    fn reverse(
+        &mut self,
+        debuggee: Resource<Debuggee>,
+        step: bool,
+    ) -> Result<Resource<EventFuture>> {
+        let d = self.get_mut(&debuggee)?;
+        if !d.inner.as_ref().is_some_and(|inner| inner.is_reversible()) {
+            return Err(wit::Error::NotReversible.into());
+        }
+        let inner = d.inner.take().unwrap();
+        Ok(self.push_child(EventFuture::new_reverse(inner, step), &debuggee)?)
     }
 }
 
@@ -273,6 +323,8 @@ fn result_to_event(table: &mut ResourceTable, value: DebugRunResult) -> Result<w
             })
         }
         DebugRunResult::EpochYield => wit::Event::Interrupted,
+        DebugRunResult::ReplayBegin => wit::Event::ReplayBegin,
+        DebugRunResult::ReplayEnd => wit::Event::ReplayEnd,
         DebugRunResult::Exception(e) => {
             let e = table.push(WasmException(e))?;
             wit::Event::Exception(e)

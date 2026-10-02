@@ -83,6 +83,32 @@ interface debuggee {
     /// If invoked while already running, causes a trap.
     continue: func(resumption: resumption-value) -> event-future;
 
+    /// Step backward, returning a future that will yield an event
+    /// when done: execution moves back to just before the previous
+    /// instruction executed, as if a forward single step had
+    /// stopped there. Yields `replay-begin` at the beginning of
+    /// execution.
+    ///
+    /// Only replays of recorded executions can run backward; other
+    /// debuggees return `not-reversible`.
+    ///
+    /// Usable in paused state; transitions to running state, as for
+    /// `single-step`.
+    reverse-step: func() -> result<event-future, error>;
+
+    /// Continue backward, returning a future that will yield an
+    /// event when done: execution moves back to the last breakpoint
+    /// or watchpoint stop before the present, as currently
+    /// configured, and yields its event, or `replay-begin` if there
+    /// is none.
+    ///
+    /// Only replays of recorded executions can run backward; other
+    /// debuggees return `not-reversible`.
+    ///
+    /// Usable in paused state; transitions to running state, as for
+    /// `continue`.
+    reverse-continue: func() -> result<event-future, error>;
+
     /// Get the current exit frames for each activation.
     ///
     /// If invoked while already running, causes a trap.
@@ -172,6 +198,12 @@ interface debuggee {
     /// `memory.add-watchpoint`, pausing execution *before* the write.
     /// The write happens when execution resumes.
     watchpoint(watchpoint-hit),
+    /// Reverse execution reached the beginning of a replay, before
+    /// any Wasm executed.
+    replay-begin,
+    /// Forward execution reached the end of a replay. Execution can
+    /// run backward from here; continuing forward completes it.
+    replay-end,
   }
 
   /// A guest write to watched bytes of a linear memory.
@@ -407,6 +439,7 @@ interface debuggee {
     out-of-bounds,
     memory-grow-failure,
     execution-trap,
+    not-reversible,
   }
 
   resource wasm-value {
