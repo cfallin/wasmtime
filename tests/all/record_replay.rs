@@ -1981,7 +1981,7 @@ async fn embedder_cannot_mutate_a_replaying_store() -> Result<()> {
     assert!(memory.write(&mut s, 0, &[7]).is_err());
     assert!(memory.grow(&mut s, 1).is_err());
     assert!(step.call(&mut s, &[Val::I32(0)], &mut []).is_err());
-    assert!(Memory::new(&mut s, MemoryType::new(1, None)).is_err());
+    assert!(Memory::new(&mut s, MemoryType::new(1, None)?).is_err());
     let module = Module::new(s.engine(), "(module)")?;
     assert!(Instance::new(&mut s, &module, &[]).is_err());
     // Reading is fine.
