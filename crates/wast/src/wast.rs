@@ -159,7 +159,8 @@ impl WastContext {
 
     /// Records the execution of each component instantiated by the test,
     /// which requires an engine configured for recording, and checks that
-    /// the recording replays with `replay_engine`.
+    /// the recording replays with `replay_engine`. If that engine enables
+    /// guest debugging, replay is also single-stepped and rewound.
     #[cfg(feature = "rr")]
     pub fn record_replay(&mut self, replay_engine: Engine) -> &mut Self {
         self.replay_engine = Some(replay_engine);

@@ -1261,6 +1261,10 @@ fn watched_write(
             len,
             value,
         };
+        #[cfg(feature = "rr")]
+        if store.store_opaque_mut().rr_debug_stop_at_watchpoint(hit) {
+            return Ok(());
+        }
         store.block_on_debug_handler(crate::DebugEvent::Watchpoint(hit))?;
     }
     let _ = (bits, value);
@@ -1291,6 +1295,11 @@ fn table_written(
 }
 
 fn breakpoint(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    // A replay activation instead yields the stop to the replay driver.
+    #[cfg(feature = "rr")]
+    if store.store_opaque_mut().rr_debug_stop() {
+        return Ok(());
+    }
     #[cfg(feature = "debug")]
     {
         store.block_on_debug_handler(crate::DebugEvent::Breakpoint)?;

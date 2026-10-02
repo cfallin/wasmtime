@@ -953,6 +953,10 @@ pub const VM_REPLAY_RETURNED: u32 = 2;
 /// `VMReplayControl::reason`: the activation's entry function trapped.
 pub const VM_REPLAY_TRAPPED: u32 = 3;
 
+/// `VMReplayControl::reason`: the activation stopped at a debug event, such
+/// as a breakpoint.
+pub const VM_REPLAY_DEBUG: u32 = 4;
+
 #[cfg(test)]
 mod tests {
     use crate::vmoffsets::align;

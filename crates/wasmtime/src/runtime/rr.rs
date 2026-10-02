@@ -10,14 +10,16 @@
 //! function references. Modules that use GC or exceptions are unsupported.
 //! Shared memory, host table/global mutation, call hooks,
 //! custom signal handlers, Wasm stack switching, epochs, and fuel are
-//! unsupported, as is guest debugging. Host writes through the
+//! unsupported, as is recording with guest debugging. Host writes through the
 //! memory APIs, including slices from [`Memory::data_mut`], are recorded;
 //! writes through raw pointers such as [`Memory::data_ptr`] are not. Replay
 //! requires a compiler and a native (non-Pulley) target, and is unsupported
 //! under Miri, with AddressSanitizer, and with hardware-enforced shadow stacks.
 //!
 //! A [`Replayer`] replays step by step: it can stop at embedder events
-//! ([`record_event`]), and it can take and restore [`Checkpoint`]s.
+//! ([`record_event`]) and, with guest debugging enabled on the replaying
+//! engine, at breakpoints and single steps, and it can take and restore
+//! [`Checkpoint`]s, which together support reversible debugging.
 //!
 //! Traces are private to this Wasmtime version. They contain host-supplied data
 //! and can be large; applications should impose their own storage limits.
@@ -252,6 +254,9 @@ enum Mode {
         // Recorded guest growth failures that the running activation has yet
         // to reproduce, in order.
         growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
+        // The watchpoint at which the running activation requested a stop.
+        #[cfg(feature = "debug")]
+        watchpoint: Option<crate::WatchpointHit>,
         // The checkpointed contents of each memory that has been
         // checkpointed, by `rr_key`.
         histories: alloc::collections::BTreeMap<overlay::TrackedKey, overlay::History>,
@@ -260,6 +265,9 @@ enum Mode {
         // Whether the embedder has the store, through `Replayer::store`,
         // rather than the replay driver.
         embedder_access: bool,
+        // The exit `(pc, trampoline fp, entry fp)` of the activations whose
+        // frames a debugger sees while replay is stopped.
+        stopped: Vec<(usize, usize, usize)>,
     },
 }
 
@@ -338,8 +346,8 @@ impl<T: 'static> Store<T> {
             store.engine().is_recording(),
             "recording requires RRConfig::Recording"
         );
-        // A debug handler could run arbitrary host code that the trace does
-        // not record.
+        // Guest debugging is supported on replay instead: a debug handler
+        // could run arbitrary host code that the trace does not record.
         ensure!(
             !store.engine().tunables().debug_guest,
             "record/replay does not support recording with guest debugging"
@@ -473,6 +481,16 @@ impl StoreOpaque {
         Ok(record)
     }
 
+    /// The exit `(pc, trampoline fp, entry fp)` of the activations whose
+    /// frames a debugger sees while replay is stopped at a debug event.
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_stopped_activations(&self) -> &[(usize, usize, usize)] {
+        match self.rr.session.as_deref().map(|s| &s.mode) {
+            Some(Mode::Replaying { stopped, .. }) => stopped,
+            _ => &[],
+        }
+    }
+
     /// Whether the embedder, rather than the replay driver or a replay
     /// activation, is using a replaying store.
     fn rr_embedder_replaying(&self) -> bool {
@@ -567,6 +585,37 @@ impl StoreOpaque {
         };
         histories.insert(key, history);
         result.map(Some)
+    }
+
+    /// Requests that the running replay activation, if any, stop at a
+    /// watchpoint, reporting `hit`.
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_debug_stop_at_watchpoint(&mut self, hit: crate::WatchpointHit) -> bool {
+        if !self.rr_debug_stop() {
+            return false;
+        }
+        let Mode::Replaying { watchpoint, .. } = &mut self.rr_session().mode else {
+            unreachable!()
+        };
+        *watchpoint = Some(hit);
+        true
+    }
+
+    /// Requests that the running replay activation, if any, stop for a debug
+    /// event. Its breakpoint trampoline yields to the driver once the libcall
+    /// requesting this returns.
+    pub(crate) fn rr_debug_stop(&mut self) -> bool {
+        match self.vm_store_context().replay_control {
+            Some(control) => {
+                // SAFETY: the running activation's control block is live, and
+                // the driver holds no reference to it while it runs.
+                unsafe {
+                    (*control.as_ptr()).reason = wasmtime_environ::VM_REPLAY_DEBUG;
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// Whether replay must fail this guest growth because it failed when it

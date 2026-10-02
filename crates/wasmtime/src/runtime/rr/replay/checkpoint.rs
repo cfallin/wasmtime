@@ -1,6 +1,7 @@
 //! Checkpoints of a replay, for rewinding it.
 //!
-//! A checkpoint is taken between trace events. It captures:
+//! A checkpoint is taken between trace events, or while an activation is
+//! stopped at a debug event. It captures:
 //!
 //! * the driver's protocol state: the trace position, the activations and
 //!   their parked host calls, the startup and growth-failure state, and the
@@ -95,6 +96,8 @@ pub struct Checkpoint {
     position: usize,
     pending_startup: Option<usize>,
     finished: bool,
+    paused: Option<u64>,
+    pending_write: Option<(Memory, Range<usize>)>,
     growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
     objects: Objects,
     instance_list: Vec<crate::Instance>,
@@ -176,7 +179,9 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// Returns the replay to a checkpoint taken by this replayer.
     ///
     /// Embedder events replayed after the checkpoint are delivered to
-    /// observers again as replay proceeds.
+    /// observers again as replay proceeds. Breakpoints and other debugger
+    /// configuration are not part of the replay and are left unchanged. Frame
+    /// handles obtained before restoring become invalid.
     pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<()> {
         self.driver.restore(checkpoint)
     }
@@ -223,6 +228,9 @@ impl<T: 'static> Driver<'_, T> {
         for memory in memories {
             memory_images.push(checkpoint_object(store, overlay::Tracked::Memory(memory))?);
         }
+        if let Some((memory, range)) = &driver.pending_write {
+            store.rr_dirty(*memory, range.clone())?;
+        }
         let mut table_images = Vec::new();
         table_images.try_reserve_exact(tables.len())?;
         for table in tables {
@@ -250,6 +258,8 @@ impl<T: 'static> Driver<'_, T> {
             instance_list: try_copy(&driver.instances)?,
             pending_startup: driver.pending_startup,
             finished: driver.finished,
+            paused: driver.paused,
+            pending_write: driver.pending_write.clone(),
             growth_failures,
             objects: identities,
             activations,
@@ -321,6 +331,9 @@ impl<T: 'static> Driver<'_, T> {
                 })?
                 .expect("a checkpointed memory has a history");
         }
+        if let Some((memory, range)) = &checkpoint.pending_write {
+            store.rr_dirty(*memory, range.clone())?;
+        }
         for (table, elements) in tables.iter().zip(&checkpoint.tables) {
             store
                 .rr_with_history(overlay::Tracked::Table(*table), |history, table| {
@@ -338,14 +351,19 @@ impl<T: 'static> Driver<'_, T> {
             |key| by_key[&key].rr_raw(store),
             |key, value| by_key[&key].rr_set_raw(store, value),
         );
+        // Invalidate frame handles into the replaced stacks.
+        store.vm_store_context_mut().execution_version += 1;
 
         driver.instances = try_copy(&checkpoint.instance_list)?;
         driver.reader.set_position(checkpoint.position);
         driver.pending_startup = checkpoint.pending_startup;
         driver.finished = checkpoint.finished;
+        driver.paused = checkpoint.paused;
+        driver.pending_write = checkpoint.pending_write.clone();
         driver.observed = None;
         driver.stop = None;
         *driver.growth_failures() = try_copy(&checkpoint.growth_failures)?;
+        driver.publish_stopped(true);
         Ok(())
     }
 }

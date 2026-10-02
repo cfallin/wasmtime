@@ -243,7 +243,8 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
         }
     }
 
-    // Record the component-model async tests, and replay their recordings.
+    // Record the component-model async tests, and replay (single-stepping
+    // and rewinding) their recordings.
     #[cfg(feature = "rr")]
     if !should_fail
         && !test_config.gc_types()
@@ -261,7 +262,9 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
         let mut recording = cfg.clone();
         recording.rr(wasmtime::RRConfig::Recording);
         let mut replaying = cfg;
-        replaying.rr(wasmtime::RRConfig::Replaying);
+        replaying
+            .rr(wasmtime::RRConfig::Replaying)
+            .guest_debug(true);
         let mut wast_context = WastContext::new(&Engine::new(&recording)?, Async::Yes, |_| {});
         wast_context.record_replay(Engine::new(&replaying)?);
         wast_context.register_spectest(&SpectestConfig {
