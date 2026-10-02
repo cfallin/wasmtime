@@ -189,6 +189,18 @@ struct DrcHeap {
     allocated_bytes: usize,
 }
 
+/// A DRC heap's state other than its memory's bytes, for record/replay
+/// checkpoints.
+#[cfg(feature = "rr")]
+struct DrcSaved {
+    no_gc_count: u64,
+    free_list: Option<FreeList>,
+    allocated_bytes: usize,
+    stack_roots: Option<VMGcRef>,
+    stack_roots_len: u32,
+    stack_roots_len_after_last_gc: u32,
+}
+
 struct TracingAllocs {
     /// An explicit stack to avoid recursion when deallocating one object needs
     /// to dec-ref another object, which can then be deallocated and dec-refs
@@ -1213,6 +1225,38 @@ unsafe impl GcHeap for DrcHeap {
             .as_mut()
             .unwrap()
             .add_capacity(usize::try_from(delta_bytes_grown).unwrap())
+    }
+
+    #[cfg(feature = "rr")]
+    fn rr_save(&self) -> Result<Box<dyn Any + Send + Sync>> {
+        Ok(Box::new(DrcSaved {
+            no_gc_count: self.no_gc_count,
+            free_list: self.free_list.clone(),
+            allocated_bytes: self.allocated_bytes,
+            stack_roots: self.vmctx_data.over_approximated_stack_roots(),
+            stack_roots_len: self.vmctx_data.current_over_approximated_stack_roots_len(),
+            stack_roots_len_after_last_gc: self
+                .vmctx_data
+                .over_approximated_stack_roots_len_after_last_gc(),
+        }))
+    }
+
+    #[cfg(feature = "rr")]
+    fn rr_restore(&mut self, saved: &(dyn Any + Send + Sync), len: usize) -> Result<()> {
+        let saved = saved
+            .downcast_ref::<DrcSaved>()
+            .ok_or_else(|| format_err!("GC heap checkpoint from another collector"))?;
+        let memory = self.memory.as_mut().unwrap();
+        memory.rr_resize(len)?;
+        self.vmmemory = Some(memory.vmmemory());
+        self.no_gc_count = saved.no_gc_count;
+        self.free_list = saved.free_list.clone();
+        self.allocated_bytes = saved.allocated_bytes;
+        let data = self.vmctx_data.inner.get_mut();
+        data.over_approximated_stack_roots = saved.stack_roots.as_ref().map(|r| r.unchecked_copy());
+        data.current_over_approximated_stack_roots_len = saved.stack_roots_len;
+        data.over_approximated_stack_roots_len_after_last_gc = saved.stack_roots_len_after_last_gc;
+        Ok(())
     }
 
     #[inline]

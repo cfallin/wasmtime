@@ -435,6 +435,17 @@ pub unsafe trait GcHeap: 'static + Send + Sync {
     /// updated `VMMemoryDefinition` record.
     fn vmmemory(&self) -> VMMemoryDefinition;
 
+    /// Captures this heap's state other than the bytes of its memory, for
+    /// record/replay checkpoints. Only called between collections.
+    #[cfg(feature = "rr")]
+    fn rr_save(&self) -> Result<Box<dyn Any + Send + Sync>>;
+
+    /// Restores state captured by `rr_save`, resizing this heap's memory to
+    /// `len` bytes. The caller restores the memory's bytes and updates any
+    /// `VMMemoryDefinition` copies.
+    #[cfg(feature = "rr")]
+    fn rr_restore(&mut self, saved: &(dyn Any + Send + Sync), len: usize) -> Result<()>;
+
     /// Get a slice of the raw bytes of the GC heap.
     #[inline]
     fn heap_slice(&self) -> &[u8] {

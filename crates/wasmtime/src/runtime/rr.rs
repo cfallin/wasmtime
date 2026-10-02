@@ -33,7 +33,7 @@ use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
-mod overlay;
+pub(crate) mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
 pub use replay::{Checkpoint, ReplayStop, Replayer};
@@ -435,6 +435,14 @@ impl StoreOpaque {
         record[5..13].copy_from_slice(&u64::try_from(size)?.to_le_bytes());
         record[13..].copy_from_slice(&delta.to_le_bytes());
         Ok(record)
+    }
+
+    /// The granularity at which replay checkpoints track memory.
+    pub(crate) fn rr_checkpoint_page_size(&mut self) -> usize {
+        let Mode::Replaying { page_size, .. } = self.rr_session().mode else {
+            unreachable!()
+        };
+        page_size
     }
 
     /// Whether the embedder, rather than the replay driver or a replay

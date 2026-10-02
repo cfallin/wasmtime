@@ -83,7 +83,13 @@ In addition to construction, the execution stream contains:
   postcard) at the current point of the recording, e.g. a WASI
   implementation's output. During replay, `Replayer::on_event` observers
   receive them as replay reaches them, including again after rewinding;
-  observers cannot affect the replay.
+  observers cannot affect the replay. Code without store access, such as a
+  WASI stream or a host task, records through an `rr::EventSink`
+  (`Store::rr_event_sink`), whose events enter the trace at the store's next
+  boundary. Tags with the high bit set are reserved for Wasmtime's crates:
+  `wasmtime-wasi`'s `rr` feature records guest stdout/stderr this way
+  (`wasmtime_wasi::rr::RecordedOutput`) and replays it with
+  `wasmtime_wasi::rr::replay_output`.
 * Guest growth failures: a failed `memory.grow` or `table.grow` records the
   object, its old size, and the delta. Such records directly follow the event
   that resumed the guest; the driver queues them, and replay fails exactly the
@@ -204,8 +210,8 @@ protocol state (trace position, activations and parked host calls, startup and
 growth-failure state, object identities and instances), each activation's raw
 fiber snapshot, control block, parked `VMStoreContext` state, protection-key
 mask, and value buffer, and the guest state of every object: memory sizes and
-contents, function table sizes and raw elements, and mutable globals
-(including component instance flags).
+contents, table sizes and raw elements, global values (including component
+instance flags), and the GC heap.
 
 Restoring puts all of this back in place. Fibers, control blocks, and buffers
 keep their addresses, so completed activations are retained while a live
@@ -237,6 +243,28 @@ code. The page size is a software granularity, set with
 `Replayer::set_checkpoint_page_size` (4 KiB by default), and
 `Checkpoint::memory_bytes` reports the memory contents a checkpoint copied.
 
+Tables use the same histories, viewing a table's raw elements as bytes in
+groups of 64 slots. Replaying engines compile `table.set` and
+`table.fill/copy/init` (including startup element segments) to report the
+slots they are about to write (the `table_written` builtin); growth and lazy
+funcref initialization report from Rust. `Checkpoint::table_bytes` reports
+the elements a checkpoint copied. Globals are few and some, like a shadow
+stack pointer, are written constantly, so their writes are not tracked:
+a checkpoint compares raw values with the previous checkpoint's and keeps only
+the changed ones in a layered image, and a restore writes only the globals
+whose values differ.
+
+The GC heap is captured as pages shared with the previous checkpoint's image,
+found by comparison, together with the collector's own state (free list,
+bump pointers, semi-spaces, the DRC over-approximated stack-root list; see
+`GcHeap::rr_save`). Restoring writes back the pages that differ. Element and
+global values are restored as raw bits without barriers, consistent with the
+restored heap. Host GC handles (`Rooted`, `OwnedRooted`) from before a restore
+become unrooted, as LIFO handles do when their scope ends: their root slots
+hold `i31ref` placeholders, LIFO handles' generation no longer matches, and
+owned handles carry the root set's epoch in their (otherwise unused)
+generation. During replay, a collection inside one activation also traces the
+frames of activations parked on other fibers.
 To keep traces independent of the replaying engine's configuration, record/
 replay engines give every module an unconditional startup function and treat
 every function as escaping, so function identities and startup activations do
@@ -273,8 +301,10 @@ since a debug handler would run unrecorded host code.
 
 Restrictions:
 
-* Core signatures may not contain GC or typed function references, and
-  modules may not use GC, exceptions, shared memories, or stack switching.
+* GC and typed function references may be used inside the guest, but no
+  such value may cross the host boundary (as an argument, result, or
+  host-created global or table element). Modules may not use exceptions,
+  shared memories, or stack switching.
   Component-level resources, futures, and streams cross the boundary as
   numeric core handles and are supported.
 * Hosts may not mutate tables or globals; constructing numeric or abstract
@@ -288,19 +318,27 @@ Restrictions:
   (OS fibers) and Miri lack, and AddressSanitizer's fiber handshake would
   require Rust code at every switch. These report an error rather than
   falling back to closure-based fibers.
-* After a replay, the store can be inspected but not called: its host
-  functions are replay stubs.
+* During replay, the store obtained from `Replayer::store` can be inspected
+  and its debugger configuration changed, but operations that would change
+  its state fail: calls, memory writes and growth, object creation and
+  instantiation, and GC allocation, mutation, and collection. Infallible
+  mutable borrows such as `Memory::data_mut` make the replay fail when it
+  continues. After a replay, the store can be inspected but not called: its
+  host functions are replay stubs.
 
 The remaining implementation work is:
 
-1. Dirty tracking for tables, globals, and GC heaps, which checkpoints still
-   copy whole.
+1. Write tracking for the GC heap through shadows, as for linear memories,
+   instead of comparing pages. Compiled GC stores (about two dozen sites in
+   the collectors' barriers and allocation paths) could check a shadow, but
+   the Rust collectors also write the heap pervasively (allocation headers,
+   reference counts, sweeping and copying), and would need to report ranges.
+   A GC heap growth failure is also not yet recorded as a growth failure.
 2. Trap, host-error, and exception debug events on replay. Traps are raised
    from the synchronous `raise` libcall, which would need to yield a stop
    (with driver-owned payload storage) before unwinding.
-3. Embedder integrations of `rr::record_event`, such as WASI output.
-   Host bindings usually see only the store's data, not the store, so this may
-   need an event sink that is flushed into the trace at the next boundary.
+3. CLI support for recording (`wasmtime run --record`) and replaying with
+   WASI output.
 4. Ordinary (non-replay) asynchronous execution does not use raw fibers. To
    participate in snapshots, asynchronous host work would run on an owned
    child fiber whose Rust frames are never copied as guest snapshots.
@@ -310,13 +348,15 @@ The remaining implementation work is:
 
 Tests are in `crates/wasmtime/tests/record_replay.rs` (record/replay
 behavior, checkpoints, and debugging), `crates/fiber/src/raw.rs` (raw fiber
-lifecycle and snapshots), and the `.wast` runner, which with `--features rr`
+lifecycle and snapshots), `crates/wasi/tests/all/rr.rs` (WASI output), and
+the `.wast` runner, which with `--features rr`
 records the component-model async suites, replays them, and single-steps and
 rewinds the replays:
 
 ```sh
 cargo test -p wasmtime-internal-fiber
 cargo test -p wasmtime --features rr --test record_replay
+cargo test -p wasmtime-wasi --features rr --test all rr::
 cargo test -p wasmtime --features rr,all-arch,pulley --test record_replay replay_
 cargo test -p wasmtime --release --no-default-features \
   --features cranelift,runtime,std,rr,wat,component-model-async --test record_replay

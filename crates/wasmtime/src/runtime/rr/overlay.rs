@@ -328,6 +328,72 @@ impl History {
     }
 }
 
+/// The contents of untracked bytes, as pages shared with the previous image
+/// where they are unchanged. Capturing compares every page with the previous
+/// image, and restoring compares every page with the current contents.
+pub(crate) struct PagedImage {
+    len: usize,
+    pages: Vec<Arc<[u8]>>,
+}
+
+impl PagedImage {
+    /// Captures `bytes`, sharing the pages unchanged since `prev`.
+    pub(crate) fn capture(
+        bytes: &[u8],
+        page_size: usize,
+        prev: Option<&PagedImage>,
+    ) -> Result<Self> {
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(bytes.len().div_ceil(page_size))?;
+        for (i, chunk) in bytes.chunks(page_size).enumerate() {
+            match prev.and_then(|p| p.pages.get(i)) {
+                Some(page) if **page == *chunk => pages.push(page.clone()),
+                _ => {
+                    let mut page = Vec::new();
+                    page.try_reserve_exact(chunk.len())?;
+                    page.extend_from_slice(chunk);
+                    pages.push(page.into());
+                }
+            }
+        }
+        Ok(PagedImage {
+            len: bytes.len(),
+            pages,
+        })
+    }
+
+    /// The length of the captured bytes.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The bytes of the pages this image does not share with `prev`.
+    pub(crate) fn stored_bytes(&self, prev: Option<&PagedImage>) -> usize {
+        self.pages
+            .iter()
+            .enumerate()
+            .filter(|(i, page)| {
+                !prev
+                    .and_then(|p| p.pages.get(*i))
+                    .is_some_and(|p| Arc::ptr_eq(p, page))
+            })
+            .map(|(_, page)| page.len())
+            .sum()
+    }
+
+    /// Writes the pages of `bytes`, which has this image's length, that
+    /// differ from this image.
+    pub(crate) fn restore_into(&self, bytes: &mut [u8]) {
+        debug_assert_eq!(bytes.len(), self.len);
+        let page_size = self.pages.first().map_or(1, |p| p.len());
+        for (chunk, page) in bytes.chunks_mut(page_size).zip(&self.pages) {
+            if *chunk != **page {
+                chunk.copy_from_slice(page);
+            }
+        }
+    }
+}
+
 /// The raw value of a global.
 pub(crate) type Value = [u8; 16];
 
@@ -475,6 +541,24 @@ mod tests {
             let len = self.bytes.len() + by;
             self.resize(len).unwrap();
         }
+    }
+
+    #[test]
+    fn paged_images_share_unchanged_pages() {
+        let mut data = vec![0_u8; 4 * PAGE + 10];
+        let first = PagedImage::capture(&data, PAGE, None).unwrap();
+        data[2 * PAGE + 3] = 7;
+        let second = PagedImage::capture(&data, PAGE, Some(&first)).unwrap();
+        assert_eq!(second.stored_bytes(Some(&first)), PAGE);
+        for i in 0..first.pages.len() {
+            assert_eq!(Arc::ptr_eq(&first.pages[i], &second.pages[i]), i != 2);
+        }
+        let mut current = data.clone();
+        current[PAGE] = 1;
+        second.restore_into(&mut current);
+        assert_eq!(current, data);
+        first.restore_into(&mut current);
+        assert!(current.iter().all(|b| *b == 0));
     }
 
     #[test]

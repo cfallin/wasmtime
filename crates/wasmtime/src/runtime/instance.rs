@@ -298,8 +298,10 @@ impl Instance {
     ) -> Result<(Instance, bool)> {
         #[cfg(feature = "rr")]
         {
-            if module.env_module().needs_gc_heap {
-                store.rr.reject("GC or exception-using modules")?;
+            // Thrown exceptions would need recording across the host boundary
+            // and their pending-exception GC roots checkpointed.
+            if !module.env_module().tags.is_empty() {
+                store.rr.reject("exception-using modules")?;
             }
             if module.env_module().memories.values().any(|m| m.shared) {
                 store.rr.reject("shared memories")?;

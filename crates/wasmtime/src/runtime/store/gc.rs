@@ -1189,3 +1189,58 @@ mod tests {
         Ok(())
     }
 }
+
+/// The state of a store's GC heap at a record/replay checkpoint.
+#[cfg(feature = "rr")]
+pub(crate) struct RrGcImage {
+    bytes: crate::rr::overlay::PagedImage,
+    heap: alloc::boxed::Box<dyn core::any::Any + Send + Sync>,
+    last_post_gc_allocated_bytes: Option<usize>,
+}
+
+#[cfg(feature = "rr")]
+impl RrGcImage {
+    /// The bytes of the GC heap this image does not share with `prev`.
+    pub(crate) fn stored_bytes(&self, prev: Option<&RrGcImage>) -> usize {
+        self.bytes.stored_bytes(prev.map(|p| &p.bytes))
+    }
+}
+
+#[cfg(feature = "rr")]
+impl StoreOpaque {
+    /// Captures the GC heap for a record/replay checkpoint, sharing unchanged
+    /// pages with `prev`. With GC enabled, this allocates the GC heap if
+    /// needed, so that every checkpoint has one to restore.
+    pub(crate) fn rr_gc_checkpoint(
+        &mut self,
+        prev: Option<&RrGcImage>,
+        page_size: usize,
+    ) -> Result<Option<RrGcImage>> {
+        if !self.engine().features().gc_types() {
+            return Ok(None);
+        }
+        vm::assert_ready(self.ensure_gc_store(None))?;
+        let gc = self.gc_store.as_ref().unwrap();
+        Ok(Some(RrGcImage {
+            bytes: crate::rr::overlay::PagedImage::capture(
+                gc.gc_heap.heap_slice(),
+                page_size,
+                prev.map(|p| &p.bytes),
+            )?,
+            heap: gc.gc_heap.rr_save()?,
+            last_post_gc_allocated_bytes: gc.last_post_gc_allocated_bytes,
+        }))
+    }
+
+    /// Restores the GC heap from a record/replay checkpoint. Every host GC
+    /// root, and so every `Rooted` and `OwnedRooted` handle, is invalidated.
+    pub(crate) fn rr_gc_restore(&mut self, image: &RrGcImage) -> Result<()> {
+        let gc = self.gc_store.as_mut().unwrap();
+        gc.gc_heap.rr_restore(&*image.heap, image.bytes.len())?;
+        gc.last_post_gc_allocated_bytes = image.last_post_gc_allocated_bytes;
+        image.bytes.restore_into(gc.gc_heap.heap_slice_mut());
+        *self.vm_store_context.gc_heap.get_mut() = gc.gc_heap.vmmemory();
+        self.gc_roots_mut().rr_invalidate();
+        Ok(())
+    }
+}

@@ -3,6 +3,7 @@ use core::{alloc::Layout, num::NonZeroU32};
 
 /// A free list for use by our garbage collectors, using a sorted Vec of
 /// (index, length) pairs for cache-friendly operations.
+#[derive(Clone)]
 pub(crate) struct FreeList {
     /// The total capacity of the contiguous range of memory we are managing.
     ///
