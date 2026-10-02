@@ -157,6 +157,7 @@ impl StoreOpaque {
         if !self.rr.active() {
             return Ok(());
         }
+        self.rr_reject_in_replay("create objects")?;
         self.rr_flush()?;
         let mut session = self.rr.session.take().unwrap();
         let result = f(self, &mut session);

@@ -27,6 +27,8 @@ pub(super) const GLOBAL_WRITE: u8 = 13;
 /// delta]`, recorded so that replay fails the same growth.
 pub(super) const GROWTH_FAILED: u8 = 14;
 pub(super) const GROWTH_FAILED_LEN: usize = 21;
+/// An embedder-defined event: `[tag, postcard payload]`.
+pub(super) const EVENT: u8 = 15;
 
 const UNSUPPORTED: &str = "record/replay does not support GC or typed reference boundaries";
 

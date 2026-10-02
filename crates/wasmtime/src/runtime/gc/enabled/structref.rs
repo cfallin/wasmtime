@@ -602,6 +602,8 @@ impl StructRef {
         value: Val,
     ) -> Result<()> {
         assert!(self.comes_from_same_store(store));
+        #[cfg(feature = "rr")]
+        store.rr_reject_in_replay("modify GC objects")?;
         let mut store = AutoAssertNoGc::new(store);
 
         let field_ty = self.field_ty(&store, index)?;

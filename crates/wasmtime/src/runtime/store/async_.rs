@@ -146,6 +146,8 @@ impl<'a, T> StoreContextMut<'a, T> {
     where
         T: Send + 'static,
     {
+        #[cfg(feature = "rr")]
+        self.0.rr_reject_in_replay("collect garbage")?;
         let (mut limiter, store) = self.0.resource_limiter_and_store_opaque();
         store
             .gc(
