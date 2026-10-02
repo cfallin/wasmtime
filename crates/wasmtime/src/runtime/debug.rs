@@ -1324,7 +1324,12 @@ impl<'a> BreakpointState<'a> {
         range: core::ops::Range<u64>,
         watch: bool,
     ) -> Result<()> {
-        self.store.debug_set_watch(memory, range, watch)
+        self.store.debug_set_watch(memory, range.clone(), watch)?;
+        // Watchpoints apply to the replay's whole timeline, including after
+        // restoring a checkpoint from before this memory was created.
+        #[cfg(feature = "rr")]
+        self.store.rr_note_watch(memory, range, watch)?;
+        Ok(())
     }
 }
 

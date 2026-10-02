@@ -536,6 +536,29 @@ macro_rules! for_each_vm_type {
                 /// before calling the `rr_enter` and `rr_leave` builtins. Like
                 /// `replay_control` it is present even without the `rr` feature.
                 pub recording: u32,
+
+                /// The store's guest step counter, which compiled code with
+                /// `Tunables::debug_step_counter` advances for every Wasm
+                /// operator it executes.
+                #[readonly]
+                #[can_move]
+                pub debug_steps: VmPtr<VMDebugSteps>,
+            }
+
+            /// A store's deterministic count of executed Wasm operators, for
+            /// locating debug stops exactly (`Tunables::debug_step_counter`).
+            ///
+            /// Compiled code increments `steps` before each operator's
+            /// breakpoint check, and calls the `debug_step_target` builtin
+            /// once `steps` reaches `target`.
+            #[derive(Debug)]
+            #[repr(C)]
+            #[snake_name = vm_debug_steps]
+            pub struct VMDebugSteps {
+                /// The number of operators executed.
+                pub steps: UnsafeCell<u64>,
+                /// The step count at which to call `debug_step_target`.
+                pub target: UnsafeCell<u64>,
             }
 
             /// The fixed-layout state shared between a record/replay guest

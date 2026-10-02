@@ -207,6 +207,8 @@ macro_rules! foreach_builtin_function {
             // Reports that `len` slots of a table starting at `index` are
             // about to be written, for record/replay checkpoints.
             table_written(vmctx: vmctx, table: u32, index: u64, len: u64) -> bool;
+            // Called when the debug step counter reaches its target.
+            debug_step_target(vmctx: vmctx) -> bool;
             // Records a call to `func` (a `VMFuncRef`) with the arguments in
             // `values`: by Wasm to the host if `host` is nonzero, otherwise
             // by the host to Wasm. Returns the call's ID for `rr_leave`, or

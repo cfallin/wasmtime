@@ -2929,6 +2929,9 @@ impl Config {
             // A replay's store is read-only to the embedder, so reading a
             // table must not have to initialize its elements.
             tunables.table_lazy_init = false;
+            // Debugging a replay can run it in reverse, which needs exact
+            // positions.
+            tunables.debug_step_counter = tunables.debug_guest;
         }
 
         // If no GC heap tunables are explicitly configured, copy the memory

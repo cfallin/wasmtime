@@ -1406,6 +1406,16 @@ fn table_written(
     Ok(())
 }
 
+/// Handles the debug step counter reaching its target: a one-shot stop,
+/// which only replay acts on.
+fn debug_step_target(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    let store = store.store_opaque_mut();
+    store.set_debug_step_target(u64::MAX);
+    #[cfg(feature = "rr")]
+    store.rr_step_target_reached();
+    Ok(())
+}
+
 /// Records a call across the guest boundary, for the trampolines of
 /// record/replay engines while their store records.
 fn rr_enter(
