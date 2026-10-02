@@ -1,9 +1,8 @@
 use crate::error::OutOfMemory;
 use crate::prelude::*;
 use crate::runtime::vm::{
-    self, InterpreterRef, SendSyncPtr, StoreBox, VMArrayCallHostFuncContext,
-    VMCommonStackInformation, VMContext, VMFuncRef, VMFunctionImport, VMOpaqueContext,
-    VMStoreContext,
+    self, SendSyncPtr, StoreBox, VMArrayCallHostFuncContext, VMCommonStackInformation, VMContext,
+    VMFuncRef, VMFunctionImport, VMOpaqueContext, VMStoreContext,
 };
 use crate::store::{Asyncness, AutoAssertNoGc, InstanceId, StoreId, StoreOpaque};
 use crate::type_registry::RegisteredType;
@@ -1028,9 +1027,7 @@ impl Func {
     ) -> Result<()> {
         // SAFETY: the safety of this function call is the same as the contract
         // of this function.
-        invoke_wasm_and_catch_traps(store, |caller, vm| unsafe {
-            VMFuncRef::array_call(func_ref, vm, caller, params_and_returns)
-        })
+        unsafe { invoke_wasm_and_catch_traps(store, func_ref, None, params_and_returns) }
     }
 
     /// Converts the raw representation of a `funcref` into an `Option<Func>`
@@ -1446,17 +1443,23 @@ impl Func {
     }
 }
 
-/// Prepares for entrance into WebAssembly.
+/// Enters WebAssembly, calling `func_ref` with the array calling convention
+/// from `caller` (by default, the store's default caller).
 ///
-/// This function will set up context such that `closure` is allowed to call a
-/// raw trampoline or a raw WebAssembly function. This *must* be called to do
-/// things like catch traps and set up GC properly.
+/// This *must* be used to enter WebAssembly from the host, to do things like
+/// catch traps and set up GC properly. It is the only entry from the host into
+/// Wasm, and thus where entry and exit state transitions, such as
+/// record/replay boundaries, are managed.
 ///
-/// The `closure` provided receives a default "caller" `VMContext` parameter it
-/// can pass to the called wasm function, if desired.
-pub(crate) fn invoke_wasm_and_catch_traps<T>(
+/// # Safety
+///
+/// `func_ref` must belong to the store, and `params_and_returns` must contain
+/// its initialized parameters and have room for its results.
+pub(crate) unsafe fn invoke_wasm_and_catch_traps<T>(
     store: &mut StoreContextMut<'_, T>,
-    closure: impl FnMut(NonNull<VMContext>, Option<InterpreterRef<'_>>) -> bool,
+    func_ref: NonNull<VMFuncRef>,
+    caller: Option<NonNull<VMContext>>,
+    params_and_returns: NonNull<[ValRaw]>,
 ) -> Result<()> {
     // The `enter_wasm` call below will reset the store context's
     // `stack_chain` to a new `InitialStack`, pointing to the
@@ -1472,7 +1475,13 @@ pub(crate) fn invoke_wasm_and_catch_traps<T>(
         // `previous_runtime_state` implicitly dropped here
         return Err(trap);
     }
-    let result = crate::runtime::vm::catch_traps(store, &mut previous_runtime_state, closure);
+    let result =
+        crate::runtime::vm::catch_traps(store, &mut previous_runtime_state, |default, vm| {
+            // SAFETY: this function's contract.
+            unsafe {
+                VMFuncRef::array_call(func_ref, vm, caller.unwrap_or(default), params_and_returns)
+            }
+        });
     #[cfg(feature = "component-model")]
     if result.is_err() {
         store.0.set_trapped();
