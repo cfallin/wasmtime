@@ -299,7 +299,11 @@ impl GcRootIndex {
                 None
             }
         } else if let Some(id) = self.index.as_owned() {
-            let gc_ref = store.gc_roots().owned_rooted.get(id);
+            let roots = store.gc_roots();
+            if self.generation != roots.owned_epoch {
+                return None;
+            }
+            let gc_ref = roots.owned_rooted.get(id);
             debug_assert!(gc_ref.is_some());
             gc_ref
         } else {
@@ -459,6 +463,11 @@ pub(crate) struct RootSet {
     /// Generation counter for entries to prevent ABA bugs with `RootScope` and
     /// `Rooted<T>`.
     lifo_generation: u32,
+
+    /// The epoch of valid `OwnedRooted<T>`s, stored in their (otherwise
+    /// unused) `GcRootIndex::generation`. Record/replay checkpoint restores
+    /// replace the GC heap and advance it, invalidating every owned root.
+    owned_epoch: u32,
 }
 
 #[derive(Debug)]
@@ -484,6 +493,25 @@ impl RootSet {
             }
         }
         log::trace!("End trace user owned roots");
+    }
+
+    /// Invalidates every root, because the GC heap they refer into is being
+    /// replaced by a record/replay checkpoint restore. Their handles then
+    /// behave as if unrooted. The roots' slots stay in place, for the scopes
+    /// and handles that own them, but hold `i31ref`s, which the collector
+    /// ignores and which need no drop barriers.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_invalidate(&mut self) {
+        let placeholder = || VMGcRef::from_i31(crate::runtime::vm::I31::default());
+        self.lifo_generation = self.lifo_generation.wrapping_add(1);
+        for root in &mut self.lifo_roots {
+            root.generation = self.lifo_generation;
+            root.gc_ref = placeholder();
+        }
+        self.owned_epoch = self.owned_epoch.wrapping_add(1);
+        for (_id, root) in self.owned_rooted.iter_mut() {
+            *root = placeholder();
+        }
     }
 
     /// Enter a LIFO rooting scope.
@@ -1665,10 +1693,11 @@ where
         roots
             .liveness_flags
             .push((Arc::downgrade(&liveness_flag), id));
+        let generation = roots.owned_epoch;
         Ok(OwnedRooted {
             inner: GcRootIndex {
                 store_id: store.id(),
-                generation: 0,
+                generation,
                 index: PackedIndex::new_owned(id),
             },
             liveness_flag,
@@ -1962,7 +1991,11 @@ impl<T: GcRef> RootedGcRefImpl<T> for OwnedRooted<T> {
         );
 
         let id = self.inner.index.as_owned().unwrap();
-        store.gc_roots().owned_rooted.get(id)
+        let roots = store.gc_roots();
+        if self.inner.generation != roots.owned_epoch {
+            return None;
+        }
+        roots.owned_rooted.get(id)
     }
 }
 
