@@ -146,6 +146,8 @@ pub use crate::runtime::vm::vmcontext::{
     VMMemoryDefinition, VMMemoryImport, VMOpaqueContext, VMPayloads, VMStackLimits, VMStoreContext,
     VMTableImport, VMTagImport, VMWasmCallFunction, ValRaw,
 };
+#[cfg(feature = "rr")]
+pub use crate::runtime::vm::vmcontext::{VMArrayCallNative, VMReplayControl};
 #[cfg(has_custom_sync)]
 pub(crate) use sys::capi;
 

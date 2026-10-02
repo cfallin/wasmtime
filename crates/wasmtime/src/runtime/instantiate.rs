@@ -140,7 +140,18 @@ impl CompiledModule {
     pub fn wasm_to_array_trampoline(&self, signature: ModuleInternedTypeIndex) -> &[u8] {
         let key = FuncKey::WasmToArrayTrampoline(signature);
         let range = self.function_range(key);
-        self.engine_code.raw_wasm_to_array_trampoline_data(range)
+        self.engine_code.raw_store_invariant_func_data(range)
+    }
+
+    /// Get a record/replay trampoline, if present.
+    #[cfg(feature = "rr")]
+    pub fn replay_trampoline(&self, key: FuncKey) -> Option<core::ptr::NonNull<u8>> {
+        debug_assert!(key.is_store_invariant());
+        self.index.func_loc(key)?;
+        let code = self
+            .engine_code
+            .raw_store_invariant_func_data(self.function_range(key));
+        Some(core::ptr::NonNull::from(code).cast())
     }
 
     /// Lookups a defined function by a program counter value.
