@@ -429,10 +429,7 @@ debug = [
 compile-time-builtins = ['anyhow', 'dep:wasm-compose', 'dep:tempfile']
 
 # Enable support for the common base infrastructure of record/replay
-rr = [
-  "component-model",
-  "wasmtime-environ/rr"
-]
+rr = ["component-model"]
 
 # Enable support for the `Store::task_group_hook` function which registers a
 # hook to be notified when host->guest task "groups" are created, entered,
