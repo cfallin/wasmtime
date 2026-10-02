@@ -1910,11 +1910,129 @@ async fn initialization_preserves_import_aliases_across_instances() -> Result<()
     Ok(())
 }
 
+/// A guest that counts in a global and in memory, grows its memory and table
+/// part-way, and reports each step through a host function that records an
+/// event.
+const COUNTER: &str = r#"(module
+  (import "" "report" (func $report (param i32)))
+  (memory (export "memory") 1)
+  (table (export "table") 1 funcref)
+  (global $count (export "count") (mut i32) (i32.const 0))
+  (func (export "run") (param $n i32) (local $i i32)
+    (loop $l
+      (global.set $count (i32.add (global.get $count) (i32.const 1)))
+      (i32.store (i32.mul (local.get $i) (i32.const 4)) (global.get $count))
+      (if (i32.eq (local.get $i) (i32.const 2))
+        (then
+          (drop (memory.grow (i32.const 1)))
+          (drop (table.grow (ref.null func) (i32.const 3)))))
+      (call $report (local.get $i))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))))"#;
+
 #[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 struct Step(i32);
 
 impl rr::TraceEvent for Step {
     const TAG: u32 = 2;
+}
+
+fn record_counter(steps: i32) -> Result<rr::Trace> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, i: i32| {
+        rr::record_event(&mut caller, &Step(i))
+    });
+    let module = Module::new(&recording, COUNTER)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    run.call(&mut store, steps)?;
+    store.finish_recording()
+}
+
+/// The counter, memory size, and table size of the counter instance.
+fn counter_state<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> (i32, usize, u64, Vec<u8>) {
+    let instance = replayer.instances()[0];
+    let mut store = replayer.store();
+    let count = instance
+        .get_global(&mut store, "count")
+        .unwrap()
+        .get(&mut store)
+        .unwrap_i32();
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let table = instance.get_table(&mut store, "table").unwrap();
+    (
+        count,
+        memory.data_size(&store),
+        table.size(&store),
+        memory.data(&store)[..32].to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn checkpoints_rewind_guest_state_and_events() -> Result<()> {
+    let trace = record_counter(6)?;
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+    replayer.stop_at_events(true);
+
+    let initial = replayer.checkpoint()?;
+    // Stop at the reports of steps 0 and 3: before and after growth, each
+    // with the guest parked in the middle of a host call.
+    let mut checkpoints = Vec::new();
+    let mut states = Vec::new();
+    while let rr::ReplayStop::Event(_) = replayer.run().await? {
+        let step = *seen.lock().unwrap().last().unwrap();
+        if step == 0 || step == 3 {
+            checkpoints.push(replayer.checkpoint()?);
+            states.push(counter_state(&mut replayer));
+        }
+    }
+    let end = counter_state(&mut replayer);
+    assert_eq!(end.0, 6);
+    assert_eq!((end.1, end.2), (2 << 16, 4));
+    assert_eq!(states[0].0, 1);
+    assert_eq!((states[0].1, states[0].2), (1 << 16, 1));
+    assert_eq!(states[1].0, 4);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+
+    // Rewind after the end, to before growth; then jump forward past growth,
+    // back again, and replay to the end from each.
+    for &which in &[0, 1, 0, 1] {
+        replayer.restore(&checkpoints[which])?;
+        assert_eq!(counter_state(&mut replayer), states[which]);
+        seen.lock().unwrap().clear();
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+        replayer.stop_at_events(true);
+        let expected: Vec<i32> = if which == 0 {
+            (1..6).collect()
+        } else {
+            (4..6).collect()
+        };
+        assert_eq!(*seen.lock().unwrap(), expected);
+        assert_eq!(counter_state(&mut replayer), end);
+    }
+
+    // Restart from before any object existed.
+    replayer.restore(&initial)?;
+    assert!(replayer.instances().is_empty());
+    seen.lock().unwrap().clear();
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(counter_state(&mut replayer), end);
+
+    // Checkpoints only restore into their own replay.
+    drop(replayer);
+    let mut other = Store::new(store.engine(), ());
+    let mut other = other.replayer(&trace)?;
+    assert!(other.restore(&checkpoints[0]).is_err());
+    Ok(())
 }
 
 const PAGES: &str = r#"
@@ -1963,6 +2081,149 @@ fn record_pages() -> Result<rr::Trace> {
         step.call(&mut store, k)?;
     }
     store.finish_recording()
+}
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_pages() -> Result<()> {
+    let trace = record_pages()?;
+    let contents = |replayer: &mut rr::Replayer<'_, ()>| {
+        let instance = replayer.instances()[0];
+        let mut store = replayer.store();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        memory.data(&store).to_vec()
+    };
+    for page_size in [4096, 64, 1] {
+        let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+        let mut replayer = store.replayer(&trace)?;
+        replayer.set_checkpoint_page_size(page_size)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = Vec::new();
+        let mut images = Vec::new();
+        while let rr::ReplayStop::Event(_) = replayer.run().await? {
+            let checkpoint = replayer.checkpoint()?;
+            let stored = checkpoint.memory_bytes();
+            if checkpoints.is_empty() {
+                // The memory's contents so far are its tracking baseline.
+                assert_eq!(stored, 0);
+            } else {
+                // A few pages written since the previous checkpoint.
+                assert!(stored > 0 && stored <= 8 * page_size.max(16), "{stored}");
+            }
+            checkpoints.push(checkpoint);
+            images.push(contents(&mut replayer));
+        }
+        assert_eq!(checkpoints.len(), 6);
+        assert!(set_checkpoint_page_size_fails(&mut replayer));
+        let end = contents(&mut replayer);
+        assert_eq!(&end[150_000..150_003], b"xyz");
+        assert_eq!(&end[200_005..200_008], &[6; 3]);
+
+        for &which in &[3, 0, 5, 1, 4, 2, 2, 0] {
+            replayer.restore(&checkpoints[which])?;
+            assert!(
+                contents(&mut replayer) == images[which],
+                "checkpoint {which}"
+            );
+        }
+        // Replaying forward from a restored checkpoint reproduces the rest.
+        replayer.restore(&checkpoints[1])?;
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+        assert!(contents(&mut replayer) == end);
+        replayer.restore(&checkpoints[4])?;
+        assert!(contents(&mut replayer) == images[4]);
+    }
+    Ok(())
+}
+
+fn set_checkpoint_page_size_fails<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> bool {
+    replayer.set_checkpoint_page_size(128).is_err()
+}
+
+const TABLES: &str = r#"
+(module
+  (import "" "report" (func $report (param i32)))
+  (type $t (func (result i32)))
+  (table $t0 (export "table") 1000 funcref)
+  (elem (table $t0) (i32.const 0) func $f0 $f1 $f2 $f3)
+  (elem $passive func $f3 $f2 $f1)
+  (func $f0 (result i32) i32.const 0)
+  (func $f1 (result i32) i32.const 1)
+  (func $f2 (result i32) i32.const 2)
+  (func $f3 (result i32) i32.const 3)
+  (func (export "step") (param $k i32) (result i32)
+    (table.set $t0 (i32.add (i32.const 100) (local.get $k))
+      (table.get $t0 (i32.rem_u (local.get $k) (i32.const 4))))
+    (table.fill $t0 (i32.add (i32.const 500) (i32.mul (local.get $k) (i32.const 3)))
+      (ref.func $f2) (i32.const 3))
+    (table.copy $t0 $t0 (i32.add (i32.const 700) (local.get $k)) (i32.const 0) (i32.const 2))
+    (table.init $t0 $passive (i32.add (i32.const 900) (local.get $k)) (i32.const 0) (i32.const 3))
+    (if (i32.eq (local.get $k) (i32.const 2))
+      (then (drop (table.grow $t0 (ref.func $f1) (i32.const 10)))))
+    (call $report (local.get $k))
+    ;; Lazily initializes a slot of the initial segment.
+    (call_indirect $t0 (type $t) (i32.rem_u (local.get $k) (i32.const 4)))))
+"#;
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_table_slots() -> Result<()> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = Module::new(&recording, TABLES)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    for k in 0..6 {
+        step.call(&mut store, k)?;
+    }
+    let trace = store.finish_recording()?;
+
+    // The raw function references of every slot.
+    let contents = |replayer: &mut rr::Replayer<'_, ()>| {
+        let instance = replayer.instances()[0];
+        let mut store = replayer.store();
+        let table = instance.get_table(&mut store, "table").unwrap();
+        (0..table.size(&store))
+            .map(|i| match table.get(&mut store, i).unwrap() {
+                Ref::Func(f) => f.map(|f| f.to_raw(&mut store) as usize),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.stop_at_events(true);
+    let mut checkpoints = Vec::new();
+    let mut images = Vec::new();
+    while let rr::ReplayStop::Event(_) = replayer.run().await? {
+        let checkpoint = replayer.checkpoint()?;
+        let slots = checkpoint.table_bytes() / std::mem::size_of::<usize>();
+        if checkpoints.is_empty() {
+            assert_eq!(slots, 0);
+        } else {
+            // A few groups of 64 slots, not the whole table.
+            assert!(slots > 0 && slots <= 6 * 64, "{slots}");
+        }
+        checkpoints.push(checkpoint);
+        images.push(contents(&mut replayer));
+    }
+    let end = contents(&mut replayer);
+    assert_eq!(end.len(), 1010);
+    for &which in &[4, 0, 5, 1, 3, 2, 0] {
+        replayer.restore(&checkpoints[which])?;
+        assert!(
+            contents(&mut replayer) == images[which],
+            "checkpoint {which}"
+        );
+    }
+    replayer.restore(&checkpoints[1])?;
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    assert_eq!(contents(&mut replayer), end);
+    Ok(())
 }
 
 #[tokio::test]

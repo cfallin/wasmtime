@@ -97,6 +97,8 @@ pub use self::malloc::MallocMemory;
 
 mod shadow;
 pub use self::shadow::ShadowMemory;
+#[cfg(feature = "rr")]
+pub use self::shadow::WATCH_CLEAN;
 #[cfg(feature = "debug")]
 pub use self::shadow::WATCH_DEBUG;
 
@@ -320,6 +322,15 @@ impl Memory {
         match self {
             Memory::Local(mem) => mem.byte_size(),
             Memory::Shared(mem) => mem.byte_size(),
+        }
+    }
+
+    /// Resizes a non-shared memory, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize(&mut self, len: usize) -> Result<()> {
+        match self {
+            Memory::Local(mem) => mem.rr_resize(len),
+            Memory::Shared(_) => bail!("shared memories cannot be restored"),
         }
     }
 
@@ -664,6 +675,22 @@ impl LocalMemory {
         vmmemory(&*self.alloc)
     }
 
+    /// Resizes this memory to `new` bytes, for record/replay checkpoints.
+    /// Bytes beyond the old size read as zero.
+    #[cfg(feature = "rr")]
+    pub fn rr_resize(&mut self, new: usize) -> Result<()> {
+        let old = self.alloc.byte_size();
+        if new > old {
+            self.alloc.grow_to(new)?;
+        } else if new < old {
+            rr_shrink(&mut *self.alloc, new)?;
+        }
+        if let Some(shadow) = &mut self.shadow {
+            shadow.resize(new)?;
+        }
+        Ok(())
+    }
+
     /// This memory's watchpoint shadow, if compiled code checks it.
     pub fn shadow(&self) -> Option<&ShadowMemory> {
         self.shadow.as_ref()
@@ -719,6 +746,29 @@ fn vmmemory(alloc: &dyn LinearMemory) -> VMMemoryDefinition {
         base: base.into(),
         current_length: alloc.byte_size().into(),
     }
+}
+
+/// Shrinks `alloc` to `size` bytes, for record/replay checkpoints. Bytes
+/// beyond `size` read as zero after growing again, and are not accessible
+/// until then.
+///
+/// Only Wasmtime's own memories can shrink, not custom `LinearMemory`
+/// implementations.
+#[cfg(feature = "rr")]
+fn rr_shrink(alloc: &mut dyn LinearMemory, size: usize) -> Result<()> {
+    let alloc: &mut dyn core::any::Any = alloc;
+    #[cfg(has_virtual_memory)]
+    if let Some(memory) = alloc.downcast_mut::<MmapMemory>() {
+        return memory.rr_shrink_to(size);
+    }
+    #[cfg(feature = "pooling-allocator")]
+    if let Some(memory) = alloc.downcast_mut::<StaticMemory>() {
+        return memory.rr_shrink_to(size);
+    }
+    if let Some(memory) = alloc.downcast_mut::<MallocMemory>() {
+        return memory.rr_shrink_to(size);
+    }
+    bail!("this kind of linear memory cannot be restored to a smaller size")
 }
 
 /// In the configurations where bounds checks were elided in JIT code (because

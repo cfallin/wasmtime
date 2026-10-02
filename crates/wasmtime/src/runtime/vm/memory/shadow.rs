@@ -16,6 +16,11 @@ use wasmtime_environ::MemoryTunables;
 #[cfg(feature = "debug")]
 pub const WATCH_DEBUG: u8 = 1 << 0;
 
+/// A shadow bit set for each byte of a page that record/replay has not seen
+/// written since its last checkpoint.
+#[cfg(feature = "rr")]
+pub const WATCH_CLEAN: u8 = 1 << 1;
+
 /// The shadow of a linear memory: one byte per byte of the memory.
 ///
 /// The shadow is itself a linear memory, of the same type and allocated with
@@ -38,6 +43,8 @@ pub struct ShadowMemory {
     // Whether compiled code reloads the shadow's base, which otherwise must
     // never move.
     may_move: bool,
+    // The value of the bytes added when the memory grows.
+    fill: u8,
 }
 
 impl ShadowMemory {
@@ -57,6 +64,7 @@ impl ShadowMemory {
             alloc,
             definition,
             may_move: ty.memory_may_move(memory_tunables),
+            fill: 0,
         })
     }
 
@@ -87,9 +95,31 @@ impl ShadowMemory {
         self.may_move || len <= self.alloc.byte_capacity()
     }
 
+    /// Sets the value of the bytes added when the memory grows.
+    pub fn set_fill(&mut self, fill: u8) {
+        self.fill = fill;
+    }
+
     /// Follows the memory's growth to `len` bytes.
     pub(super) fn grow_to(&mut self, len: usize) -> Result<()> {
+        let old = self.byte_size();
         self.alloc.grow_to(len)?;
+        *self.definition = super::vmmemory(&*self.alloc);
+        let fill = self.fill;
+        if fill != 0 {
+            self.bytes_mut()[old..].fill(fill);
+        }
+        Ok(())
+    }
+
+    /// Follows the memory's resizing to `len` bytes, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(super) fn resize(&mut self, len: usize) -> Result<()> {
+        if len >= self.byte_size() {
+            return self.grow_to(len);
+        }
+        super::rr_shrink(&mut *self.alloc, len)?;
         *self.definition = super::vmmemory(&*self.alloc);
         Ok(())
     }

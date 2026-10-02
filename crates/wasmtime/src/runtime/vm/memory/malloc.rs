@@ -66,6 +66,23 @@ impl MallocMemory {
     }
 }
 
+impl MallocMemory {
+    /// Shrinks this memory to `new_size` bytes, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(super) fn rr_shrink_to(&mut self, new_size: usize) -> Result<()> {
+        // SAFETY: the bytes beyond `new_size` are initialized storage, and
+        // nothing borrows them.
+        unsafe {
+            self.base_ptr
+                .as_ptr()
+                .add(new_size)
+                .write_bytes(0, self.byte_len - new_size);
+        }
+        self.byte_len = new_size;
+        Ok(())
+    }
+}
+
 // SAFETY:
 // - **Valid region.** We use a Vec with at least `minimum` bytes, possibly more with 16-alignment.
 // - **Size.** Is exactly `minimum` at creation and is set to exactly `new_size` on growth.
