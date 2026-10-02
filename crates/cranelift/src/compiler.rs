@@ -710,6 +710,7 @@ impl Compiler {
                 BuiltinFunctionIndex::memory_watch_range(),
                 BuiltinFunctionIndex::new_epoch(),
                 BuiltinFunctionIndex::out_of_gas(),
+                BuiltinFunctionIndex::debug_step_target(),
             ]
             .contains(&builtin_func_index)
         {
