@@ -5,6 +5,7 @@
 
 use crate::prelude::*;
 use crate::{Trap, ValRaw, ValType};
+use core::mem::MaybeUninit;
 
 pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x09";
 pub(super) const END: u8 = 0;
@@ -52,6 +53,30 @@ impl Kind {
             ValType::Ref(r) if r.is_nullable() && r.heap_type().is_func() => Self::FuncRef,
             ValType::Ref(_) => Self::Unsupported,
         })
+    }
+
+    pub fn read(byte: u8) -> Result<Self> {
+        Ok(match byte {
+            0 => Self::I32,
+            1 => Self::I64,
+            2 => Self::F32,
+            3 => Self::F64,
+            4 => Self::V128,
+            5 => Self::FuncRef,
+            6 => Self::Unsupported,
+            _ => bail!("invalid value type"),
+        })
+    }
+    pub fn ty(self) -> ValType {
+        match self {
+            Self::I32 => ValType::I32,
+            Self::I64 => ValType::I64,
+            Self::F32 => ValType::F32,
+            Self::F64 => ValType::F64,
+            Self::V128 => ValType::V128,
+            Self::FuncRef => ValType::FUNCREF,
+            Self::Unsupported => unreachable!("unsupported values have no type"),
+        }
     }
 
     pub fn size(self) -> usize {
@@ -174,6 +199,22 @@ impl<'a> Reader<'a> {
         Self { bytes, position: 0 }
     }
 
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// All bytes, regardless of what has been read.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Reads all remaining bytes.
+    pub fn rest(&mut self) -> &'a [u8] {
+        let rest = &self.bytes[self.position..];
+        self.position = self.bytes.len();
+        rest
+    }
+
     pub fn take(&mut self, len: usize) -> Result<&'a [u8]> {
         let end = self
             .position
@@ -191,6 +232,9 @@ impl<'a> Reader<'a> {
     }
     pub fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    pub fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     pub fn blob(&mut self) -> Result<&'a [u8]> {
@@ -210,5 +254,61 @@ impl<'a> Reader<'a> {
             "unexpected trailing trace data"
         );
         Ok(())
+    }
+
+    fn value(
+        &mut self,
+        kind: Kind,
+        mut decode_ref: impl FnMut(u32) -> Result<ValRaw>,
+    ) -> Result<ValRaw> {
+        Ok(match kind {
+            Kind::I32 => ValRaw::u32(self.u32()?),
+            Kind::I64 => ValRaw::u64(self.u64()?),
+            Kind::F32 => ValRaw::f32(self.u32()?),
+            Kind::F64 => ValRaw::f64(self.u64()?),
+            Kind::V128 => ValRaw::v128(u128::from_le_bytes(self.take(16)?.try_into().unwrap())),
+            Kind::FuncRef => decode_ref(self.u32()?)?,
+            Kind::Unsupported => bail!(UNSUPPORTED),
+        })
+    }
+
+    pub fn values(
+        &mut self,
+        kinds: &[Kind],
+        slots: &mut [ValRaw],
+        mut decode_ref: impl FnMut(u32) -> Result<ValRaw>,
+    ) -> Result<()> {
+        ensure!(slots.len() >= kinds.len(), "not enough value slots");
+        for (kind, slot) in kinds.iter().zip(slots) {
+            *slot = self.value(*kind, &mut decode_ref)?;
+        }
+        Ok(())
+    }
+
+    pub fn outcome(
+        &mut self,
+        kinds: &[Kind],
+        slots: &mut [MaybeUninit<ValRaw>],
+        mut decode_ref: impl FnMut(u32) -> Result<ValRaw>,
+    ) -> Result<Result<()>> {
+        let result = match self.u8()? {
+            0 => {
+                ensure!(slots.len() >= kinds.len(), "not enough result slots");
+                for (kind, slot) in kinds.iter().zip(slots) {
+                    slot.write(self.value(*kind, &mut decode_ref)?);
+                }
+                Ok(())
+            }
+            1 => Err(Trap::from_u8(self.u8()?)
+                .ok_or_else(|| format_err!("invalid trace trap code"))?
+                .into()),
+            2 => {
+                let message = core::str::from_utf8(self.take(self.bytes.len() - self.position)?)?;
+                Err(format_err!("{message}"))
+            }
+            _ => bail!("invalid trace outcome"),
+        };
+        self.end()?;
+        Ok(result)
     }
 }
