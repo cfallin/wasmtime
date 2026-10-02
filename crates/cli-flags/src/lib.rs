@@ -648,24 +648,6 @@ wasmtime_option_group! {
     }
 }
 
-wasmtime_option_group! {
-    #[env = "RECORD"]
-    pub struct RecordOptions {
-        /// Filename for the recorded execution trace (or empty string to skip writing a file).
-        pub path: Option<String>,
-        /// Include (optional) signatures to facilitate validation checks during replay
-        /// (see `wasmtime replay` for details).
-        pub validation_metadata: Option<bool>,
-        /// Window size of internal buffering for record events (large windows offer more opportunities
-        /// for coalescing events at the cost of memory usage).
-        pub event_window_size: Option<usize>,
-    }
-
-    enum Record {
-        ...
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct WasiNnGraph {
     pub format: String,
@@ -750,21 +732,6 @@ pub struct CommonOptions {
     #[cfg_attr(feature = "serde", serde(skip))]
     wasi_raw: Vec<opt::CommaSeparated<Wasi>>,
 
-    /// Options to enable and configure execution recording, `-R help` to see all.
-    ///
-    /// Generates a serialized trace of the Wasm module execution that captures all
-    /// non-determinism observable by the module. This trace can subsequently be
-    /// re-executed in a deterministic, embedding-agnostic manner (see the `wasmtime replay` command).
-    ///
-    /// Note: Minimal configuration options for deterministic Wasm semantics will be
-    /// enforced during recording by default (NaN canonicalization, deterministic relaxed SIMD).
-    #[cfg_attr(
-        feature = "clap",
-        arg(short = 'R', long = "record", value_name = "KEY[=VAL[,..]]")
-    )]
-    #[cfg_attr(feature = "serde", serde(skip))]
-    record_raw: Vec<opt::CommaSeparated<Record>>,
-
     // These fields are filled in by the `configure` method below via the
     // options parsed from the CLI above. This is what the CLI should use.
     #[cfg_attr(feature = "clap", arg(skip))]
@@ -790,10 +757,6 @@ pub struct CommonOptions {
     #[cfg_attr(feature = "clap", arg(skip))]
     #[cfg_attr(feature = "serde", serde(default))]
     pub wasi: WasiOptions,
-
-    #[cfg_attr(feature = "clap", arg(skip))]
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub record: RecordOptions,
 
     /// The target triple; default is the host triple
     #[cfg_attr(feature = "clap", arg(long, value_name = "TARGET"))]
@@ -841,14 +804,12 @@ impl CommonOptions {
             debug_raw: Vec::new(),
             wasm_raw: Vec::new(),
             wasi_raw: Vec::new(),
-            record_raw: Vec::new(),
             configured: true,
             opts: Default::default(),
             codegen: Default::default(),
             debug: Default::default(),
             wasm: Default::default(),
             wasi: Default::default(),
-            record: Default::default(),
             target: None,
             config: None,
         }
@@ -868,7 +829,6 @@ impl CommonOptions {
                 self.debug = toml_options.debug;
                 self.wasm = toml_options.wasm;
                 self.wasi = toml_options.wasi;
-                self.record = toml_options.record;
             }
             #[cfg(not(feature = "toml"))]
             {
@@ -883,7 +843,6 @@ impl CommonOptions {
         self.debug.configure_with(&self.debug_raw)?;
         self.wasm.configure_with(&self.wasm_raw)?;
         self.wasi.configure_with(&self.wasi_raw)?;
-        self.record.configure_with(&self.record_raw)?;
         Ok(())
     }
 
@@ -1284,15 +1243,6 @@ impl CommonOptions {
             config.shared_memory(enable);
         }
 
-        let record = &self.record;
-        match_feature! {
-            ["rr" : &record.path]
-            _path => {
-                bail!("recording configuration for `rr` feature is not supported yet");
-            },
-            _ => err,
-        }
-
         Ok(config)
     }
 
@@ -1600,9 +1550,6 @@ impl CommonOptions {
                 wmemcheck: None,
             },
 
-            // Not currently reflected in `Engine`.
-            record: RecordOptions::default(),
-
             // WASI options aren't reflected in an `Engine`.
             wasi: Default::default(),
 
@@ -1611,7 +1558,6 @@ impl CommonOptions {
             codegen_raw: Default::default(),
             debug_raw: Default::default(),
             opts_raw: Default::default(),
-            record_raw: Default::default(),
             wasi_raw: Default::default(),
             wasm_raw: Default::default(),
 
@@ -1769,8 +1715,6 @@ impl fmt::Display for CommonOptions {
             wasm,
             wasi_raw,
             wasi,
-            record_raw,
-            record,
             configured,
             target,
             config,
@@ -1787,7 +1731,6 @@ impl fmt::Display for CommonOptions {
         let wasi_flags;
         let wasm_flags;
         let debug_flags;
-        let record_flags;
 
         if *configured {
             codegen_flags = codegen.to_options();
@@ -1795,7 +1738,6 @@ impl fmt::Display for CommonOptions {
             wasi_flags = wasi.to_options();
             wasm_flags = wasm.to_options();
             opts_flags = opts.to_options();
-            record_flags = record.to_options();
         } else {
             codegen_flags = codegen_raw
                 .iter()
@@ -1806,11 +1748,6 @@ impl fmt::Display for CommonOptions {
             wasi_flags = wasi_raw.iter().flat_map(|t| t.0.iter()).cloned().collect();
             wasm_flags = wasm_raw.iter().flat_map(|t| t.0.iter()).cloned().collect();
             opts_flags = opts_raw.iter().flat_map(|t| t.0.iter()).cloned().collect();
-            record_flags = record_raw
-                .iter()
-                .flat_map(|t| t.0.iter())
-                .cloned()
-                .collect();
         }
 
         for flag in codegen_flags {
@@ -1827,9 +1764,6 @@ impl fmt::Display for CommonOptions {
         }
         for flag in debug_flags {
             write!(f, "-D{flag} ")?;
-        }
-        for flag in record_flags {
-            write!(f, "-R{flag} ")?;
         }
 
         Ok(())

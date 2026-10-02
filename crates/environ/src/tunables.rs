@@ -155,8 +155,7 @@ define_tunables! {
         /// store, for watchpoints (see `VMDefinedShadowMemory`).
         pub memory_watchpoints: bool,
 
-        /// Whether recording in RR is enabled or not. This is used primarily
-        /// to signal checksum computation for compiled artifacts.
+        /// Whether recording in RR is enabled or not.
         pub recording: bool,
 
         /// Whether compiled stack-switching instructions must emit the
