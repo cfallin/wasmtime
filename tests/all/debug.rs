@@ -1697,3 +1697,87 @@ async fn take_exception_in_debug_handler() -> Result<()> {
         }
     }
 }
+
+/// Records each watchpoint hit, with the watched memory's first 64 bytes as
+/// the handler sees them.
+#[derive(Clone, Default)]
+struct WatchRecorder(Arc<Mutex<Vec<(u64, u64, Option<u128>, Vec<u8>)>>>);
+
+impl DebugHandler for WatchRecorder {
+    type Data = ();
+    fn handle(
+        &self,
+        store: StoreContextMut<'_, ()>,
+        event: DebugEvent<'_>,
+    ) -> impl Future<Output = ()> + Send {
+        if let DebugEvent::Watchpoint(hit) = event {
+            let memory = hit.memory.data(&store)[..64].to_vec();
+            self.0
+                .lock()
+                .unwrap()
+                .push((hit.address, hit.len, hit.value, memory));
+        }
+        async {}
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn watchpoints_report_writes_before_they_happen() -> wasmtime::Result<()> {
+    let (module, mut store) = get_module_and_store(
+        |_| {},
+        r#"
+    (module
+      (memory (export "memory") 1)
+      (func (export "main")
+        (i32.store offset=16 (i32.const 0) (i32.const 0x11223344))
+        (i64.store (i32.const 24) (i64.const -1))
+        (v128.store (i32.const 32) (v128.const i64x2 1 2))
+        (f32.store (i32.const 48) (f32.const 1.5))
+        (i32.store8 (i32.const 100) (i32.const 7))
+        (memory.fill (i32.const 40) (i32.const 0xaa) (i32.const 8))))
+    "#,
+    )?;
+    let recorder = WatchRecorder::default();
+    store.set_debug_handler(recorder.clone());
+    let instance = Instance::new_async(&mut store, &module, &[]).await?;
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    let main = instance.get_typed_func::<(), ()>(&mut store, "main")?;
+
+    // Watch [17, 52): the i32 store overlaps it partially, and the store to
+    // byte 100 not at all.
+    memory.debug_watch(&mut store, 17..52, true)?;
+    main.call_async(&mut store, ()).await?;
+    {
+        let hits = recorder.0.lock().unwrap();
+        let summary = hits
+            .iter()
+            .map(|(address, len, value, _)| (*address, *len, *value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (16, 4, Some(0x11223344)),
+                (24, 8, Some(u128::from(u64::MAX))),
+                (32, 16, Some((2 << 64) | 1)),
+                (48, 4, Some(u128::from(1.5_f32.to_bits()))),
+                (40, 8, None),
+            ]
+        );
+        // Each hit is reported before its write.
+        assert_eq!(&hits[0].3[16..20], &[0; 4]);
+        assert_eq!(&hits[1].3[16..20], &0x11223344_u32.to_le_bytes());
+        assert_eq!(&hits[4].3[40..48], &2_u64.to_le_bytes());
+    }
+    assert_eq!(&memory.data(&store)[40..48], &[0xaa; 8]);
+
+    // Unwatched bytes no longer report writes.
+    recorder.0.lock().unwrap().clear();
+    memory.debug_watch(&mut store, 0..64, false)?;
+    main.call_async(&mut store, ()).await?;
+    assert!(recorder.0.lock().unwrap().is_empty());
+
+    // Watches must be within the memory.
+    assert!(memory.debug_watch(&mut store, 0..65537, true).is_err());
+    Ok(())
+}

@@ -246,6 +246,15 @@ macro_rules! for_each_vmctx_type {
                     array {
                         runtime_data_lengths[num_runtime_data; RuntimeDataIndex]: u32
                     }
+
+                    // Last, so that it does not move any other field.
+                    align { ptr }
+
+                    array {
+                        #[readonly]
+                        #[can_move]
+                        memory_shadows[num_memories; MemoryIndex]: VmPtr<VMMemoryShadow>
+                    }
                 }
             }
 

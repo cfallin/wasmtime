@@ -170,6 +170,12 @@ macro_rules! foreach_builtin_function {
 
             // Process a debug breakpoint.
             breakpoint(vmctx: vmctx) -> bool;
+            // Handles a store of `len` bytes, whose bits are `lo` and `hi`, to
+            // watched bytes of a linear memory, before the store.
+            memory_watch_store(vmctx: vmctx, memory: u32, addr: u64, len: u32, lo: u64, hi: u64) -> bool;
+            // Handles a bulk write (`memory.{fill,copy,init}`) of `len` bytes
+            // to a linear memory, before it, if any of the bytes are watched.
+            memory_watch_range(vmctx: vmctx, memory: u32, addr: u64, len: u64) -> bool;
         }
     };
 }

@@ -315,6 +315,7 @@ impl Metadata<'_> {
             inlining_sum_size_threshold,
             concurrency_support,
             recording,
+            memory_watchpoints,
 
             // This doesn't affect compilation, it's just a runtime setting.
             memory_reservation_for_growth: _,
@@ -423,6 +424,11 @@ impl Metadata<'_> {
             "concurrency support",
         )?;
         Self::check_bool(recording, other.recording, "RR recording support")?;
+        Self::check_bool(
+            memory_watchpoints,
+            other.memory_watchpoints,
+            "memory watchpoint support",
+        )?;
         Self::check_inlining(inlining, other.inlining)?;
         Self::check_int(
             gc_heap_reservation,

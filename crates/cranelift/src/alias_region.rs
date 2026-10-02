@@ -27,8 +27,8 @@ use cranelift_codegen::{
 use std::hash::{Hash as _, Hasher};
 use wasmtime_environ::{
     BuiltinFunctionIndex, DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, GetPtrSize,
-    ModuleInternedTypeIndex, NUM_COMPONENT_CONTEXT_SLOTS, PtrSize as _, RuntimeDataIndex,
-    StaticModuleIndex, VMOffsets, VmctxArrayIndex as _,
+    MemoryIndex, ModuleInternedTypeIndex, NUM_COMPONENT_CONTEXT_SLOTS, PtrSize as _,
+    RuntimeDataIndex, StaticModuleIndex, VMOffsets, VmctxArrayIndex as _,
     component::{
         ComponentBuiltinFunctionIndex, LoweredIndex, ResourceIndex, RuntimeCallbackIndex,
         RuntimeComponentInstanceIndex, RuntimeMemoryIndex, RuntimePostReturnIndex,
@@ -80,6 +80,7 @@ enum VmType {
     BuiltinFunctionsArray,
     ComponentBuiltinFunctionsArray,
     HostValRaw,
+    VMMemoryShadow,
 }
 
 /// A key that uniquely identifies an alias region across an entire compilation.
@@ -156,6 +157,9 @@ enum AliasRegionKey {
 
     /// An access of the bytes inside a data segment.
     DataSegment,
+
+    /// An access of the shadow bytes of a linear memory (`VMMemoryShadow`).
+    MemoryShadow,
 }
 
 impl AliasRegionKey {
@@ -286,6 +290,7 @@ impl fmt::Debug for AliasRegionKey {
             AliasRegionKey::UnsafeIntrinsicMemory => write!(f, "UnsafeIntrinsicMemory"),
             AliasRegionKey::ElementSegment => write!(f, "ElementSegment"),
             AliasRegionKey::DataSegment => write!(f, "DataSegment"),
+            AliasRegionKey::MemoryShadow => write!(f, "MemoryShadow"),
         }
     }
 }
@@ -1327,6 +1332,12 @@ where
     /// `memory.init` and `array.{new,init}_data`).
     pub fn data_segment_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::DataSegment)
+    }
+
+    /// Get the alias region for the shadow bytes of linear memories, which
+    /// watchpoint checks read before stores.
+    pub fn memory_shadow_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
+        self.region(func, AliasRegionKey::MemoryShadow)
     }
 }
 
