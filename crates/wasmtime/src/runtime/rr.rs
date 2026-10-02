@@ -40,64 +40,7 @@ mod codec;
 pub(crate) mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
-pub use replay::{Checkpoint, ReplayStop, Replayer};
-
-/// The SHA-256 checksum of a core module's bytecode, by which traces
-/// identify the modules they instantiate.
-pub type Checksum = [u8; 32];
-
-/// Returns the core modules that `engine` compiles from `wasm`, with their
-/// checksums. `wasm` is a core module or a component, in the binary or (with
-/// the `wat` feature) text format. A core module is returned as is. A
-/// component's modules are those nested in it, at any depth, and the adapter
-/// modules that Wasmtime generates for it, which depend on the engine's
-/// configuration.
-///
-/// A trace refers to the modules it instantiates by these checksums, so this
-/// can be used to find or package the bytecode that replaying it requires.
-pub fn core_modules(engine: &crate::Engine, wasm: &[u8]) -> Result<Vec<(Checksum, Vec<u8>)>> {
-    #[cfg(feature = "wat")]
-    let parsed = wat::parse_bytes(wasm).map_err(|e| format_err!("{e}"))?;
-    #[cfg(feature = "wat")]
-    let wasm = &*parsed;
-    let checksum = |wasm: &[u8]| *wasmtime_environ::WasmChecksum::from_binary(wasm, true);
-    if !wasmparser::Parser::is_component(wasm) {
-        return Ok(vec![(checksum(wasm), wasm.to_vec())]);
-    }
-    #[cfg(all(
-        feature = "component-model",
-        any(feature = "cranelift", feature = "winch")
-    ))]
-    {
-        use wasmtime_environ::ScopeVec;
-        use wasmtime_environ::component::{ComponentTypesBuilder, Translator};
-        // Translate the component as compilation would, which generates its
-        // adapter modules, without compiling it.
-        let scope = ScopeVec::new();
-        let mut validator = wasmparser::Validator::new_with_features(engine.features());
-        let mut types = ComponentTypesBuilder::new(&validator);
-        let (_, translations) =
-            Translator::new(engine.tunables(), &mut validator, &mut types, &scope)
-                .translate(wasm)?;
-        Ok(translations
-            .values()
-            .map(|t| (checksum(t.wasm), t.wasm.to_vec()))
-            .collect())
-    }
-    #[cfg(not(all(
-        feature = "component-model",
-        any(feature = "cranelift", feature = "winch")
-    )))]
-    {
-        let _ = engine;
-        bail!("finding the core modules of a component requires component-model and a compiler")
-    }
-}
-
-/// Formats a checksum as hexadecimal, as in file names and messages.
-pub fn checksum_hex(checksum: &Checksum) -> String {
-    checksum.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use replay::{Checkpoint, ReplayPosition, ReplayStop, Replayer};
 
 /// Core instances constructed while replaying initialization.
 ///
@@ -237,6 +180,63 @@ impl EventSink {
     }
 }
 
+/// The SHA-256 checksum of a core module's bytecode, by which traces
+/// identify the modules they instantiate.
+pub type Checksum = [u8; 32];
+
+/// Returns the core modules that `engine` compiles from `wasm`, with their
+/// checksums. `wasm` is a core module or a component, in the binary or (with
+/// the `wat` feature) text format. A core module is returned as is. A
+/// component's modules are those nested in it, at any depth, and the adapter
+/// modules that Wasmtime generates for it, which depend on the engine's
+/// configuration.
+///
+/// A trace refers to the modules it instantiates by these checksums, so this
+/// can be used to find or package the bytecode that replaying it requires.
+pub fn core_modules(engine: &crate::Engine, wasm: &[u8]) -> Result<Vec<(Checksum, Vec<u8>)>> {
+    #[cfg(feature = "wat")]
+    let parsed = wat::parse_bytes(wasm).map_err(|e| format_err!("{e}"))?;
+    #[cfg(feature = "wat")]
+    let wasm = &*parsed;
+    let checksum = |wasm: &[u8]| *wasmtime_environ::WasmChecksum::from_binary(wasm, true);
+    if !wasmparser::Parser::is_component(wasm) {
+        return Ok(vec![(checksum(wasm), wasm.to_vec())]);
+    }
+    #[cfg(all(
+        feature = "component-model",
+        any(feature = "cranelift", feature = "winch")
+    ))]
+    {
+        use wasmtime_environ::ScopeVec;
+        use wasmtime_environ::component::{ComponentTypesBuilder, Translator};
+        // Translate the component as compilation would, which generates its
+        // adapter modules, without compiling it.
+        let scope = ScopeVec::new();
+        let mut validator = wasmparser::Validator::new_with_features(engine.features());
+        let mut types = ComponentTypesBuilder::new(&validator);
+        let (_, translations) =
+            Translator::new(engine.tunables(), &mut validator, &mut types, &scope)
+                .translate(wasm)?;
+        Ok(translations
+            .values()
+            .map(|t| (checksum(t.wasm), t.wasm.to_vec()))
+            .collect())
+    }
+    #[cfg(not(all(
+        feature = "component-model",
+        any(feature = "cranelift", feature = "winch")
+    )))]
+    {
+        let _ = engine;
+        bail!("finding the core modules of a component requires component-model and a compiler")
+    }
+}
+
+/// Formats a checksum as hexadecimal, as in file names and messages.
+pub fn checksum_hex(checksum: &Checksum) -> String {
+    checksum.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// A complete execution trace, including object construction and startup.
 ///
 /// Traces refer to the modules they instantiate only by [`Checksum`]; see
@@ -364,6 +364,13 @@ enum Mode {
         interrupt: Option<Arc<core::sync::atomic::AtomicBool>>,
         // Whether the running activation's debug stop is for an interrupt.
         interrupted: bool,
+        // Whether the running activation's debug stop is for a step target.
+        step_target: bool,
+        // Memory watchpoints set or cleared during replay, by memory ID, in
+        // order, so that they apply to memories replay creates again after a
+        // checkpoint from before the memory existed is restored.
+        #[cfg(feature = "debug")]
+        watches: Vec<(usize, Range<u64>, bool)>,
     },
 }
 
@@ -413,6 +420,23 @@ impl State {
 }
 
 impl Session {
+    /// Applies the watchpoints recorded during replay to memories with IDs
+    /// from `first`, which replay has just created.
+    #[cfg(feature = "debug")]
+    fn apply_watches(&self, store: &mut StoreOpaque, first: usize) {
+        let Mode::Replaying { watches, .. } = &self.mode else {
+            return;
+        };
+        for (id, range, watch) in watches {
+            if let Some(memory) = self.objects.memories.get(*id).filter(|_| *id >= first) {
+                // The part beyond the memory's current size is not watched.
+                let len = u64::try_from(memory.internal_data_size(store)).unwrap_or(u64::MAX);
+                let range = range.start.min(len)..range.end.min(len);
+                let _ = store.debug_set_watch(*memory, range, *watch);
+            }
+        }
+    }
+
     /// The bytecode provided for the module with `checksum`, during replay.
     fn bytecode(&self, checksum: &Checksum) -> Result<&[u8]> {
         let Mode::Replaying { bytecode, .. } = &self.mode else {
@@ -723,6 +747,42 @@ impl StoreOpaque {
                     core::ops::ControlFlow::Continue(())
                 })
             };
+        }
+    }
+
+    /// Records a watchpoint change on `memory` during replay (see
+    /// `Mode::Replaying::watches`).
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_note_watch(
+        &mut self,
+        memory: Memory,
+        range: Range<u64>,
+        watch: bool,
+    ) -> Result<()> {
+        if !self.rr.active() || self.rr.recording() {
+            return Ok(());
+        }
+        let key = memory.rr_key(self);
+        let session = self.rr_session();
+        let Some(&id) = session.objects.memories_by_key.get(&key) else {
+            return Ok(());
+        };
+        let Mode::Replaying { watches, .. } = &mut session.mode else {
+            unreachable!()
+        };
+        watches.try_reserve(1)?;
+        watches.push((id, range, watch));
+        Ok(())
+    }
+
+    /// Requests that the running replay activation, if any, stop because the
+    /// debug step counter reached its target.
+    pub(crate) fn rr_step_target_reached(&mut self) {
+        if self.rr_debug_stop() {
+            let Mode::Replaying { step_target, .. } = &mut self.rr_session().mode else {
+                unreachable!()
+            };
+            *step_target = true;
         }
     }
 

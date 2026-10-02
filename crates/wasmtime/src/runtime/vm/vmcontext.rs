@@ -481,6 +481,20 @@ wasmtime_environ::for_each_vm_type!(define_vm_types);
 // individually implements `VmSafe`, which satisfies the requirements of this
 // trait.
 unsafe impl VmSafe for VMMemoryDefinition {}
+unsafe impl VmSafe for VMDebugSteps {}
+// SAFETY: as for `VMStoreContext`, only the store's thread accesses these
+// counters.
+unsafe impl Send for VMDebugSteps {}
+unsafe impl Sync for VMDebugSteps {}
+
+impl Default for VMDebugSteps {
+    fn default() -> VMDebugSteps {
+        VMDebugSteps {
+            steps: UnsafeCell::new(0),
+            target: UnsafeCell::new(u64::MAX),
+        }
+    }
+}
 
 impl VMMemoryDefinition {
     /// Return the current length (in bytes) of the [`VMMemoryDefinition`] by
@@ -1052,6 +1066,7 @@ impl Default for VMStoreContext {
             lazy_lenders_len: UnsafeCell::new(0),
             replay_control: None,
             recording: 0,
+            debug_steps: VmPtr::dangling(),
         }
     }
 }

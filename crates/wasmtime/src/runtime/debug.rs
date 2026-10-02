@@ -1340,7 +1340,7 @@ impl<'a> BreakpointState<'a> {
     ///
     /// Panics if `memory` does not belong to this store.
     pub fn watch(&mut self, memory: crate::Memory, range: core::ops::Range<u64>) -> Result<()> {
-        self.store.debug_set_watch(memory, range, true)
+        self.set_watch(memory, range, true)
     }
 
     /// Stops watching guest writes to the bytes in `range` of `memory`.
@@ -1357,7 +1357,21 @@ impl<'a> BreakpointState<'a> {
     ///
     /// Panics if `memory` does not belong to this store.
     pub fn unwatch(&mut self, memory: crate::Memory, range: core::ops::Range<u64>) -> Result<()> {
-        self.store.debug_set_watch(memory, range, false)
+        self.set_watch(memory, range, false)
+    }
+
+    fn set_watch(
+        &mut self,
+        memory: crate::Memory,
+        range: core::ops::Range<u64>,
+        watch: bool,
+    ) -> Result<()> {
+        self.store.debug_set_watch(memory, range.clone(), watch)?;
+        // Watchpoints apply to the replay's whole timeline, including after
+        // restoring a checkpoint from before this memory was created.
+        #[cfg(feature = "rr")]
+        self.store.rr_note_watch(memory, range, watch)?;
+        Ok(())
     }
 }
 
