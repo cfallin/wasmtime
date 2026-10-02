@@ -127,7 +127,7 @@ pub enum RRConfig {
     /// Stores can record with `Store::start_recording`.
     Recording,
     #[cfg(feature = "rr")]
-    /// Stores can replay recordings.
+    /// Stores can replay with `Store::replay`.
     Replaying,
     /// Record/replay is disabled.
     None,
@@ -2833,6 +2833,13 @@ impl Config {
             #[cfg(feature = "rr")]
             RRConfig::Recording | RRConfig::Replaying => {
                 self.validate_rr_determinism_conflicts()?;
+                // Replay suspends guest code on raw fibers containing only
+                // native generated code; the interpreter is Rust code.
+                if matches!(self.rr_config, RRConfig::Replaying)
+                    && self.compiler_target().is_pulley()
+                {
+                    bail!("record/replay replay requires a native compilation target");
+                }
             }
             RRConfig::None => {}
         };
@@ -3684,11 +3691,12 @@ impl Config {
         Ok(())
     }
 
-    /// Enables recording (`Store::start_recording`) or replay.
+    /// Enables recording (`Store::start_recording`) or replay (`Store::replay`).
     ///
     /// This feature is experimental. Unless explicitly configured otherwise,
     /// this enables NaN canonicalization and deterministic relaxed SIMD;
     /// explicitly disabling either makes engine creation fail.
+    /// [`RRConfig::Replaying`] requires a native (non-Pulley) target.
     #[inline]
     pub fn rr(&mut self, cfg: RRConfig) -> &mut Self {
         self.rr_config = cfg;
