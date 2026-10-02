@@ -1,6 +1,7 @@
 //! A type-erased trait wrapping the `Debugger<T>` to permit its use
 //! within a resource.
 
+use crate::DebuggeeStore;
 use crate::host::wit;
 use crate::host::{
     api::{Memory, WasmException, WasmValue},
@@ -9,8 +10,8 @@ use crate::host::{
 #[cfg(feature = "threads")]
 use std::sync::atomic::{AtomicU8, Ordering};
 use wasmtime::{
-    Engine, ExnRef, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance, Module,
-    OwnedRooted, Result, Table, Tag, TagType, ValType,
+    AsContext, Engine, ExnRef, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance,
+    Module, OwnedRooted, Result, Table, Tag, TagType, ValType,
 };
 
 #[cfg(feature = "threads")]
@@ -49,6 +50,32 @@ fn shared_memory_write_bytes(
         unsafe { AtomicU8::from_ptr(byte.get()).store(*value, Ordering::Relaxed) };
     }
     Some(())
+}
+
+/// Writes `bytes` at `addr` in `memory`, returning `None` if that is out of
+/// bounds. Fails for a replay, whose memories are read-only.
+fn write_bytes<T>(
+    store: &mut DebuggeeStore<'_, T>,
+    memory: Memory,
+    addr: u64,
+    bytes: &[u8],
+) -> Result<Option<()>> {
+    match memory {
+        Memory::Unshared(memory) => {
+            let store = store.store_mut().ok_or(wit::Error::ReadOnly)?;
+            let data = memory.data_mut(store);
+            let range = usize::try_from(addr)
+                .ok()
+                .and_then(|addr| Some(addr..addr.checked_add(bytes.len())?));
+            let Some(dest) = range.and_then(|range| data.get_mut(range)) else {
+                return Ok(None);
+            };
+            dest.copy_from_slice(bytes);
+            Ok(Some(()))
+        }
+        #[cfg(feature = "threads")]
+        Memory::Shared(memory) => Ok(shared_memory_write_bytes(&memory, addr, bytes)),
+    }
 }
 
 /// Type-erased interface to the `Debugger<T>` implementing all
@@ -167,22 +194,24 @@ pub(crate) trait OpaqueDebugger {
 #[async_trait::async_trait]
 impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     async fn all_instances(&mut self) -> Result<Vec<Instance>> {
-        self.with_store(|store| store.debug_all_instances()).await
+        self.with_store(|store| store.as_context().debug_all_instances())
+            .await
     }
 
     async fn all_modules(&mut self) -> Result<Vec<Module>> {
-        self.with_store(|store| store.debug_all_modules()).await
+        self.with_store(|store| store.as_context().debug_all_modules())
+            .await
     }
 
     async fn single_step(&mut self) -> Result<crate::DebugRunResult> {
-        self.with_store(|store| store.edit_breakpoints().unwrap().single_step(true).unwrap())
+        self.with_store(|mut store| store.edit_breakpoints().unwrap().single_step(true).unwrap())
             .await?;
 
         self.run().await
     }
 
     async fn continue_(&mut self) -> Result<crate::DebugRunResult> {
-        self.with_store(|store| {
+        self.with_store(|mut store| {
             store
                 .edit_breakpoints()
                 .unwrap()
@@ -205,8 +234,7 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn exit_frames(&mut self) -> Result<Vec<FrameHandle>> {
-        self.with_store(|mut store| store.debug_exit_frames().collect::<Vec<_>>())
-            .await
+        self.with_store(|mut store| store.debug_exit_frames()).await
     }
 
     async fn get_instance_module(&mut self, instance: Instance) -> Result<Module> {
@@ -219,12 +247,12 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         instance: Instance,
         idx: u32,
     ) -> Result<Option<Memory>> {
-        self.with_store(move |mut store| {
-            let memory = instance.debug_memory(&mut store, idx).map(Memory::Unshared);
+        self.with_store(move |store| {
+            let memory = instance.debug_memory(&store, idx).map(Memory::Unshared);
             #[cfg(feature = "threads")]
             let memory = memory.or_else(|| {
                 instance
-                    .debug_shared_memory(&mut store, idx)
+                    .debug_shared_memory(&store, idx)
                     .map(Memory::Shared)
             });
             memory
@@ -237,22 +265,22 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         instance: Instance,
         idx: u32,
     ) -> Result<Option<Global>> {
-        self.with_store(move |mut store| instance.debug_global(&mut store, idx))
+        self.with_store(move |store| instance.debug_global(&store, idx))
             .await
     }
 
     async fn instance_get_table(&mut self, instance: Instance, idx: u32) -> Result<Option<Table>> {
-        self.with_store(move |mut store| instance.debug_table(&mut store, idx))
+        self.with_store(move |store| instance.debug_table(&store, idx))
             .await
     }
 
     async fn instance_get_func(&mut self, instance: Instance, idx: u32) -> Result<Option<Func>> {
-        self.with_store(move |mut store| instance.debug_function(&mut store, idx))
+        self.with_store(move |mut store| store.debug_function(instance, idx))
             .await
     }
 
     async fn instance_get_tag(&mut self, instance: Instance, idx: u32) -> Result<Option<Tag>> {
-        self.with_store(move |mut store| instance.debug_tag(&mut store, idx))
+        self.with_store(move |store| instance.debug_tag(&store, idx))
             .await
     }
 
@@ -287,7 +315,7 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
             let delta_pages = delta_bytes / page_size;
             let old_pages = match memory {
                 Memory::Unshared(memory) => memory
-                    .grow(&mut store, delta_pages)
+                    .grow(store.store_mut().ok_or(wit::Error::ReadOnly)?, delta_pages)
                     .map_err(|_| wit::Error::MemoryGrowFailure)?,
                 #[cfg(feature = "threads")]
                 Memory::Shared(memory) => memory
@@ -325,19 +353,8 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         addr: u64,
         bytes: Vec<u8>,
     ) -> Result<Option<()>> {
-        self.with_store(move |mut store| match memory {
-            Memory::Unshared(memory) => {
-                let data = memory.data_mut(&mut store);
-                let addr = usize::try_from(addr).ok()?;
-                let end = addr.checked_add(bytes.len())?;
-                let dest = data.get_mut(addr..end)?;
-                dest.copy_from_slice(&bytes);
-                Some(())
-            }
-            #[cfg(feature = "threads")]
-            Memory::Shared(memory) => shared_memory_write_bytes(&memory, addr, &bytes),
-        })
-        .await
+        self.with_store(move |mut store| write_bytes(&mut store, memory, addr, &bytes))
+            .await?
     }
 
     async fn memory_read_u8(&mut self, memory: Memory, addr: u64) -> Result<Option<u8>> {
@@ -424,17 +441,8 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         addr: u64,
         value: u8,
     ) -> Result<Option<()>> {
-        self.with_store(move |mut store| match memory {
-            Memory::Unshared(memory) => {
-                let data = memory.data_mut(&mut store);
-                let addr = usize::try_from(addr).ok()?;
-                *data.get_mut(addr)? = value;
-                Some(())
-            }
-            #[cfg(feature = "threads")]
-            Memory::Shared(memory) => shared_memory_write_bytes(&memory, addr, &[value]),
-        })
-        .await
+        self.with_store(move |mut store| write_bytes(&mut store, memory, addr, &[value]))
+            .await?
     }
 
     async fn memory_write_u16(
@@ -443,21 +451,10 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         addr: u64,
         value: u16,
     ) -> Result<Option<()>> {
-        self.with_store(move |mut store| match memory {
-            Memory::Unshared(memory) => {
-                let data = memory.data_mut(&mut store);
-                let addr = usize::try_from(addr).ok()?;
-                let end = addr.checked_add(2)?;
-                data.get_mut(addr..end)?
-                    .copy_from_slice(&value.to_le_bytes());
-                Some(())
-            }
-            #[cfg(feature = "threads")]
-            Memory::Shared(memory) => {
-                shared_memory_write_bytes(&memory, addr, &value.to_le_bytes())
-            }
+        self.with_store(move |mut store| {
+            write_bytes(&mut store, memory, addr, &value.to_le_bytes())
         })
-        .await
+        .await?
     }
 
     async fn memory_write_u32(
@@ -466,21 +463,10 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         addr: u64,
         value: u32,
     ) -> Result<Option<()>> {
-        self.with_store(move |mut store| match memory {
-            Memory::Unshared(memory) => {
-                let data = memory.data_mut(&mut store);
-                let addr = usize::try_from(addr).ok()?;
-                let end = addr.checked_add(4)?;
-                data.get_mut(addr..end)?
-                    .copy_from_slice(&value.to_le_bytes());
-                Some(())
-            }
-            #[cfg(feature = "threads")]
-            Memory::Shared(memory) => {
-                shared_memory_write_bytes(&memory, addr, &value.to_le_bytes())
-            }
+        self.with_store(move |mut store| {
+            write_bytes(&mut store, memory, addr, &value.to_le_bytes())
         })
-        .await
+        .await?
     }
 
     async fn memory_write_u64(
@@ -489,21 +475,10 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         addr: u64,
         value: u64,
     ) -> Result<Option<()>> {
-        self.with_store(move |mut store| match memory {
-            Memory::Unshared(memory) => {
-                let data = memory.data_mut(&mut store);
-                let addr = usize::try_from(addr).ok()?;
-                let end = addr.checked_add(8)?;
-                data.get_mut(addr..end)?
-                    .copy_from_slice(&value.to_le_bytes());
-                Some(())
-            }
-            #[cfg(feature = "threads")]
-            Memory::Shared(memory) => {
-                shared_memory_write_bytes(&memory, addr, &value.to_le_bytes())
-            }
+        self.with_store(move |mut store| {
+            write_bytes(&mut store, memory, addr, &value.to_le_bytes())
         })
-        .await
+        .await?
     }
 
     async fn memory_watch(
@@ -519,7 +494,7 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
             #[cfg(feature = "threads")]
             Memory::Shared(_) => return Err(wit::Error::UnsupportedType.into()),
         };
-        self.with_store(move |store| -> Result<()> {
+        self.with_store(move |mut store| -> Result<()> {
             let size = u64::try_from(memory.data_size(&store)).unwrap();
             let end = addr
                 .checked_add(len)
@@ -542,9 +517,10 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
 
     async fn global_set(&mut self, global: Global, val: WasmValue) -> Result<()> {
         self.with_store(move |mut store| -> Result<()> {
-            let v = val.into_val(&mut store)?;
+            let store = store.store_mut().ok_or(wit::Error::ReadOnly)?;
+            let v = val.into_val(&store)?;
             global
-                .set(&mut store, v)
+                .set(store, v)
                 .map_err(|_| wit::Error::MismatchedType)?;
             Ok(())
         })
@@ -557,20 +533,29 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
 
     async fn table_get_element(&mut self, table: Table, index: u64) -> Result<WasmValue> {
         self.with_store(move |mut store| -> Result<WasmValue> {
-            let val = table
-                .get(&mut store, index)
-                .ok_or(wit::Error::OutOfBounds)?;
-            WasmValue::new(val.into())
+            if index >= table.size(&store) {
+                return Err(wit::Error::OutOfBounds.into());
+            }
+            let val = match store.store_mut() {
+                // Function tables may need to initialize the element,
+                Some(store) => table.get(store, index),
+                // which a replay's never do.
+                None => table.get_if_initialized(&store, index),
+            };
+            WasmValue::new(val.ok_or(wit::Error::OutOfBounds)?.into())
         })
         .await?
     }
 
     async fn table_set_element(&mut self, table: Table, index: u64, val: WasmValue) -> Result<()> {
         self.with_store(move |mut store| -> Result<()> {
-            let v = val.into_val(&mut store)?;
-            let r = v.ref_().ok_or(wit::Error::MismatchedType)?;
+            let store = store.store_mut().ok_or(wit::Error::ReadOnly)?;
+            let r = val
+                .into_val(&store)?
+                .ref_()
+                .ok_or(wit::Error::MismatchedType)?;
             table
-                .set(&mut store, index, r)
+                .set(store, index, r)
                 .map_err(|_| wit::Error::MismatchedType)?;
             Ok(())
         })
@@ -610,9 +595,10 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
 
     async fn tag_new(&mut self, engine: Engine, params: Vec<ValType>) -> Result<Tag> {
         self.with_store(move |mut store| {
+            let store = store.store_mut().ok_or(wit::Error::ReadOnly)?;
             let func_ty = FuncType::new(&engine, params, []);
             let tag_ty = TagType::new(func_ty);
-            Tag::new(&mut store, &tag_ty)
+            Tag::new(store, &tag_ty)
         })
         .await?
     }
@@ -639,12 +625,13 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
         fields: Vec<WasmValue>,
     ) -> Result<OwnedRooted<ExnRef>> {
         self.with_store(move |mut store| -> Result<OwnedRooted<ExnRef>> {
+            let mut store = store.store_mut().ok_or(wit::Error::ReadOnly)?;
             let exn_ty =
                 ExnType::from_tag_type(&tag.ty(&store)).expect("tag type is already validated");
             let allocator = ExnRefPre::new(&mut store, exn_ty);
             let field_vals = fields
                 .into_iter()
-                .map(|v| v.into_val(&mut store))
+                .map(|v| v.into_val(&store))
                 .collect::<Result<Vec<_>>>()?;
             let exn = ExnRef::new(&mut store, &allocator, &tag, &field_vals)
                 .map_err(|_| wit::Error::AllocFailure)?;
@@ -654,18 +641,18 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn frame_instance(&mut self, frame: FrameHandle) -> Result<Instance> {
-        self.with_store(move |mut store| -> Result<Instance> {
+        self.with_store(move |store| -> Result<Instance> {
             Ok(frame
-                .instance(&mut store)
+                .instance(&store)
                 .map_err(|_| wit::Error::InvalidFrame)?)
         })
         .await?
     }
 
     async fn frame_func_and_pc(&mut self, frame: FrameHandle) -> Result<(u32, u32)> {
-        self.with_store(move |mut store| -> Result<(u32, u32)> {
+        self.with_store(move |store| -> Result<(u32, u32)> {
             let (func, pc) = frame
-                .wasm_function_index_and_pc(&mut store)
+                .wasm_function_index_and_pc(&store)
                 .map_err(|_| wit::Error::InvalidFrame)?
                 .ok_or(wit::Error::NonWasmFrame)?;
             Ok((func.as_u32(), pc.raw()))
@@ -674,9 +661,9 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn frame_locals(&mut self, frame: FrameHandle) -> Result<Vec<WasmValue>> {
-        self.with_store(move |mut store| -> Result<Vec<WasmValue>> {
+        self.with_store(move |store| -> Result<Vec<WasmValue>> {
             let n_locals = frame
-                .num_locals(&mut store)
+                .num_locals(&store)
                 .map_err(|_| wit::Error::InvalidFrame)?;
             let mut result = vec![];
             for i in 0..n_locals {
@@ -689,9 +676,9 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn frame_stack(&mut self, frame: FrameHandle) -> Result<Vec<WasmValue>> {
-        self.with_store(move |mut store| -> Result<Vec<WasmValue>> {
+        self.with_store(move |store| -> Result<Vec<WasmValue>> {
             let n_stacks = frame
-                .num_stacks(&mut store)
+                .num_stacks(&store)
                 .map_err(|_| wit::Error::InvalidFrame)?;
             let mut result = vec![];
             for i in 0..n_stacks {
@@ -704,16 +691,14 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn frame_parent(&mut self, frame: FrameHandle) -> Result<Option<FrameHandle>> {
-        self.with_store(move |mut store| -> Result<Option<FrameHandle>> {
-            Ok(frame
-                .parent(&mut store)
-                .map_err(|_| wit::Error::InvalidFrame)?)
+        self.with_store(move |store| -> Result<Option<FrameHandle>> {
+            Ok(frame.parent(&store).map_err(|_| wit::Error::InvalidFrame)?)
         })
         .await?
     }
 
     async fn module_add_breakpoint(&mut self, module: Module, pc: u32) -> Result<()> {
-        self.with_store(move |store| -> Result<()> {
+        self.with_store(move |mut store| -> Result<()> {
             store
                 .edit_breakpoints()
                 .expect("guest debugging is enabled")
@@ -725,7 +710,7 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
     }
 
     async fn module_remove_breakpoint(&mut self, module: Module, pc: u32) -> Result<()> {
-        self.with_store(move |store| -> Result<()> {
+        self.with_store(move |mut store| -> Result<()> {
             store
                 .edit_breakpoints()
                 .expect("guest debugging is enabled")
