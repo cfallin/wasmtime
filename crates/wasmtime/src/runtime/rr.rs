@@ -272,6 +272,10 @@ enum Mode {
         // The exit `(pc, trampoline fp, entry fp)` of the activations whose
         // frames a debugger sees while replay is stopped.
         stopped: Vec<(usize, usize, usize)>,
+        // Set by the embedder to interrupt replay at the next epoch check.
+        interrupt: Option<Arc<core::sync::atomic::AtomicBool>>,
+        // Whether the running activation's debug stop is for an interrupt.
+        interrupted: bool,
     },
 }
 
@@ -345,7 +349,7 @@ impl<T: 'static> Store<T> {
     /// core/component instances may have been created in this store.
     pub fn start_recording(&mut self) -> Result<()> {
         let store = self.as_context_mut().0;
-        store.rr_validate()?;
+        store.rr_validate(true)?;
         ensure!(
             store.engine().is_recording(),
             "recording requires RRConfig::Recording"
@@ -502,6 +506,28 @@ impl StoreOpaque {
             Some(Mode::Replaying { stopped, .. }) => stopped,
             _ => &[],
         }
+    }
+
+    /// Handles an epoch deadline during replay, returning the new deadline,
+    /// or `None` when not replaying. Replay never yields, traps, or runs
+    /// callbacks at epoch deadlines: it only checks for an interrupt request,
+    /// which stops the running activation for debugging.
+    pub(crate) fn rr_replay_epoch(&mut self) -> Option<u64> {
+        let Some(Mode::Replaying { interrupt, .. }) = self.rr.session.as_deref().map(|s| &s.mode)
+        else {
+            return None;
+        };
+        let requested = interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, core::sync::atomic::Ordering::SeqCst));
+        if requested && self.rr_debug_stop() {
+            let Mode::Replaying { interrupted, .. } = &mut self.rr_session().mode else {
+                unreachable!()
+            };
+            *interrupted = true;
+        }
+        self.set_epoch_deadline(1);
+        Some(self.get_epoch_deadline())
     }
 
     /// Whether the embedder, rather than the replay driver or a replay

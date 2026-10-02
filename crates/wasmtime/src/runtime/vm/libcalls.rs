@@ -740,6 +740,11 @@ fn out_of_gas(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
 fn new_epoch(store: &mut dyn VMStore, _instance: InstanceId) -> Result<NextEpoch> {
     use crate::UpdateDeadline;
 
+    #[cfg(feature = "rr")]
+    if let Some(deadline) = store.store_opaque_mut().rr_replay_epoch() {
+        return Ok(NextEpoch(deadline));
+    }
+
     #[cfg(feature = "debug")]
     {
         store.block_on_debug_handler(crate::DebugEvent::EpochYield)?;

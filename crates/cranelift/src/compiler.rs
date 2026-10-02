@@ -681,14 +681,16 @@ impl Compiler {
             None => {}
         }
 
-        // During replay, a debug event (a breakpoint or watchpoint) stops the
-        // activation by yielding to the replay driver once the libcall has
-        // returned, so that no host frames remain on the suspended stack.
+        // During replay, a debug event (a breakpoint, watchpoint, or
+        // interrupt at an epoch check) stops the activation by yielding to
+        // the replay driver once the libcall has returned, so that no host
+        // frames remain on the suspended stack.
         if self.tunables.recording
             && [
                 BuiltinFunctionIndex::breakpoint(),
                 BuiltinFunctionIndex::memory_watch_store(),
                 BuiltinFunctionIndex::memory_watch_range(),
+                BuiltinFunctionIndex::new_epoch(),
             ]
             .contains(&builtin_func_index)
         {
