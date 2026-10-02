@@ -5,6 +5,11 @@ mod run;
 #[cfg(any(feature = "run", feature = "wizer"))]
 pub use self::run::*;
 
+#[cfg(feature = "rr")]
+mod replay;
+#[cfg(feature = "rr")]
+pub use self::replay::*;
+
 #[cfg(feature = "serve")]
 mod serve;
 #[cfg(feature = "serve")]

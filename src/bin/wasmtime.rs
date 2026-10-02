@@ -70,6 +70,10 @@ enum Subcommand {
     #[cfg(feature = "explore")]
     Explore(wasmtime_cli::commands::ExploreCommand),
 
+    /// Replays an execution recorded with `--record`.
+    #[cfg(feature = "rr")]
+    Replay(wasmtime_cli::commands::ReplayCommand),
+
     /// Serves requests from a wasi-http proxy component.
     #[cfg(feature = "serve")]
     Serve(wasmtime_cli::commands::ServeCommand),
@@ -118,6 +122,9 @@ impl Wasmtime {
 
             #[cfg(feature = "explore")]
             Subcommand::Explore(c) => c.execute(),
+
+            #[cfg(feature = "rr")]
+            Subcommand::Replay(c) => c.execute(),
 
             #[cfg(feature = "serve")]
             Subcommand::Serve(c) => c.execute(),
