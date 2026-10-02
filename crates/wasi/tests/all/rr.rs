@@ -318,3 +318,44 @@ async fn rr_p3_many_writes() -> Result<()> {
     check_replay(&recorded).await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rr_checkpoints_redeliver_output() -> Result<()> {
+    let recorded = record_p1(P1_CLI_MUCH_STDOUT, &["much", "abc", "10"]).await?;
+    let mut store = Store::new(&engine(RRConfig::Replaying), ());
+    let mut replayer = store.replayer(&recorded.trace)?;
+    let stdout = SharedBuf::default();
+    replay_output(&mut replayer, stdout.clone(), std::io::sink());
+    replayer.stop_at_events(true);
+
+    let initial = replayer.checkpoint()?;
+    let mut checkpoint = None;
+    let mut events = 0;
+    loop {
+        match replayer.run().await? {
+            ReplayStop::Event(tag) => {
+                assert_eq!(tag, <Output as wasmtime::rr::TraceEvent>::TAG);
+                events += 1;
+                if events == 4 {
+                    checkpoint = Some(replayer.checkpoint()?);
+                }
+            }
+            ReplayStop::Finished => break,
+            stop => panic!("unexpected stop {stop:?}"),
+        }
+    }
+    assert_eq!(events, 10);
+    assert_eq!(stdout.take(), "abc".repeat(10).as_bytes());
+
+    // Rewinding to after the fourth write re-delivers the remaining six.
+    replayer.restore(&checkpoint.unwrap())?;
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    assert_eq!(stdout.take(), "abc".repeat(6).as_bytes());
+
+    // Rewinding to the start re-delivers all of them.
+    replayer.restore(&initial)?;
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    assert_eq!(stdout.take(), "abc".repeat(10).as_bytes());
+    Ok(())
+}

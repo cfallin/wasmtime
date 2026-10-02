@@ -316,6 +316,7 @@ impl Metadata<'_> {
             concurrency_support,
             recording,
             memory_watchpoints,
+            table_write_tracking,
 
             // This doesn't affect compilation, it's just a runtime setting.
             memory_reservation_for_growth: _,
@@ -428,6 +429,11 @@ impl Metadata<'_> {
             memory_watchpoints,
             other.memory_watchpoints,
             "memory watchpoint support",
+        )?;
+        Self::check_bool(
+            table_write_tracking,
+            other.table_write_tracking,
+            "table write tracking",
         )?;
         Self::check_inlining(inlining, other.inlining)?;
         Self::check_int(

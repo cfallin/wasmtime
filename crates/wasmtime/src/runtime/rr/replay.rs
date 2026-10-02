@@ -30,6 +30,8 @@ use core::mem::MaybeUninit;
 use core::task::Poll;
 use wasmtime_environ::{VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED};
 
+mod checkpoint;
+pub use checkpoint::Checkpoint;
 use wasmtime_fiber::RawFiber;
 
 /// The generated code that replay activations run. It is compiled into an
@@ -87,6 +89,8 @@ impl Trampolines {
 /// A guest activation and everything its suspended fiber refers to. All of
 /// it has a stable address until the activation is disposed.
 struct Activation {
+    // Identifies this activation across checkpoints.
+    serial: u64,
     fiber: Option<RawFiber>,
     // An owned allocation (from `Box`). The fiber's generated code writes to
     // it while running, so the driver only accesses it through raw pointers
@@ -153,6 +157,8 @@ struct Driver<'a, T: 'static> {
     finished: bool,
     // Why the current `run` should return, once the current step completes.
     stop: Option<ReplayStop>,
+    next_serial: u64,
+    checkpoints: checkpoint::Checkpoints,
 }
 
 /// Replays a trace in a store, one stop at a time.
@@ -194,6 +200,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             objects: Objects::default(),
             mode: Mode::Replaying {
                 growth_failures: Vec::new(),
+                histories: Default::default(),
+                page_size: 4096,
                 embedder_access: false,
             },
             pending: Vec::new(),
@@ -214,6 +222,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 stop_at_events: false,
                 finished: false,
                 stop: None,
+                next_serial: 0,
+                checkpoints: Default::default(),
             },
         })
     }
@@ -257,6 +267,28 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             Poll::Pending
         })
         .await
+    }
+
+    /// Sets the granularity, in bytes, at which checkpoints track writes to
+    /// guest memory: a checkpoint copies each such block written since the
+    /// previous one. The default is 4096. Must be set before the first
+    /// checkpoint.
+    pub fn set_checkpoint_page_size(&mut self, size: usize) -> Result<()> {
+        ensure!(size > 0, "checkpoint page size must be nonzero");
+        let Mode::Replaying {
+            histories,
+            page_size,
+            ..
+        } = &mut self.driver.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        ensure!(
+            histories.is_empty(),
+            "checkpoint page size set after a checkpoint"
+        );
+        *page_size = size;
+        Ok(())
     }
 
     /// Also stop [`Replayer::run`] after each embedder event is replayed.
@@ -497,7 +529,7 @@ impl<T: 'static> Driver<'_, T> {
                     "guest return values or trap diverged"
                 );
                 let activation = self.activations.remove(index);
-                activation.dispose(self.store);
+                self.retire(activation);
             }
             codec::WRITE => {
                 self.require_idle(
@@ -524,6 +556,7 @@ impl<T: 'static> Driver<'_, T> {
                     end <= memory.internal_data_size(self.store),
                     "trace memory write out of bounds"
                 );
+                self.store.rr_dirty(memory, offset..end)?;
                 memory
                     .rr_data_mut(self.store)
                     .get_mut(offset..end)
@@ -632,7 +665,9 @@ impl<T: 'static> Driver<'_, T> {
             .max(range.start);
         let context =
             EntryStoreContext::rr_initial(store, stack_limit, NonNull::from(&mut *stack_info));
+        self.next_serial += 1;
         Ok(Activation {
+            serial: self.next_serial,
             fiber: Some(fiber),
             control,
             context,
@@ -663,6 +698,20 @@ impl<T: 'static> Driver<'_, T> {
             unreachable!()
         };
         growth_failures
+    }
+
+    /// Frees a completed activation, unless a checkpoint can restore it.
+    fn retire(&mut self, activation: Activation) {
+        if let Some(activation) = self.checkpoints.retire(activation) {
+            activation.dispose(self.store);
+        }
+    }
+
+    fn index_of(&self, serial: u64) -> usize {
+        self.activations
+            .iter()
+            .position(|a| a.serial == serial)
+            .unwrap()
     }
 
     /// Runs the activation at `index` until its next yield and records what it
@@ -732,10 +781,11 @@ impl<T: 'static> Driver<'_, T> {
         );
         verify_suspended_stack(fiber)?;
         // Failures from code that ran on the activation and could not return
-        // them.
+        // them, such as checkpoint tracking of host-side writes.
         if let Some(e) = store.rr.session.as_mut().unwrap().failure.take() {
             return Err(e);
         }
+        let serial = activation.serial;
         let call = activation.call;
 
         // SAFETY: the activation has yielded, and this reference does not
@@ -782,6 +832,7 @@ impl<T: 'static> Driver<'_, T> {
                 ));
             }
             VM_REPLAY_RETURNED | VM_REPLAY_TRAPPED => {
+                let index = self.index_of(serial);
                 self.activations[index].fiber.as_mut().unwrap().finish()?;
                 self.observed = Some(Observed::Complete(call, result));
             }
@@ -797,6 +848,9 @@ impl<T: 'static> Drop for Driver<'_, T> {
         // exist. Nothing runs on their fibers, and no original host
         // implementation runs during cancellation.
         while let Some(activation) = self.activations.pop() {
+            activation.dispose(self.store);
+        }
+        for activation in self.checkpoints.take_retired() {
             activation.dispose(self.store);
         }
         self.store.rr.session = None;

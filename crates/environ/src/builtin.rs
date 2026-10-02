@@ -176,6 +176,9 @@ macro_rules! foreach_builtin_function {
             // Handles a bulk write (`memory.{fill,copy,init}`) of `len` bytes
             // to a linear memory, before it, if any of the bytes are watched.
             memory_watch_range(vmctx: vmctx, memory: u32, addr: u64, len: u64) -> bool;
+            // Reports that `len` slots of a table starting at `index` are
+            // about to be written, for record/replay checkpoints.
+            table_written(vmctx: vmctx, table: u32, index: u64, len: u64) -> bool;
         }
     };
 }

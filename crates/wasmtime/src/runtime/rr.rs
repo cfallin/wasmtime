@@ -17,7 +17,7 @@
 //! under Miri, with AddressSanitizer, and with hardware-enforced shadow stacks.
 //!
 //! A [`Replayer`] replays step by step: it can stop at embedder events
-//! ([`record_event`]).
+//! ([`record_event`]), and it can take and restore [`Checkpoint`]s.
 //!
 //! Traces are private to this Wasmtime version. They contain host-supplied data
 //! and can be large; applications should impose their own storage limits.
@@ -31,9 +31,10 @@ use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
+mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
-pub use replay::{ReplayStop, Replayer};
+pub use replay::{Checkpoint, ReplayStop, Replayer};
 
 /// Core instances constructed while replaying initialization.
 ///
@@ -251,6 +252,11 @@ enum Mode {
         // Recorded guest growth failures that the running activation has yet
         // to reproduce, in order.
         growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
+        // The checkpointed contents of each memory that has been
+        // checkpointed, by `rr_key`.
+        histories: alloc::collections::BTreeMap<overlay::TrackedKey, overlay::History>,
+        // The granularity at which checkpoints track memory writes.
+        page_size: usize,
         // Whether the embedder has the store, through `Replayer::store`,
         // rather than the replay driver.
         embedder_access: bool,
@@ -499,6 +505,70 @@ impl StoreOpaque {
         }
     }
 
+    /// Records that `range` of `memory` is about to be written during replay,
+    /// for checkpoints.
+    pub(crate) fn rr_dirty(&mut self, memory: Memory, range: Range<usize>) -> Result<()> {
+        if range.is_empty() {
+            return Ok(());
+        }
+        self.rr_with_history(overlay::Tracked::Memory(memory), |history, memory| {
+            history.write(memory, range)
+        })
+        .map(|_| ())
+    }
+
+    /// Records that `len` slots of `table` starting at `index` are about to be
+    /// written during replay, for checkpoints. Slots beyond the table's size
+    /// are being added by growth.
+    pub(crate) fn rr_table_dirty(
+        &mut self,
+        table: crate::Table,
+        index: u64,
+        len: u64,
+    ) -> Result<()> {
+        if len == 0 || !self.rr.active() || self.rr.recording() {
+            return Ok(());
+        }
+        let size = table.rr_slot_size(self);
+        let start = usize::try_from(index).unwrap_or(usize::MAX);
+        let end = start.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+        let range = start.saturating_mul(size)..end.saturating_mul(size);
+        self.rr_with_history(overlay::Tracked::Table(table), |history, table| {
+            history.write(table, range)
+        })
+        .map(|_| ())
+    }
+
+    /// Runs `f` on the checkpoint history of `object`, if it has one. The
+    /// history is detached from the session meanwhile.
+    fn rr_with_history<R>(
+        &mut self,
+        object: overlay::Tracked,
+        f: impl FnOnce(&mut overlay::History, &mut dyn overlay::TrackedMemory) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let key = object.key(self);
+        let Some(Mode::Replaying { histories, .. }) =
+            self.rr.session.as_deref_mut().map(|s| &mut s.mode)
+        else {
+            return Ok(None);
+        };
+        let Some(mut history) = histories.remove(&key) else {
+            return Ok(None);
+        };
+        let result = f(
+            &mut history,
+            &mut overlay::StoreObject {
+                store: self,
+                object,
+            },
+        );
+        let Mode::Replaying { histories, .. } = &mut self.rr_session().mode else {
+            unreachable!()
+        };
+        histories.insert(key, history);
+        result.map(Some)
+    }
+
     /// Whether replay must fail this guest growth because it failed when it
     /// was recorded. Called before attempting the growth.
     pub(crate) fn rr_replay_growth_fails(&mut self, object: &Growable, delta: u64) -> Result<bool> {
@@ -708,7 +778,14 @@ impl StoreOpaque {
     }
 
     pub(crate) fn rr_track_memory(&mut self, memory: Memory, range: Range<usize>) {
-        if !self.rr.recording() || range.is_empty() {
+        if !self.rr.active() || range.is_empty() {
+            return;
+        }
+        if !self.rr.recording() {
+            // Replay reproduces the write, but checkpoints must see it.
+            if let Err(e) = self.rr_dirty(memory, range) {
+                self.rr.fail(e);
+            }
             return;
         }
         let Some(id) = self.rr_memory_id(memory) else {

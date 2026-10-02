@@ -828,6 +828,15 @@ impl Memory {
         store[self.instance].memory_ptr(self.index).as_ptr().addr()
     }
 
+    /// Resizes this memory, for record/replay checkpoints. Bytes beyond the
+    /// old size read as zero.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize(&self, store: &mut StoreOpaque, len: usize) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_resize_memory(self.index, len)
+    }
+
     /// This memory's watchpoint shadow, if compiled code checks it.
     pub(crate) fn vm_shadow<'a>(
         &self,
@@ -837,7 +846,7 @@ impl Memory {
     }
 
     /// This memory's watchpoint shadow, if compiled code checks it.
-    #[cfg(feature = "debug")]
+    #[cfg(any(feature = "debug", feature = "rr"))]
     pub(crate) fn vm_shadow_mut<'a>(
         &self,
         store: &'a mut StoreOpaque,

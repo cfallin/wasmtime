@@ -531,6 +531,36 @@ impl Table {
         Table { instance, index }
     }
 
+    /// The raw bytes of this table's elements, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_slots<'a>(&self, store: &'a mut StoreOpaque) -> Result<&'a mut [u8]> {
+        self.instance
+            .get_mut(store)
+            .get_defined_table(self.index)
+            .rr_slots()
+    }
+
+    /// The size in bytes of one of this table's raw elements.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_slot_size(&self, store: &StoreOpaque) -> usize {
+        let top = self.wasmtime_ty(store).ref_type.heap_type.top();
+        if top == wasmtime_environ::WasmHeapTopType::Func {
+            core::mem::size_of::<crate::vm::FuncTableElem>()
+        } else {
+            core::mem::size_of::<Option<crate::vm::VMGcRef>>()
+        }
+    }
+
+    /// Resizes this table to `len` bytes of elements, for record/replay
+    /// checkpoints. Added elements are null.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize(&self, store: &mut StoreOpaque, len: usize) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_resize_table(self.index, len)
+    }
+
     #[cfg(feature = "rr")]
     pub(crate) fn rr_key(&self) -> (u32, u32) {
         (self.instance.instance().as_u32(), self.index.as_u32())

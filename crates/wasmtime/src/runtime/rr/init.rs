@@ -385,21 +385,24 @@ pub(super) fn replay_event<T: 'static>(
             let wasm = body.blob()?;
             body.end()?;
             let objects = &store.rr.session.as_ref().unwrap().objects;
-            ensure!(id == objects.modules.len(), "invalid module id");
-            let module = compile_module(store.engine(), wasm)?;
-            store
-                .rr
-                .session
-                .as_mut()
-                .unwrap()
-                .objects
-                .modules
-                .push(module);
+            ensure!(id == objects.modules_defined, "invalid module id");
+            if id == objects.modules.len() {
+                let module = compile_module(store.engine(), wasm)?;
+                store
+                    .rr
+                    .session
+                    .as_mut()
+                    .unwrap()
+                    .objects
+                    .modules
+                    .push(module);
+            }
+            store.rr.session.as_mut().unwrap().objects.modules_defined += 1;
         }
         codec::INSTANCE => {
             let id = usize::try_from(body.u32()?)?;
             let objects = &store.rr.session.as_ref().unwrap().objects;
-            ensure!(id < objects.modules.len(), "invalid instance module");
+            ensure!(id < objects.modules_defined, "invalid instance module");
             let module = objects.modules[id].clone();
             let mut imports = Vec::new();
             for initializer in &module.env_module().initializers {

@@ -14,6 +14,11 @@ use core::ptr::NonNull;
 #[cfg(feature = "debug")]
 pub const WATCH_DEBUG: u8 = 1 << 0;
 
+/// A shadow bit set for each byte of a page that record/replay has not seen
+/// written since its last checkpoint.
+#[cfg(feature = "rr")]
+pub const WATCH_CLEAN: u8 = 1 << 1;
+
 /// The shadow of a linear memory: one byte per byte of the memory.
 pub struct MemoryShadow {
     // Compiled code reaches the bytes through this cell, which has a stable
@@ -21,6 +26,8 @@ pub struct MemoryShadow {
     cell: Box<VMMemoryShadow>,
     bytes: Box<[u8]>,
     len: usize,
+    // The value of the bytes added when the memory grows.
+    fill: u8,
 }
 
 // SAFETY: the cell only points to `bytes`, which the shadow owns.
@@ -34,7 +41,12 @@ impl MemoryShadow {
         let cell = try_new::<Box<_>>(VMMemoryShadow {
             base: VmPtr::from(base(&bytes)),
         })?;
-        Ok(MemoryShadow { cell, bytes, len })
+        Ok(MemoryShadow {
+            cell,
+            bytes,
+            len,
+            fill: 0,
+        })
     }
 
     /// The cell through which compiled code finds the shadow bytes.
@@ -52,6 +64,11 @@ impl MemoryShadow {
         &mut self.bytes[..self.len]
     }
 
+    /// Sets the value of the bytes added when the memory grows.
+    pub fn set_fill(&mut self, fill: u8) {
+        self.fill = fill;
+    }
+
     /// Follows the memory's size, which is now `len` bytes.
     pub fn resize(&mut self, len: usize) -> Result<()> {
         if len > self.bytes.len() {
@@ -61,7 +78,7 @@ impl MemoryShadow {
             self.bytes = bytes;
         }
         if len > self.len {
-            self.bytes[self.len..len].fill(0);
+            self.bytes[self.len..len].fill(self.fill);
         }
         self.len = len;
         Ok(())

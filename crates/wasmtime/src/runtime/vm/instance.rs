@@ -794,6 +794,36 @@ impl Instance {
         result
     }
 
+    /// Resizes a defined memory, for record/replay checkpoints, updating
+    /// this instance's `VMMemoryDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize_memory(
+        mut self: Pin<&mut Self>,
+        idx: DefinedMemoryIndex,
+        len: usize,
+    ) -> Result<()> {
+        let memory = &mut self.as_mut().memories_mut()[idx].1;
+        memory.rr_resize(len)?;
+        let vmmemory = memory.vmmemory();
+        self.set_memory(idx, vmmemory);
+        Ok(())
+    }
+
+    /// Resizes a defined table to `len` bytes of elements, for record/replay
+    /// checkpoints, updating this instance's `VMTableDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize_table(
+        mut self: Pin<&mut Self>,
+        idx: DefinedTableIndex,
+        len: usize,
+    ) -> Result<()> {
+        let table = self.as_mut().get_defined_table(idx);
+        table.rr_resize_slots(len)?;
+        let element = table.vmtable();
+        self.set_table(idx, element);
+        Ok(())
+    }
+
     /// Performs a grow operation on the `table_index` specified using `grow`.
     ///
     /// This will handle updating the VMTableDefinition internally as necessary.

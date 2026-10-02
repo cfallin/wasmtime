@@ -1684,6 +1684,14 @@ impl EntryStoreContext {
         })
     }
 
+    /// A copy of this saved state, also never to be dropped.
+    pub(crate) fn rr_clone(&self) -> mem::ManuallyDrop<Self> {
+        mem::ManuallyDrop::new(Self {
+            stack_chain: self.stack_chain.clone(),
+            ..*self
+        })
+    }
+
     /// Exchanges this saved state with the store's current state.
     pub(crate) fn rr_swap(&mut self) {
         fn swap<T>(a: &core::cell::UnsafeCell<T>, b: &mut T) {
