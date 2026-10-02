@@ -366,17 +366,18 @@ impl Instance {
                 .expect("should have a startup function")
         };
         let caller_vmctx = instance.vmctx();
+        // SAFETY: the startup function belongs to this store and takes no
+        // parameters or results.
         unsafe {
             let funcref = f.vm_func_ref(store.0);
             super::func::invoke_wasm_and_catch_traps(
                 store,
+                funcref,
+                Some(caller_vmctx),
+                NonNull::from(&mut []),
                 uncaught_exception,
-                |_default_caller, vm| {
-                    VMFuncRef::array_call(funcref, vm, caller_vmctx, NonNull::from(&mut []))
-                },
-            )?;
+            )
         }
-        Ok(())
     }
 
     /// Get this instance's module.
