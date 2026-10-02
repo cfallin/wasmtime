@@ -2336,7 +2336,8 @@ impl Config {
     ///
     /// ## Default
     ///
-    /// This value defaults to `true`.
+    /// This value defaults to `true`. Engines that replay traces (see
+    /// [`Config::rr`]) ignore it and always initialize tables eagerly.
     pub fn table_lazy_init(&mut self, table_lazy_init: bool) -> &mut Self {
         self.tunables.table_lazy_init = Some(table_lazy_init);
         self
@@ -2920,6 +2921,12 @@ impl Config {
 
         // Debuggers set watchpoints through linear memories' shadows.
         tunables.memory_watchpoints = tunables.debug_guest;
+        #[cfg(feature = "rr")]
+        if matches!(self.rr_config, RRConfig::Replaying) {
+            // A replay's store is read-only to the embedder, so reading a
+            // table must not have to initialize its elements.
+            tunables.table_lazy_init = false;
+        }
 
         // If no GC heap tunables are explicitly configured, copy the memory
         // tunables' configured values so that GC heaps default to the same

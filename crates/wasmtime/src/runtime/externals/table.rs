@@ -198,43 +198,73 @@ impl Table {
 
     /// Returns the table element value at `index`.
     ///
-    /// Returns `None` if `index` is out of bounds.
-    ///
     /// A GC reference is returned as an unrooted reference
     /// ([`MaybeRooted::Unrooted`](crate::MaybeRooted::Unrooted)), valid until
     /// the store's GC heap next changes; root it with [`Ref::ensure_rooted`]
     /// to keep it for longer.
     ///
+    /// This needs mutable access to the store because elements of function
+    /// tables may be initialized lazily (see [`Config::table_lazy_init`]),
+    /// when they are first read. [`Table::get_if_initialized`] reads elements
+    /// with shared access.
+    ///
+    /// Returns `None` if `index` is out of bounds.
+    ///
     /// # Panics
     ///
     /// Panics if `store` does not own this table.
+    ///
+    /// [`Config::table_lazy_init`]: crate::Config::table_lazy_init
     pub fn get(&self, mut store: impl AsContextMut, index: u64) -> Option<Ref> {
         let store = store.as_context_mut().0;
-        let (table, _gc_store) = self.wasmtime_table(store, [index]);
+        let _ = self.wasmtime_table(store, [index]);
+        self._get_if_initialized(store, index)
+    }
+
+    /// Returns the table element value at `index`, like [`Table::get`], but
+    /// without initializing a lazily initialized element of a function
+    /// table.
+    ///
+    /// This only needs shared access to the store, for example to inspect a
+    /// store whose execution is stopped. It returns `None` for an element that
+    /// has yet to be initialized, as well as when `index` is out of bounds.
+    /// Elements are always initialized when [`Config::table_lazy_init`] is
+    /// disabled, and for tables of GC references. Engines that replay traces
+    /// do not initialize tables lazily, so in a replay every element can be
+    /// read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `store` does not own this table.
+    ///
+    /// [`Config::table_lazy_init`]: crate::Config::table_lazy_init
+    pub fn get_if_initialized(&self, store: impl AsContext, index: u64) -> Option<Ref> {
+        self._get_if_initialized(store.as_context().0, index)
+    }
+
+    fn _get_if_initialized(&self, store: &StoreOpaque, index: u64) -> Option<Ref> {
+        self.instance.assert_belongs_to(store.id());
+        let table = store[self.instance].defined_table(self.index);
         match table.element_type() {
             TableElementType::Func => {
-                let ptr = table.get_func(index).ok()?;
-                Some(
-                    // SAFETY: `store` owns this table, so therefore it owns all
-                    // functions within the table too.
-                    ptr.map(|p| unsafe { Func::from_vm_func_ref(store.id(), p) })
-                        .into(),
-                )
+                let ptr = table.get_func_maybe_init(index).ok()??;
+                // SAFETY: `store` owns this table, so therefore it owns all
+                // functions within the table too.
+                Some(Ref::Func(
+                    ptr.map(|p| unsafe { Func::from_vm_func_ref(store.id(), p) }),
+                ))
             }
             TableElementType::GcRef => {
-                // Note that `unchecked_copy` is ok, since we only use the copy
-                // to create an unrooted reference just below, and nothing
-                // happens to the store in between.
-                let gc_ref = table.get_gc_ref(index).ok()?.map(|r| r.unchecked_copy());
+                let gc_ref = table.get_gc_ref(index).ok()?;
                 Some(match self.ty_(store).element().heap_type().top() {
                     HeapTopType::Extern => {
-                        Ref::from(gc_ref.map(|r| Unrooted::<ExternRef>::new(store, &r)))
+                        Ref::from(gc_ref.map(|r| Unrooted::<ExternRef>::new(store, r)))
                     }
                     HeapTopType::Any => {
-                        Ref::from(gc_ref.map(|r| Unrooted::<AnyRef>::new(store, &r)))
+                        Ref::from(gc_ref.map(|r| Unrooted::<AnyRef>::new(store, r)))
                     }
                     HeapTopType::Exn => {
-                        Ref::from(gc_ref.map(|r| Unrooted::<ExnRef>::new(store, &r)))
+                        Ref::from(gc_ref.map(|r| Unrooted::<ExnRef>::new(store, r)))
                     }
                     HeapTopType::Func | HeapTopType::Cont => unreachable!("not GC refs"),
                 })

@@ -1125,6 +1125,11 @@ impl Instance {
         self.get_defined_table(idx)
     }
 
+    /// Get a locally-defined table, without lazily initializing it.
+    pub(crate) fn defined_table(&self, index: DefinedTableIndex) -> &Table {
+        &self.tables[index].1
+    }
+
     /// Get a locally-defined table.
     pub(crate) fn get_defined_table(self: Pin<&mut Self>, index: DefinedTableIndex) -> &mut Table {
         &mut self.tables_mut()[index].1
