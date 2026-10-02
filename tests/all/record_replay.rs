@@ -1122,9 +1122,9 @@ async fn fuel_and_epoch_recordings_replay_without_them() -> Result<()> {
     }
     let mut config = Config::new();
     config.rr(RRConfig::Replaying).consume_fuel(true);
+    // Replay never runs out of fuel, even in a store without any.
     let mut replay = Store::new(&Engine::new(&config)?, ());
-    let err = replay.replay_all(&fuel).await.err().unwrap().to_string();
-    assert!(err.contains("does not support fuel"), "{err}");
+    replay.replay_all(&fuel).await?;
     Ok(())
 }
 
@@ -3416,5 +3416,145 @@ fn host_functions_throwing_exceptions_poison_the_recording() -> Result<()> {
     assert!(run.call(&mut store, ()).is_err());
     let err = store.finish_recording().err().unwrap().to_string();
     assert!(err.contains("host functions throwing exceptions"), "{err}");
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn interrupting_replay_with_epochs() -> Result<()> {
+    // A long loop with no trace events, which only an epoch check can stop.
+    const SPIN: &str = r#"
+    (module
+      (func (export "spin") (param $n i32) (result i32)
+        (local $i i32) (local $acc i32)
+        loop
+          (local.set $acc (i32.add (local.get $acc) (i32.mul (local.get $i) (i32.const 3))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $acc))
+    "#;
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let module = new_module(&recording, SPIN)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 10_000_000)?;
+    let trace = store.finish_recording()?;
+
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Replaying)
+        .guest_debug(true)
+        .epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+    let mut replayer = store.replayer_all(&trace)?;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    replayer.set_interrupt_flag(flag.clone());
+    // An interrupt request stops replay at the next epoch check once the
+    // epoch advances (in practice, from another thread while replay runs).
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Interrupted);
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    // Stopped in the loop, which can be inspected and checkpointed.
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    let i = frames[0].local(replayer.store(), 1)?.unwrap_i32();
+    assert!(i > 0, "{i}");
+    let checkpoint = replayer.checkpoint()?;
+    // Epoch ticks without a request do not stop replay, which continues to
+    // the end, reproducing the recorded result, and again from the
+    // interrupted point.
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    replayer.restore(&checkpoint)?;
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    Ok(())
+}
+
+/// A recording of a long loop with no trace events.
+fn record_spin() -> Result<Trace> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let module = new_module(
+        &recording,
+        r#"(module
+        (func (export "spin") (param $n i32) (result i32)
+          (local $acc i32)
+          loop
+            (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+            (local.tee $n (i32.sub (local.get $n) (i32.const 1)))
+            br_if 0
+          end
+          local.get $acc))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 1_000_000)?;
+    store.finish_recording()
+}
+
+/// Replays `trace` in `store` to the end, returning how many times replay
+/// yielded to the async executor.
+async fn replay_yields(store: &mut Store<()>, trace: &Trace) -> Result<usize> {
+    let mut replayer = store.replayer_all(trace)?;
+    let (stop, yields) = count_yields(replayer.run()).await;
+    assert_eq!(stop?, rr::ReplayStop::Finished);
+    Ok(yields)
+}
+
+#[tokio::test]
+async fn replay_yields_with_fuel_and_epochs() -> Result<()> {
+    let trace = record_spin()?;
+    // Without fuel or epochs, the loop runs to completion without yielding.
+    let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+    assert_eq!(replay_yields(&mut store, &trace).await?, 0);
+
+    let mut config = Config::new();
+    config.rr(RRConfig::Replaying).consume_fuel(true);
+    let mut store = Store::new(&Engine::new(&config)?, ());
+    store.fuel_async_yield_interval(Some(10_000))?;
+    let yields = replay_yields(&mut store, &trace).await?;
+    assert!(yields >= 100, "{yields}");
+
+    let mut config = Config::new();
+    config.rr(RRConfig::Replaying).epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+    store.epoch_deadline_async_yield_and_update(2);
+    let mut replayer = store.replayer_all(&trace)?;
+    // Two epochs later, the guest yields at its next epoch check, and does
+    // not yield again until two more have passed.
+    engine.increment_epoch();
+    engine.increment_epoch();
+    let (stop, yields) = count_yields(replayer.run()).await;
+    assert_eq!(stop?, rr::ReplayStop::Finished);
+    assert_eq!(yields, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_cancelled_at_a_yield_continues() -> Result<()> {
+    let trace = record_spin()?;
+    let mut config = Config::new();
+    config.rr(RRConfig::Replaying).consume_fuel(true);
+    let mut store = Store::new(&Engine::new(&config)?, ());
+    store.fuel_async_yield_interval(Some(10_000))?;
+    let mut replayer = store.replayer_all(&trace)?;
+    for _ in 0..10 {
+        // Poll replay until it yields inside the loop, then drop it.
+        let mut run = std::pin::pin!(replayer.run());
+        std::future::poll_fn(|cx| {
+            assert!(run.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+    // Replay continues where it yielded, reproducing the recorded result.
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
     Ok(())
 }

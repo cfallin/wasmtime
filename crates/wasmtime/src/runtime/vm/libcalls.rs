@@ -778,6 +778,11 @@ fn memory_atomic_wait64(
 
 // Hook for when an instance runs out of fuel.
 fn out_of_gas(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    #[cfg(feature = "rr")]
+    if store.rr_replay_fuel()? {
+        return Ok(());
+    }
+
     let result = block_on!(store, async |store, _| {
         if !store.refuel() {
             return Err(Trap::OutOfFuel.into());
@@ -803,6 +808,11 @@ fn out_of_gas(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
 #[cfg(target_has_atomic = "64")]
 fn new_epoch(store: &mut dyn VMStore, _instance: InstanceId) -> Result<NextEpoch> {
     use crate::UpdateDeadline;
+
+    #[cfg(feature = "rr")]
+    if let Some(deadline) = store.rr_replay_epoch() {
+        return Ok(NextEpoch(deadline));
+    }
 
     #[cfg(feature = "debug")]
     {

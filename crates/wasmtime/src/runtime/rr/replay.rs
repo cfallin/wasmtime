@@ -157,9 +157,11 @@ struct Driver<'a, T: 'static> {
     observers: Vec<(u32, Box<dyn FnMut(&[u8]) -> Result<()> + Send>)>,
     stop_at_events: bool,
     finished: bool,
-    // The activation stopped at a debug event, which resumes before any
-    // further trace events are processed.
+    // The activation stopped at a debug event, or to yield to the async
+    // executor, which resumes before any further trace events are processed.
     paused: Option<u64>,
+    // Whether the paused activation stopped to yield to the async executor.
+    yield_now: bool,
     // The write that the paused activation, stopped at a watchpoint, performs
     // when resumed. It has passed its shadow check, so checkpoints that would
     // mark its pages clean must leave them dirty.
@@ -189,6 +191,10 @@ pub enum ReplayStop {
     /// through the store's breakpoint API. The stopped frames are available
     /// from `Replayer::debug_exit_frames`.
     Breakpoint,
+    /// Replay was interrupted through the flag given to
+    /// [`Replayer::set_interrupt_flag`]. Guest code is stopped as for
+    /// breakpoints.
+    Interrupted,
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
@@ -207,13 +213,6 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             store.engine().is_replaying(),
             "replay requires RRConfig::Replaying"
         );
-        // Fuel and epochs would stop or suspend replay where the recording did
-        // not. Recordings made with them replay without them.
-        let tunables = store.engine().tunables();
-        ensure!(
-            !tunables.consume_fuel && !tunables.epoch_interruption,
-            "replay does not support fuel or epoch interruption"
-        );
         // `Trace` construction checked the version and framing.
         let mut reader = Reader::new(&trace.bytes);
         reader.take(codec::MAGIC.len())?;
@@ -229,11 +228,23 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 page_size: 4096,
                 parked: Vec::new(),
                 stopped: Vec::new(),
+                interrupt: None,
+                interrupted: false,
+                // Fuel and epoch checks never stop replay (see
+                // `rr_replay_epoch` and `rr_replay_fuel`), but yield to the
+                // async executor as the store was configured to.
+                epoch_yield: store.rr_epoch_yield(),
+                yielding: false,
             },
             dirty_ranges: Vec::new(),
             failure: None,
             receivers: Vec::new(),
         })?);
+        // Epoch checks look for interrupt requests at every epoch.
+        #[cfg(target_has_atomic = "64")]
+        if store.engine().tunables().epoch_interruption {
+            store.set_epoch_deadline(1);
+        }
         Ok(Replayer {
             driver: Driver {
                 store,
@@ -248,6 +259,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 stop_at_events: false,
                 finished: false,
                 paused: None,
+                yield_now: false,
                 pending_write: None,
                 stop: None,
                 next_serial: 0,
@@ -292,8 +304,17 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
 
     /// Replays until the next stop.
     ///
-    /// This yields to the async executor periodically, so a long replay can
-    /// be cancelled by dropping the future.
+    /// This yields to the async executor periodically between trace events,
+    /// so a long replay can be cancelled by dropping the future. Guest code
+    /// that runs for long between trace events also yields if the store was
+    /// configured to yield with fuel
+    /// ([`Store::fuel_async_yield_interval`](crate::Store::fuel_async_yield_interval))
+    /// or epochs
+    /// ([`Store::epoch_deadline_async_yield_and_update`](crate::Store::epoch_deadline_async_yield_and_update)),
+    /// and can be cancelled there too: the next `run` continues from that
+    /// point. Replay otherwise ignores the store's fuel and epoch
+    /// configuration: guest code never runs out of fuel, traps at an epoch
+    /// deadline, or runs an epoch deadline callback, as the recording did not.
     pub async fn run(&mut self) -> Result<ReplayStop> {
         let driver = &mut self.driver;
         // Replay runs Wasm on raw fibers, which bypass the usual points where
@@ -320,6 +341,9 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 if let Some(stop) = driver.stop.take() {
                     return Poll::Ready(Ok(stop));
                 }
+                if core::mem::take(&mut driver.yield_now) {
+                    break;
+                }
             }
             cx.waker().wake_by_ref();
             Poll::Pending
@@ -343,6 +367,23 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     #[cfg(feature = "debug")]
     pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
         self.driver.store.debug_exit_frames().collect()
+    }
+
+    /// Makes replay stop with [`ReplayStop::Interrupted`] once `flag` is set,
+    /// clearing it. This requires an engine configured with
+    /// [`Config::epoch_interruption`](crate::Config::epoch_interruption):
+    /// guest code checks the flag whenever the engine's epoch advances, so
+    /// after setting the flag, call
+    /// [`Engine::increment_epoch`](crate::Engine::increment_epoch) to stop
+    /// promptly. Epoch checks otherwise only yield to the async executor, if
+    /// the store is configured to (see [`Replayer::run`]).
+    pub fn set_interrupt_flag(&mut self, flag: alloc::sync::Arc<core::sync::atomic::AtomicBool>) {
+        let Mode::Replaying { interrupt, .. } =
+            &mut self.driver.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *interrupt = Some(flag);
     }
 
     /// Compiles every module in the trace now, rather than when replay
@@ -1021,6 +1062,15 @@ impl<T: 'static> Driver<'_, T> {
         let control = unsafe { &*control };
         if control.reason == VM_REPLAY_DEBUG {
             self.paused = Some(serial);
+            let Mode::Replaying { yielding, .. } =
+                &mut self.store.rr.session.as_mut().unwrap().mode
+            else {
+                unreachable!()
+            };
+            if core::mem::take(yielding) {
+                self.yield_now = true;
+                return Ok(());
+            }
             #[cfg(feature = "debug")]
             let Mode::Replaying { watchpoint, .. } =
                 &mut self.store.rr.session.as_mut().unwrap().mode
@@ -1035,7 +1085,16 @@ impl<T: 'static> Driver<'_, T> {
                 self.stop = Some(ReplayStop::Watchpoint(hit));
                 return Ok(());
             }
-            self.stop = Some(ReplayStop::Breakpoint);
+            let Mode::Replaying { interrupted, .. } =
+                &mut self.store.rr.session.as_mut().unwrap().mode
+            else {
+                unreachable!()
+            };
+            self.stop = Some(if core::mem::take(interrupted) {
+                ReplayStop::Interrupted
+            } else {
+                ReplayStop::Breakpoint
+            });
             return Ok(());
         }
         ensure!(

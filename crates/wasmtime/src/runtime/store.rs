@@ -458,6 +458,18 @@ impl<T> DerefMut for StoreInner<T> {
 
 #[cfg(feature = "rr")]
 impl<T> StoreInner<T> {
+    /// How many epochs apart a replay of this store yields to the async
+    /// executor, and the epoch at which it first does, if the store is
+    /// configured to yield at epoch deadlines.
+    pub(crate) fn rr_epoch_yield(&self) -> Option<(u64, u64)> {
+        #[cfg(all(feature = "async", target_has_atomic = "64"))]
+        if let EpochDeadlineBehavior::YieldAndUpdate(delta) = self.epoch_deadline_behavior {
+            let next = self.engine().current_epoch().saturating_add(delta);
+            return Some((delta, next));
+        }
+        None
+    }
+
     pub(crate) fn rr_validate(&self) -> Result<()> {
         ensure!(
             !self.rr.active(),

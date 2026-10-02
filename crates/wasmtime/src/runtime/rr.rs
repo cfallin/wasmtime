@@ -381,6 +381,17 @@ enum Mode {
         // The exit `(pc, trampoline fp, entry fp)` of the activations whose
         // frames a debugger sees while replay is stopped.
         stopped: Vec<(usize, usize, usize)>,
+        // Set by the embedder to interrupt replay at the next epoch check.
+        interrupt: Option<Arc<core::sync::atomic::AtomicBool>>,
+        // Whether the running activation's debug stop is for an interrupt.
+        interrupted: bool,
+        // How many epochs apart replay yields to the async executor, as the
+        // store was configured with `epoch_deadline_async_yield_and_update`,
+        // and the epoch at which it next does.
+        epoch_yield: Option<(u64, u64)>,
+        // Whether the running activation stopped only to yield to the async
+        // executor, rather than for a debug event.
+        yielding: bool,
     },
 }
 
@@ -633,6 +644,71 @@ impl StoreOpaque {
             Some(Mode::Replaying { stopped, .. }) => stopped,
             _ => &[],
         }
+    }
+
+    /// Handles an epoch deadline during replay, returning the new deadline,
+    /// or `None` when not replaying. Replay never traps or runs callbacks at
+    /// epoch deadlines: it checks for an interrupt request, which stops the
+    /// running activation for debugging, and otherwise yields to the async
+    /// executor if the store was configured to.
+    #[cfg(target_has_atomic = "64")]
+    pub(crate) fn rr_replay_epoch(&mut self) -> Option<u64> {
+        let epoch = self.engine().current_epoch();
+        let Some(Mode::Replaying {
+            interrupt,
+            epoch_yield,
+            ..
+        }) = self.rr.session.as_deref_mut().map(|s| &mut s.mode)
+        else {
+            return None;
+        };
+        let requested = interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, core::sync::atomic::Ordering::SeqCst));
+        // Check every epoch for interrupts, and yield every `delta` epochs.
+        let yield_due = match epoch_yield {
+            Some((delta, next)) if epoch >= *next => {
+                *next = epoch.saturating_add(*delta);
+                true
+            }
+            _ => false,
+        };
+        if (requested || yield_due) && self.rr_debug_stop() {
+            let Mode::Replaying {
+                interrupted,
+                yielding,
+                ..
+            } = &mut self.rr_session().mode
+            else {
+                unreachable!()
+            };
+            if requested {
+                *interrupted = true;
+            } else {
+                *yielding = true;
+            }
+        }
+        self.set_epoch_deadline(1);
+        Some(self.get_epoch_deadline())
+    }
+
+    /// Handles running out of fuel during replay, returning whether replaying.
+    /// Replay never runs out of fuel, which the recording did not (see
+    /// `out_of_gas`): it refuels, and yields to the async executor if the store
+    /// was configured to.
+    pub(crate) fn rr_replay_fuel(&mut self) -> Result<bool> {
+        if !self.rr.active() || self.rr.recording() {
+            return Ok(false);
+        }
+        // This injects the yield interval's worth of fuel, if any.
+        self.set_fuel(u64::MAX)?;
+        if self.fuel_yield_interval.is_some() && self.rr_debug_stop() {
+            let Mode::Replaying { yielding, .. } = &mut self.rr_session().mode else {
+                unreachable!()
+            };
+            *yielding = true;
+        }
+        Ok(true)
     }
 
     /// Records that `range` of `memory` is about to be written during replay,
