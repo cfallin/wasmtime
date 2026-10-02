@@ -565,6 +565,7 @@ rr = [
   "wasmtime-cli-flags/rr",
   "run",
   "wasmtime-wast?/rr",
+  "wasmtime-wasi?/rr",
 ]
 
 # Enabled in release builds. We cannot enable the built-in gdbstub component in
