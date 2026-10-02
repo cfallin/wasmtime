@@ -339,42 +339,10 @@ impl ServeCommand {
         // them and set breakpoints at the initial stop.
         debuggee_store.debug_register_component(&component)?;
 
-        let debug_engine = debug_run.new_engine()?;
-        let debug_main = debug_run.run.load_module(
-            &debug_engine,
-            debug_run.module_and_args[0].as_ref(),
-            debug_run.module_bytes.as_ref().map(|v| &v[..]),
-        )?;
-        let (mut debug_store, debug_linker) =
-            debug_run.new_store_and_linker(&debug_engine, &debug_main)?;
-        let debug_component = match debug_main {
-            RunTarget::Core(_) => {
-                bail!("Debugger component is a core module; only components are supported")
-            }
-            RunTarget::Component(c) => c,
-        };
-        let mut debug_linker = match debug_linker {
-            crate::commands::run::CliLinker::Core(_) => unreachable!(),
-            crate::commands::run::CliLinker::Component(l) => l,
-        };
-        debug_run.add_debugger_api(&mut debug_linker)?;
-
-        debug_run
-            .invoke_debugger(
-                &mut debug_store,
-                &debug_component,
-                &mut debug_linker,
-                debuggee_store,
-                move |store| {
-                    Box::pin(self.serve_maybe_debug(
-                        linker,
-                        component,
-                        Some(store),
-                        inherited_socket,
-                    ))
-                },
-            )
-            .await
+        let debuggee = wasmtime_debugger::Debuggee::new(debuggee_store, move |store| {
+            Box::pin(self.serve_maybe_debug(linker, component, Some(store), inherited_socket))
+        });
+        debug_run.run_debugger(debuggee).await
     }
 
     fn new_store(&self, engine: &Engine, instance_id: Option<u64>) -> Result<Store<Host>> {

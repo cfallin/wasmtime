@@ -563,6 +563,7 @@ rr = [
   "run",
   "wasmtime-wast?/rr",
   "wasmtime-wasi?/rr",
+  "wasmtime-debugger?/rr",
 ]
 
 # Enabled in release builds. We cannot enable the built-in gdbstub component in

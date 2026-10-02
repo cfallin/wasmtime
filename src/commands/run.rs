@@ -9,8 +9,6 @@ use crate::common::{Profile, RunCommon, RunTarget};
 use clap::Parser;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "debug")]
-use std::pin::Pin;
 use std::thread;
 use wasmtime::{
     Engine, Error, Func, Module, Result, Store, StoreLimits, Val, ValType, bail,
@@ -278,27 +276,6 @@ impl RunCommand {
 
             #[cfg(feature = "debug")]
             if let Some(mut debug_run) = debug_run {
-                let debug_engine = debug_run.new_engine()?;
-                let debug_main = debug_run.run.load_module(
-                    &debug_engine,
-                    debug_run.module_and_args[0].as_ref(),
-                    debug_run.module_bytes.as_ref().map(|v| &v[..]),
-                )?;
-                let (mut debug_store, debug_linker) =
-                    debug_run.new_store_and_linker(&debug_engine, &debug_main)?;
-
-                let debug_component = match debug_main {
-                    RunTarget::Core(_) => wasmtime::bail!(
-                        "Debugger component is a core module; only components are supported"
-                    ),
-                    RunTarget::Component(c) => c,
-                };
-                let mut debug_linker = match debug_linker {
-                    CliLinker::Core(_) => unreachable!(),
-                    CliLinker::Component(l) => l,
-                };
-                debug_run.add_debugger_api(&mut debug_linker)?;
-
                 // Pre-register the main module on the debuggee store
                 // so that `debug_all_modules()` returns it before any
                 // Wasm executes. This lets the debugger see modules
@@ -313,35 +290,27 @@ impl RunCommand {
                     }
                 }
 
-                debug_run
-                    .invoke_debugger(
-                        &mut debug_store,
-                        &debug_component,
-                        &mut debug_linker,
-                        store,
-                        move |store| {
-                            Box::pin(async move {
-                                let engine_clone = store.engine().clone();
-                                let cancel =
-                                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let cancel_clone = cancel.clone();
-                                let epoch_thread = thread::spawn(move || {
-                                    while !cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                                        thread::sleep(std::time::Duration::from_millis(1));
-                                        engine_clone.increment_epoch();
-                                    }
-                                });
-                                self.instantiate_and_run(&engine, &mut linker, &main, store)
-                                    .await?;
-                                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                epoch_thread
-                                    .join()
-                                    .map_err(|_| wasmtime::Error::msg("epoch thread panicked"))?;
-                                Ok(())
-                            })
-                        },
-                    )
-                    .await?;
+                let debuggee = wasmtime_debugger::Debuggee::new(store, move |store| {
+                    Box::pin(async move {
+                        let engine_clone = store.engine().clone();
+                        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let cancel_clone = cancel.clone();
+                        let epoch_thread = thread::spawn(move || {
+                            while !cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                                thread::sleep(std::time::Duration::from_millis(1));
+                                engine_clone.increment_epoch();
+                            }
+                        });
+                        self.instantiate_and_run(&engine, &mut linker, &main, store)
+                            .await?;
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        epoch_thread
+                            .join()
+                            .map_err(|_| wasmtime::Error::msg("epoch thread panicked"))?;
+                        Ok(())
+                    })
+                });
+                debug_run.run_debugger(debuggee).await?;
                 return Ok(());
             }
 
@@ -372,6 +341,21 @@ impl RunCommand {
                 },
                 bytes: text.as_bytes().to_vec(),
             });
+        }
+    }
+
+    /// A command for `wasmtime replay`, for its engine and debugger
+    /// configuration, whose "module" is the trace being replayed.
+    #[cfg(feature = "rr")]
+    pub(crate) fn for_replay(run: RunCommon, trace: PathBuf) -> RunCommand {
+        RunCommand {
+            run,
+            invoke: None,
+            preloads: Default::default(),
+            argv0: None,
+            module_bytes: None,
+            rr_sink: None,
+            module_and_args: vec![trace.into()],
         }
     }
 
@@ -953,27 +937,36 @@ impl RunCommand {
         }
     }
 
-    /// Invoke a debugger component with a debuggee.
+    /// Runs this command, a debugger component, against `debuggee`.
     ///
-    /// The debugger runs in `store` (using run's `Host`), while the
-    /// debuggee wraps an arbitrary store type `T` and body closure.
+    /// The debugger runs in its own store (using run's `Host`), while the
+    /// debuggee wraps an arbitrary store type `T`.
     #[cfg(feature = "debug")]
-    pub(crate) async fn invoke_debugger<
-        T: Send + 'static,
-        F: FnOnce(&mut Store<T>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
-            + Send
-            + 'static,
-    >(
-        &self,
-        store: &mut Store<Host>,
-        component: &wasmtime::component::Component,
-        linker: &mut wasmtime::component::Linker<Host>,
-        debuggee_host: Store<T>,
-        body: F,
+    pub(crate) async fn run_debugger<T: Send + 'static>(
+        &mut self,
+        debuggee: wasmtime_debugger::Debuggee<T>,
     ) -> Result<()> {
-        let instance = linker.instantiate_async(&mut *store, component).await?;
-        let command = wasmtime_debugger::DebuggerComponent::new(&mut *store, &instance)?;
-        let debuggee = wasmtime_debugger::Debuggee::new(debuggee_host, body);
+        let engine = self.new_engine()?;
+        let main = self.run.load_module(
+            &engine,
+            self.module_and_args[0].as_ref(),
+            self.module_bytes.as_ref().map(|v| &v[..]),
+        )?;
+        let (mut store, linker) = self.new_store_and_linker(&engine, &main)?;
+        let component = match main {
+            RunTarget::Core(_) => wasmtime::bail!(
+                "Debugger component is a core module; only components are supported"
+            ),
+            RunTarget::Component(c) => c,
+        };
+        let mut linker = match linker {
+            CliLinker::Core(_) => unreachable!(),
+            CliLinker::Component(l) => l,
+        };
+        self.add_debugger_api(&mut linker)?;
+
+        let instance = linker.instantiate_async(&mut store, &component).await?;
+        let command = wasmtime_debugger::DebuggerComponent::new(&mut store, &instance)?;
         let debuggee = wasmtime_debugger::add_debuggee(store.data_mut().ctx().table, debuggee)?;
         {
             // Manually construct a borrow -- wasmtime-wit-bindgen
@@ -984,7 +977,7 @@ impl RunCommand {
             let args = self.compute_argv()?;
             command
                 .bytecodealliance_wasmtime_debugger()
-                .call_debug(&mut *store, borrowed, &args)
+                .call_debug(&mut store, borrowed, &args)
                 .await?;
         }
         let mut debuggee = store.data_mut().ctx().table.delete(debuggee)?;
