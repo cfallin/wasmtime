@@ -736,13 +736,13 @@ impl Memory {
         store[self.instance].memory_ptr(self.index).as_ptr().addr()
     }
 
-    /// Restores this memory's size and contents, for record/replay
-    /// checkpoints.
+    /// Resizes this memory, for record/replay checkpoints. Bytes beyond the
+    /// old size read as zero.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore(&self, store: &mut StoreOpaque, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn rr_resize(&self, store: &mut StoreOpaque, len: usize) -> Result<()> {
         self.instance
             .get_mut(store)
-            .rr_restore_memory(self.index, bytes)
+            .rr_resize_memory(self.index, len)
     }
 
     #[cfg(feature = "rr")]

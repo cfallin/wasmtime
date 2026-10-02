@@ -794,16 +794,16 @@ impl Instance {
         result
     }
 
-    /// Restores a defined memory's size and contents, for record/replay
-    /// checkpoints, updating this instance's `VMMemoryDefinition`.
+    /// Resizes a defined memory, for record/replay checkpoints, updating
+    /// this instance's `VMMemoryDefinition`.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore_memory(
+    pub(crate) fn rr_resize_memory(
         mut self: Pin<&mut Self>,
         idx: DefinedMemoryIndex,
-        bytes: &[u8],
+        len: usize,
     ) -> Result<()> {
         let memory = &mut self.as_mut().memories_mut()[idx].1;
-        memory.rr_restore(bytes)?;
+        memory.rr_resize(len)?;
         let vmmemory = memory.vmmemory();
         self.set_memory(idx, vmmemory);
         Ok(())

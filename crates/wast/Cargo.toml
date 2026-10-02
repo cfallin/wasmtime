@@ -26,4 +26,4 @@ object = { workspace = true, features = ['unaligned'] }
 [features]
 component-model = ['wasmtime/component-model']
 component-model-async = ['wasmtime/component-model-async']
-rr = ['wasmtime/rr', 'wasmtime/debug']
+rr = ['wasmtime/rr', 'wasmtime/debug', 'component-model']

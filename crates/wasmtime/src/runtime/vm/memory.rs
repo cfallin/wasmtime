@@ -395,12 +395,11 @@ impl Memory {
         }
     }
 
-    /// Restores a non-shared memory's size and contents, for record/replay
-    /// checkpoints.
+    /// Resizes a non-shared memory, for record/replay checkpoints.
     #[cfg(feature = "rr")]
-    pub(crate) fn rr_restore(&mut self, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn rr_resize(&mut self, len: usize) -> Result<()> {
         match self {
-            Memory::Local(mem) => mem.rr_restore(bytes),
+            Memory::Local(mem) => mem.rr_resize(len),
             Memory::Shared(_) => bail!("shared memories cannot be restored"),
         }
     }
@@ -751,12 +750,11 @@ impl LocalMemory {
         self.alloc.vmmemory()
     }
 
-    /// Restores this memory to the size and contents of `bytes`, for
-    /// record/replay checkpoints.
+    /// Resizes this memory to `new` bytes, for record/replay checkpoints.
+    /// Bytes beyond the old size read as zero.
     #[cfg(feature = "rr")]
-    pub fn rr_restore(&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn rr_resize(&mut self, new: usize) -> Result<()> {
         let old = self.alloc.byte_size();
-        let new = bytes.len();
         if new > old {
             match &mut self.memory_image {
                 Some(image) if new <= self.alloc.byte_capacity() => {
@@ -791,10 +789,6 @@ impl LocalMemory {
                 }
                 None => self.alloc.shrink_to(new)?,
             }
-        }
-        // SAFETY: the memory is now `new` bytes long and nothing borrows it.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.alloc.base().as_mut_ptr(), new);
         }
         Ok(())
     }

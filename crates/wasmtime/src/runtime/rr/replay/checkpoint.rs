@@ -12,6 +12,12 @@
 //!   contents, function table sizes and elements, and mutable globals
 //!   (including component instance flags).
 //!
+//! Memory contents are kept as pages shared with the previous checkpoint, so
+//! a checkpoint retains only the pages that changed since then. Restoring
+//! writes only the pages that differ from the current contents. Finding
+//! changed pages still compares all of memory; tracking dirty pages instead
+//! (for example with `PAGEMAP_SCAN`) is future work.
+//!
 //! Restoring puts all of this back in place. Activations keep their fiber
 //! stacks, control blocks, and buffers at the same addresses, so the restored
 //! stacks remain valid. An activation that completed after a checkpoint is
@@ -35,6 +41,8 @@ pub(super) struct Checkpoints {
     live: Vec<(Weak<()>, Vec<u64>)>,
     // Completed activations that a live checkpoint can restore.
     retired: Vec<Activation>,
+    // The most recent image of each current memory, to share pages with.
+    latest: Vec<MemoryImage>,
 }
 
 impl Default for Checkpoints {
@@ -44,6 +52,49 @@ impl Default for Checkpoints {
             replayer: NEXT.fetch_add(1, Ordering::Relaxed),
             live: Vec::new(),
             retired: Vec::new(),
+            latest: Vec::new(),
+        }
+    }
+}
+
+/// The granularity at which memory images share contents.
+const PAGE: usize = 4096;
+
+/// The contents of a memory, as pages shared between checkpoints.
+#[derive(Clone)]
+struct MemoryImage {
+    // The memory's `rr_key`, identifying it within the store.
+    key: usize,
+    len: usize,
+    pages: Vec<Arc<[u8]>>,
+}
+
+impl MemoryImage {
+    /// Captures `data`, sharing the pages that are unchanged since `prev`.
+    fn capture(key: usize, data: &[u8], prev: Option<&MemoryImage>) -> Result<Self> {
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(data.len().div_ceil(PAGE))?;
+        for (i, chunk) in data.chunks(PAGE).enumerate() {
+            match prev.and_then(|p| p.pages.get(i)) {
+                Some(page) if **page == *chunk => pages.push(page.clone()),
+                _ => pages.push(Arc::from(try_copy(chunk)?)),
+            }
+        }
+        Ok(MemoryImage {
+            key,
+            len: data.len(),
+            pages,
+        })
+    }
+
+    /// Writes the pages of `data`, which has this image's length, that
+    /// differ from this image.
+    fn restore_into(&self, data: &mut [u8]) {
+        debug_assert_eq!(data.len(), self.len);
+        for (chunk, page) in data.chunks_mut(PAGE).zip(&self.pages) {
+            if *chunk != **page {
+                chunk.copy_from_slice(page);
+            }
         }
     }
 }
@@ -96,7 +147,7 @@ pub struct Checkpoint {
     objects: Objects,
     instance_list: Vec<crate::Instance>,
     activations: Vec<ActivationImage>,
-    memories: Vec<Vec<u8>>,
+    memories: Vec<MemoryImage>,
     tables: Vec<Vec<FuncTableElem>>,
     globals: Vec<Option<Val>>,
 }
@@ -147,9 +198,9 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// can later return to.
     ///
     /// Checkpoints can be taken before replay starts and whenever
-    /// [`Replayer::run`] has returned. They copy all guest memories, so they
-    /// may be large. Completed guest activations are retained while a
-    /// checkpoint that can restore them is alive.
+    /// [`Replayer::run`] has returned. A checkpoint retains the guest memory
+    /// pages that changed since the previous one. Completed guest activations
+    /// are retained while a checkpoint that can restore them is alive.
     pub fn checkpoint(&mut self) -> Result<Checkpoint> {
         let driver = &mut self.driver;
         ensure!(
@@ -188,8 +239,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         let mut memory_images = Vec::new();
         memory_images.try_reserve_exact(memories.len())?;
         for memory in memories {
-            memory_images.push(try_copy(memory.rr_data(store))?);
+            let key = memory.rr_key(store);
+            let prev = driver.checkpoints.latest.iter().find(|i| i.key == key);
+            memory_images.push(MemoryImage::capture(key, memory.rr_data(store), prev)?);
         }
+        driver.checkpoints.latest = memory_images.clone();
         let mut table_images = Vec::new();
         table_images.try_reserve_exact(tables.len())?;
         for table in tables {
@@ -288,9 +342,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             try_copy(&objects.tables)?,
             try_copy(&objects.globals)?,
         );
-        for (memory, bytes) in memories.iter().zip(&checkpoint.memories) {
-            memory.rr_restore(store, bytes)?;
+        for (memory, image) in memories.iter().zip(&checkpoint.memories) {
+            memory.rr_resize(store, image.len)?;
+            image.restore_into(memory.rr_data_mut(store));
         }
+        driver.checkpoints.latest = try_copy(&checkpoint.memories)?;
         for (table, elements) in tables.iter().zip(&checkpoint.tables) {
             table.rr_restore(store, elements)?;
         }
@@ -310,6 +366,31 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         driver.observed = None;
         driver.stop = None;
         *driver.growth_failures() = try_copy(&checkpoint.growth_failures)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_images_share_unchanged_pages() -> Result<()> {
+        let mut data = vec![0_u8; 4 * PAGE + 10];
+        let first = MemoryImage::capture(1, &data, None)?;
+        data[2 * PAGE + 3] = 7;
+        let second = MemoryImage::capture(1, &data, Some(&first))?;
+        for i in 0..first.pages.len() {
+            assert_eq!(Arc::ptr_eq(&first.pages[i], &second.pages[i]), i != 2);
+        }
+
+        // Restoring writes back only the differing page.
+        let mut current = data.clone();
+        current[PAGE] = 1;
+        second.restore_into(&mut current);
+        assert_eq!(current, data);
+        first.restore_into(&mut current);
+        assert!(current.iter().all(|b| *b == 0));
         Ok(())
     }
 }
