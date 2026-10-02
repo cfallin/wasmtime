@@ -181,6 +181,23 @@ fn fma_builtin_results_match_native_fma() -> Result<()> {
     Ok(())
 }
 
+#[test]
+#[cfg(feature = "all-arch")]
+fn replay_trampolines_compile_for_native_targets() -> Result<()> {
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "s390x-unknown-linux-gnu",
+        "riscv64gc-unknown-linux-gnu",
+    ] {
+        let mut config = Config::new();
+        config.target(target)?.rr(RRConfig::Replaying);
+        Engine::new(&config)?.precompile_module(b"\0asm\x01\0\0\0")?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "gc")]
 #[test]
 fn gc_reference_boundaries_are_rejected() -> Result<()> {
