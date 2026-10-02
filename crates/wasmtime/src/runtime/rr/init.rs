@@ -1,8 +1,9 @@
-//! Core object construction. Modules are recorded as their Wasm bytecode,
-//! never native code, and host functions as their signatures.
+//! Core object construction. Host imports become typed replay stubs. Only
+//! validated Wasm bytecode is loaded from the trace, never native code.
 
 use super::*;
-use crate::{Global, Instance, Module};
+use crate::runtime::vm;
+use crate::{Extern, Global, Instance, Module, StoreContextMut};
 use wasmtime_environ::packed_option::ReservedValue;
 use wasmtime_environ::{DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, EntityIndex};
 
@@ -244,7 +245,9 @@ impl StoreOpaque {
         module: &Module,
     ) -> Result<()> {
         self.rr_register(|store, session| {
-            session.record_instance(store, instance, module)?;
+            if matches!(session.mode, Mode::Recording { .. }) {
+                session.record_instance(store, instance, module)?;
+            }
             session.objects.register_instance(store, instance)?;
             Ok(())
         })
@@ -252,6 +255,18 @@ impl StoreOpaque {
 }
 
 impl Objects {
+    pub(super) fn importable_func(&self, id: usize) -> Result<Func> {
+        let func = self
+            .funcs
+            .get(id)
+            .ok_or_else(|| format_err!("invalid function id"))?;
+        ensure!(
+            !func.startup,
+            "instance startup cannot be used as a function reference"
+        );
+        Ok(func.func)
+    }
+
     fn register_instance(&mut self, store: &mut StoreOpaque, instance: Instance) -> Result<()> {
         let id = instance.id;
         let functions = store[id]
@@ -274,7 +289,8 @@ impl Objects {
         let (inst, registry) = id.get_mut_and_module_registry(store);
         // SAFETY: this instance belongs to store.
         if let Some(startup) = unsafe { inst.get_startup_func(registry, store_id) } {
-            self.add_func(store, startup)?;
+            let id = self.add_func(store, startup)?;
+            self.funcs[id].startup = true;
         }
         for i in 0..store[id].env_module().num_defined_memories() {
             // SAFETY: shared memories have been rejected before allocation.
@@ -301,5 +317,221 @@ impl Objects {
             self.globals.push(global);
         }
         Ok(())
+    }
+}
+
+pub(super) fn replay_event<T: 'static>(
+    store: &mut StoreInner<T>,
+    trampolines: &super::replay::Trampolines,
+    tag: u8,
+    body: &mut Reader<'_>,
+) -> Result<Option<(Instance, Option<usize>)>> {
+    match tag {
+        codec::HOST => {
+            let id = usize::try_from(body.u32()?)?;
+            let params = body
+                .blob()?
+                .iter()
+                .map(|v| Kind::read(*v).map(Kind::ty))
+                .collect::<Result<Vec<_>>>()?;
+            let results = body
+                .blob()?
+                .iter()
+                .map(|v| Kind::read(*v).map(Kind::ty))
+                .collect::<Result<Vec<_>>>()?;
+            body.end()?;
+            ensure!(
+                id == store.rr.session.as_ref().unwrap().objects.funcs.len(),
+                "invalid host function id"
+            );
+            let ty = crate::FuncType::new(store.engine(), params, results);
+            let func = trampolines.host_stub(store, ty)?;
+            let mut session = store.rr.session.take().unwrap();
+            let added = session.objects.add_func(store, func);
+            store.rr.session = Some(session);
+            ensure!(added? == id, "duplicate replay host");
+        }
+        codec::MODULE => {
+            let id = usize::try_from(body.u32()?)?;
+            let wasm = body.blob()?;
+            body.end()?;
+            let objects = &store.rr.session.as_ref().unwrap().objects;
+            ensure!(id == objects.modules.len(), "invalid module id");
+            let module = compile_module(store.engine(), wasm)?;
+            store
+                .rr
+                .session
+                .as_mut()
+                .unwrap()
+                .objects
+                .modules
+                .push(module);
+        }
+        codec::INSTANCE => {
+            let id = usize::try_from(body.u32()?)?;
+            let objects = &store.rr.session.as_ref().unwrap().objects;
+            ensure!(id < objects.modules.len(), "invalid instance module");
+            let module = objects.modules[id].clone();
+            let mut imports = Vec::new();
+            for initializer in &module.env_module().initializers {
+                let wasmtime_environ::Initializer::Import { index: ty, .. } = *initializer;
+                let id = usize::try_from(body.u32()?)?;
+                imports.push(match ty {
+                    EntityIndex::Function(_) => Extern::Func(objects.importable_func(id)?),
+                    EntityIndex::Memory(_) => Extern::Memory(
+                        *objects
+                            .memories
+                            .get(id)
+                            .ok_or_else(|| format_err!("invalid memory import"))?,
+                    ),
+                    EntityIndex::Table(_) => Extern::Table(
+                        *objects
+                            .tables
+                            .get(id)
+                            .ok_or_else(|| format_err!("invalid table import"))?,
+                    ),
+                    EntityIndex::Global(_) => Extern::Global(
+                        *objects
+                            .globals
+                            .get(id)
+                            .ok_or_else(|| format_err!("invalid global import"))?,
+                    ),
+                    _ => bail!("unsupported replay import"),
+                });
+            }
+            body.end()?;
+            let imports = Instance::typecheck_externs(store, &module, &imports)?;
+            // SAFETY: imports were checked against module. Allocation has no
+            // async limiter; startup is a separate recorded guest activation.
+            let (instance, _) = vm::assert_ready(unsafe {
+                Instance::new_raw(store, None, &module, imports.as_ref())
+            })?;
+            let store_id = store.id();
+            let (inst, registry) = instance.id.get_mut_and_module_registry(store);
+            // SAFETY: the new instance belongs to this store.
+            let startup = unsafe { inst.get_startup_func(registry, store_id) }
+                .map(|func| {
+                    store
+                        .rr
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .objects
+                        .find_func(func.vm_func_ref(store))
+                })
+                .transpose()?;
+            return Ok(Some((instance, startup)));
+        }
+        codec::GLOBAL => {
+            let id = usize::try_from(body.u32()?)?;
+            let kind = body.u8()?;
+            let mutable = body.u8()?;
+            ensure!(mutable <= 1, "invalid global mutability");
+            let (ty, value) = if kind == codec::FUNCREF {
+                let nullable = body.u8()?;
+                ensure!(nullable <= 1, "invalid global nullability");
+                let func = usize::try_from(body.u32()?)?;
+                let objects = &store.rr.session.as_ref().unwrap().objects;
+                let func = if func == 0 {
+                    None
+                } else {
+                    Some(objects.importable_func(func - 1)?)
+                };
+                (
+                    crate::ValType::Ref(crate::RefType::new(nullable == 1, crate::HeapType::Func)),
+                    crate::Val::FuncRef(func),
+                )
+            } else {
+                let kind = Kind::read(kind)?;
+                let mut raw = [ValRaw::v128(0)];
+                body.values(&[kind], &mut raw, |_| unreachable!())?;
+                let value = match kind {
+                    Kind::I32 => crate::Val::I32(raw[0].get_i32()),
+                    Kind::I64 => crate::Val::I64(raw[0].get_i64()),
+                    Kind::F32 => crate::Val::F32(raw[0].get_f32()),
+                    Kind::F64 => crate::Val::F64(raw[0].get_f64()),
+                    Kind::V128 => crate::Val::V128(raw[0].get_v128().into()),
+                    Kind::FuncRef | Kind::Unsupported => {
+                        unreachable!("reference globals are decoded separately")
+                    }
+                };
+                (kind.ty(), value)
+            };
+            body.end()?;
+            let ty = crate::GlobalType::new(
+                ty,
+                if mutable == 1 {
+                    crate::Mutability::Var
+                } else {
+                    crate::Mutability::Const
+                },
+            );
+            ensure!(
+                id == store.rr.session.as_ref().unwrap().objects.globals.len(),
+                "invalid global id"
+            );
+            Global::new(StoreContextMut(&mut *store), ty, value)?;
+        }
+        codec::MEMORY | codec::TABLE => {
+            let id = usize::try_from(body.u32()?)?;
+            let is64 = body.u8()?;
+            let flag = body.u8()?;
+            let min = body.u64()?;
+            let has_max = body.u8()?;
+            ensure!(has_max <= 1, "invalid object maximum");
+            let max = body.u64()?;
+            let max = (has_max == 1).then_some(max);
+            ensure!(is64 <= 1, "invalid object index type");
+            if tag == codec::MEMORY {
+                body.end()?;
+                ensure!(
+                    id == store.rr.session.as_ref().unwrap().objects.memories.len(),
+                    "invalid memory id"
+                );
+                let ty = crate::MemoryType::builder()
+                    .memory64(is64 == 1)
+                    .min(min)
+                    .max(max)
+                    .page_size_log2(flag)
+                    .build()?;
+                Memory::new(StoreContextMut(&mut *store), ty)?;
+            } else {
+                ensure!(flag <= 1, "invalid table nullability");
+                let func = usize::try_from(body.u32()?)?;
+                body.end()?;
+                let objects = &store.rr.session.as_ref().unwrap().objects;
+                ensure!(id == objects.tables.len(), "invalid table id");
+                let init = crate::Ref::Func(if func == 0 {
+                    None
+                } else {
+                    Some(objects.importable_func(func - 1)?)
+                });
+                let element = crate::RefType::new(flag == 1, crate::HeapType::Func);
+                let ty = if is64 == 1 {
+                    crate::TableType::new64(element, min, max)
+                } else {
+                    crate::TableType::new(
+                        element,
+                        u32::try_from(min)?,
+                        max.map(u32::try_from).transpose()?,
+                    )
+                };
+                crate::Table::new(StoreContextMut(&mut *store), ty, init)?;
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(None)
+}
+
+pub(super) fn compile_module(engine: &crate::Engine, wasm: &[u8]) -> Result<Module> {
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    {
+        Module::from_binary(engine, wasm)
+    }
+    #[cfg(not(any(feature = "cranelift", feature = "winch")))]
+    {
+        let _ = (engine, wasm);
+        bail!("initialization replay requires a compiler")
     }
 }

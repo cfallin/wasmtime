@@ -1,7 +1,10 @@
 //! Core WebAssembly record/replay for a whole store.
 //!
-//! Recording begins with an empty store. Objects receive numeric identities
-//! automatically; all construction is part of the trace.
+//! Recording and replay begin with empty stores. Objects receive numeric
+//! identities automatically; all construction is part of the trace.
+//! Replay uses only the modules in the trace and reconstructs core instances.
+//! It executes guest code on independent fibers and never invokes the original
+//! host functions.
 //!
 //! Core function boundaries support numbers, vectors, and nullable abstract
 //! function references. Modules that use GC or exceptions are unsupported.
@@ -9,20 +12,36 @@
 //! custom signal handlers, Wasm stack switching, epochs, and fuel are
 //! unsupported, as is guest debugging. Host writes through the
 //! memory APIs, including slices from [`Memory::data_mut`], are recorded;
-//! writes through raw pointers such as [`Memory::data_ptr`] are not.
+//! writes through raw pointers such as [`Memory::data_ptr`] are not. Replay
+//! requires a compiler and a native (non-Pulley) target, and is unsupported
+//! under Miri, with AddressSanitizer, and with hardware-enforced shadow stacks.
 //!
 //! Traces are private to this Wasmtime version. They contain host-supplied data
 //! and can be large; applications should impose their own storage limits.
 
 use crate::prelude::*;
 use crate::runtime::vm::VMFuncRef;
-use crate::store::StoreOpaque;
+use crate::store::{StoreInner, StoreOpaque};
 use crate::{AsContextMut, Func, Memory, Store, ValRaw};
 use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
+mod replay;
 use codec::{Kind, Reader};
+
+/// Core instances constructed while replaying initialization.
+#[derive(Debug)]
+pub struct Replay {
+    instances: Vec<crate::Instance>,
+}
+
+impl Replay {
+    /// Returns instances in their recorded construction order.
+    pub fn instances(&self) -> &[crate::Instance] {
+        &self.instances
+    }
+}
 
 /// A complete execution trace, including object construction and startup.
 pub struct Trace {
@@ -59,7 +78,7 @@ impl Trace {
 
 mod init;
 mod objects;
-use objects::Objects;
+use objects::{Objects, RecordedFunc};
 
 fn func_key(func: NonNull<VMFuncRef>) -> (usize, usize) {
     // SAFETY: all callers pass function references rooted in the same store.
@@ -74,6 +93,9 @@ fn func_key(func: NonNull<VMFuncRef>) -> (usize, usize) {
 #[derive(Default)]
 pub(crate) struct State {
     session: Option<Box<Session>>,
+    // Set once a replay ends: replayed host functions only run under the
+    // replay driver, so the store's functions may no longer be called.
+    replayed: bool,
 }
 
 struct Session {
@@ -90,6 +112,7 @@ enum Mode {
         outstanding: Vec<(usize, usize)>,
         next_call: u32,
     },
+    Replaying,
 }
 
 impl State {
@@ -130,7 +153,9 @@ impl Session {
 
     /// Appends a complete record when recording.
     fn append(&mut self, tag: u8, body: &[u8]) -> Result<()> {
-        let Mode::Recording { bytes, .. } = &mut self.mode;
+        let Mode::Recording { bytes, .. } = &mut self.mode else {
+            return Ok(());
+        };
         codec::record(bytes, tag, body.len())?;
         bytes.extend_from_slice(body);
         Ok(())
@@ -178,7 +203,7 @@ impl<T: 'static> Store<T> {
     /// recording is discarded and recording is disabled on the store.
     ///
     /// A recording may end while guest calls are unfinished, for example
-    /// after a host panic.
+    /// after a host panic; replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
@@ -188,9 +213,31 @@ impl<T: 'static> Store<T> {
             return Err(e);
         }
         flushed?;
-        let Mode::Recording { mut bytes, .. } = session.mode;
+        let Mode::Recording { mut bytes, .. } = session.mode else {
+            unreachable!()
+        };
         codec::record(&mut bytes, codec::END, 0)?;
         Ok(Trace { bytes })
+    }
+
+    /// Replays a trace on independent fibers, without calling the original
+    /// host functions. The store must be empty, as for [`Store::start_recording`].
+    /// Modules and initialization come entirely from the trace. The engine must
+    /// use [`crate::RRConfig::Replaying`].
+    ///
+    /// This verifies recorded guest outcomes, including traps. Therefore a
+    /// correctly reproduced guest trap is a successful replay. Divergence or
+    /// an invalid trace returns an error. Dropping this future frees all
+    /// suspended activations before releasing the store. Failed or cancelled
+    /// replay does not roll back initialization; retry with a fresh store.
+    ///
+    /// Afterwards the store's state can be inspected, for example through
+    /// [`Replay::instances`], but its functions can no longer be called.
+    pub async fn replay(&mut self, trace: &Trace) -> Result<Replay>
+    where
+        T: Send,
+    {
+        replay::run(self.as_context_mut().0, trace).await
     }
 }
 
@@ -264,7 +311,9 @@ impl StoreOpaque {
         // never runs guest or embedder code.
         let session = self.rr_session();
         let mut pending = core::mem::take(&mut session.pending);
-        let Mode::Recording { bytes, .. } = &mut session.mode;
+        let Mode::Recording { bytes, .. } = &mut session.mode else {
+            unreachable!()
+        };
         let mut bytes = core::mem::take(bytes);
         // Emit each written byte once, in a deterministic order.
         pending.sort_unstable_by_key(|(id, range)| (*id, range.start));
@@ -295,7 +344,9 @@ impl StoreOpaque {
         pending.clear();
         let session = self.rr_session();
         session.pending = pending;
-        let Mode::Recording { bytes: trace, .. } = &mut session.mode;
+        let Mode::Recording { bytes: trace, .. } = &mut session.mode else {
+            unreachable!()
+        };
         *trace = bytes;
         result
     }
@@ -388,8 +439,17 @@ impl StoreOpaque {
         host: bool,
     ) -> Result<Option<usize>> {
         if !self.rr.active() {
+            ensure!(
+                !self.rr.replayed,
+                "a replayed store's functions can only be inspected, not called"
+            );
             return Ok(None);
         }
+        // The replay driver enters Wasm and handles host calls itself.
+        ensure!(
+            self.rr.recording(),
+            "replay calls must be driven by Store::replay"
+        );
         // SAFETY: inherited from this function's contract.
         let result = unsafe { self.rr_record_enter(func, raw, host) };
         self.rr_poison_on_err(result)
@@ -420,7 +480,10 @@ impl StoreOpaque {
             bytes,
             outstanding,
             next_call,
-        } = &mut session.mode;
+        } = &mut session.mode
+        else {
+            unreachable!()
+        };
         let call = *next_call as usize;
         *next_call = next_call
             .checked_add(1)
@@ -474,7 +537,9 @@ impl StoreOpaque {
             return Ok(());
         }
         self.rr_flush()?;
-        let Mode::Recording { outstanding, .. } = &self.rr_session().mode;
+        let Mode::Recording { outstanding, .. } = &self.rr_session().mode else {
+            unreachable!()
+        };
         let position = outstanding
             .iter()
             .position(|(c, _)| *c == call)
@@ -489,7 +554,10 @@ impl StoreOpaque {
         let session = self.rr_session();
         let Mode::Recording {
             bytes, outstanding, ..
-        } = &mut session.mode;
+        } = &mut session.mode
+        else {
+            unreachable!()
+        };
         let tag = if host {
             codec::LEAVE_HOST
         } else {

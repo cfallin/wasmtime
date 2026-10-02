@@ -8,7 +8,9 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct RecordedFunc {
+    pub func: Func,
     pub host: bool,
+    pub startup: bool,
     pub params: Vec<Kind>,
     pub results: Vec<Kind>,
 }
@@ -32,6 +34,18 @@ impl Objects {
             None => Ok(0),
             Some(ptr) => Ok(u32::try_from(1 + self.find_func(ptr)?)?),
         }
+    }
+
+    pub(super) fn decode_ref(&self, store: &StoreOpaque, id: u32) -> Result<ValRaw> {
+        let ptr = if id == 0 {
+            core::ptr::null_mut()
+        } else {
+            self.importable_func(usize::try_from(id - 1)?)?
+                .vm_func_ref(store)
+                .as_ptr()
+                .cast()
+        };
+        Ok(ValRaw::funcref(ptr))
     }
 
     pub(super) fn add_func(&mut self, store: &StoreOpaque, func: Func) -> Result<usize> {
@@ -61,7 +75,9 @@ impl Objects {
         let id = self.funcs.len();
         self.functions_by_key.insert(func_key(raw), id)?;
         self.funcs.push(RecordedFunc {
+            func,
             host,
+            startup: false,
             params,
             results,
         });

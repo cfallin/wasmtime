@@ -478,6 +478,35 @@ where
     }
 }
 
+/// Calls `resume`, which resumes a record/replay activation's raw fiber, with
+/// a `CallThreadState` for that activation registered on this host stack.
+///
+/// The activation's entry trampoline is on the fiber rather than beneath this
+/// frame. A trap unwinds to it, and the fiber's generated start trampoline
+/// then yields for the last time, after which `resume` returns `false`.
+///
+/// A `pending` error is recorded as the unwind reason before resuming. The
+/// activation must be parked at a host call that is resumed as failed, so that
+/// its Wasm-to-array trampoline raises the error.
+#[cfg(feature = "rr")]
+pub(crate) fn catch_replay_traps(
+    store: &mut StoreOpaque,
+    old_state: &mut EntryStoreContext,
+    pending: Option<Error>,
+    resume: impl FnOnce() -> bool,
+) -> Result<()> {
+    let state = CallThreadState::new(store, old_state);
+    if let Some(error) = pending {
+        state.record_unwind(UnwindReason::from(error));
+    }
+    match state.with(|_| resume()) {
+        Ok(()) => Ok(()),
+        Err(UnwindReason::Trap(reason)) => Err(crate::trap::from_runtime_box(store, reason?)),
+        #[cfg(all(feature = "std", panic = "unwind"))]
+        Err(UnwindReason::Panic(panic)) => std::panic::resume_unwind(panic),
+    }
+}
+
 // Module to hide visibility of the `CallThreadState::prev` field and force
 // usage of its accessor methods.
 mod call_thread_state {

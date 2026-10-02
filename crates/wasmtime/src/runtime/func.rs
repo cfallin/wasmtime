@@ -1661,6 +1661,56 @@ impl Drop for EntryStoreContext {
     }
 }
 
+#[cfg(feature = "rr")]
+impl EntryStoreContext {
+    /// The saved state of a record/replay activation that has not entered
+    /// Wasm yet. The replay driver exchanges it with the store's state around
+    /// each resumption using `rr_swap`, rather than restoring it on drop, so
+    /// it must never be dropped.
+    pub(crate) fn rr_initial(
+        store: &StoreOpaque,
+        stack_limit: usize,
+        stack: NonNull<VMCommonStackInformation>,
+    ) -> mem::ManuallyDrop<Self> {
+        mem::ManuallyDrop::new(Self {
+            stack_limit: Some(stack_limit),
+            last_wasm_exit_pc: 0,
+            last_wasm_exit_trampoline_fp: 0,
+            last_wasm_entry_fp: 0,
+            last_wasm_entry_sp: 0,
+            last_wasm_entry_trap_handler: 0,
+            stack_chain: VMStackChain::InitialStack(stack.as_ptr()),
+            vm_store_context: store.vm_store_context(),
+        })
+    }
+
+    /// Exchanges this saved state with the store's current state.
+    pub(crate) fn rr_swap(&mut self) {
+        fn swap<T>(a: &core::cell::UnsafeCell<T>, b: &mut T) {
+            // SAFETY: the replay driver exclusively borrows the store, so
+            // nothing else accesses these fields.
+            unsafe { mem::swap(&mut *a.get(), b) }
+        }
+        // SAFETY: the store outlives the activation this state belongs to.
+        let cx = unsafe { &*self.vm_store_context };
+        if let Some(limit) = &mut self.stack_limit {
+            swap(&cx.stack_limit, limit);
+        }
+        swap(&cx.last_wasm_exit_pc, &mut self.last_wasm_exit_pc);
+        swap(
+            &cx.last_wasm_exit_trampoline_fp,
+            &mut self.last_wasm_exit_trampoline_fp,
+        );
+        swap(&cx.last_wasm_entry_fp, &mut self.last_wasm_entry_fp);
+        swap(&cx.last_wasm_entry_sp, &mut self.last_wasm_entry_sp);
+        swap(
+            &cx.last_wasm_entry_trap_handler,
+            &mut self.last_wasm_entry_trap_handler,
+        );
+        swap(&cx.stack_chain, &mut self.stack_chain);
+    }
+}
+
 /// A trait implemented for types which can be returned from closures passed to
 /// [`Func::wrap`] and friends.
 ///
@@ -2272,6 +2322,39 @@ struct HostFuncState<F> {
 impl core::fmt::Debug for HostFunc {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HostFunc").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "rr")]
+impl Func {
+    /// Creates a host function whose array-call entry point is `array_call`,
+    /// with `host_state` owned by its context. This is used for replay stubs
+    /// implemented by generated code.
+    ///
+    /// # Safety
+    ///
+    /// `array_call` must implement `ty`'s signature with the array calling
+    /// convention and must remain valid while `host_state` is alive.
+    pub(crate) unsafe fn rr_replay_stub(
+        store: &mut StoreOpaque,
+        ty: FuncType,
+        array_call: vm::VMArrayCallNative,
+        host_state: Box<dyn core::any::Any + Send + Sync>,
+    ) -> Result<Func> {
+        let engine = store.engine().clone();
+        assert!(ty.comes_from_same_engine(&engine));
+        // SAFETY: the caller guarantees `array_call`'s validity; the context
+        // keeps the function's type registered.
+        let ctx = unsafe {
+            VMArrayCallHostFuncContext::new(
+                array_call,
+                ty.type_index(),
+                try_new::<Box<_>>((ty.into_registered_type(), host_state))?,
+            )?
+        };
+        let func = HostFunc::new_raw(&engine, ctx, Asyncness::No);
+        // SAFETY: the stub never accesses the store's `T`.
+        Ok(unsafe { func.into_func(store)? })
     }
 }
 
