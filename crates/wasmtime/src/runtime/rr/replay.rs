@@ -28,7 +28,9 @@ use crate::runtime::vm::{
 use crate::{StoreContext, StoreContextMut};
 use core::mem::MaybeUninit;
 use core::task::Poll;
-use wasmtime_environ::{VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED};
+use wasmtime_environ::{
+    VM_REPLAY_DEBUG, VM_REPLAY_HOST_CALL, VM_REPLAY_RETURNED, VM_REPLAY_TRAPPED,
+};
 
 mod checkpoint;
 pub use checkpoint::Checkpoint;
@@ -155,6 +157,13 @@ struct Driver<'a, T: 'static> {
     observers: Vec<(u32, Box<dyn FnMut(&[u8]) -> Result<()> + Send>)>,
     stop_at_events: bool,
     finished: bool,
+    // The activation stopped at a debug event, which resumes before any
+    // further trace events are processed.
+    paused: Option<u64>,
+    // The write that the paused activation, stopped at a watchpoint, performs
+    // when resumed. It has passed its shadow check, so checkpoints that would
+    // mark its pages clean must leave them dirty.
+    pending_write: Option<(Memory, Range<usize>)>,
     // Why the current `run` should return, once the current step completes.
     stop: Option<ReplayStop>,
     next_serial: u64,
@@ -176,9 +185,19 @@ pub struct Replayer<'a, T: 'static> {
 pub enum ReplayStop {
     /// The entire trace was replayed.
     Finished,
+    /// Guest code reached a breakpoint or single-stepped, as configured
+    /// through the store's breakpoint API. The stopped frames are available
+    /// from `Replayer::debug_exit_frames`.
+    Breakpoint,
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
+    /// Guest code is about to write bytes watched with
+    /// [`BreakpointState::watch`](crate::BreakpointState::watch); the
+    /// write happens when replay continues. The stopped frames are available
+    /// as for breakpoints.
+    #[cfg(feature = "debug")]
+    Watchpoint(crate::WatchpointHit),
 }
 
 impl<'a, T: Send + 'static> Replayer<'a, T> {
@@ -187,10 +206,6 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         ensure!(
             store.engine().is_replaying(),
             "replay requires RRConfig::Replaying"
-        );
-        ensure!(
-            !store.engine().tunables().debug_guest,
-            "replay does not support guest debugging"
         );
         // `Trace` construction checked the version and framing.
         let mut reader = Reader::new(&trace.bytes);
@@ -201,8 +216,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             mode: Mode::Replaying {
                 bytecode: Default::default(),
                 growth_failures: Vec::new(),
+                #[cfg(feature = "debug")]
+                watchpoint: None,
                 histories: Default::default(),
                 page_size: 4096,
+                stopped: Vec::new(),
             },
             pending: Vec::new(),
             failure: None,
@@ -221,6 +239,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 observers: Vec::new(),
                 stop_at_events: false,
                 finished: false,
+                paused: None,
+                pending_write: None,
                 stop: None,
                 next_serial: 0,
                 checkpoints: Default::default(),
@@ -268,10 +288,11 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// be cancelled by dropping the future.
     pub async fn run(&mut self) -> Result<ReplayStop> {
         let driver = &mut self.driver;
-        core::future::poll_fn(|cx| {
+        driver.publish_stopped(false);
+        let result = core::future::poll_fn(|cx| {
             // Give the executor a chance to cancel long traces between events.
             for _ in 0..256 {
-                if driver.finished {
+                if driver.finished && driver.paused.is_none() {
                     return Poll::Ready(Ok(ReplayStop::Finished));
                 }
                 if let Err(e) = driver.step() {
@@ -287,7 +308,74 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             cx.waker().wake_by_ref();
             Poll::Pending
         })
-        .await
+        .await;
+        self.driver.publish_stopped(true);
+        result
+    }
+
+    /// The frames of the activation stopped at a debug event, as for
+    /// [`Store::debug_exit_frames`](crate::Store::debug_exit_frames): one
+    /// exit frame for it, followed by one for each activation parked at a host
+    /// call, most recently started first. For nested calls (a host function
+    /// calling back into the guest) this is their logical call order. This is
+    /// empty unless [`Replayer::run`] returned [`ReplayStop::Breakpoint`].
+    ///
+    /// The frames can be inspected through [`Replayer::store`] until replay
+    /// continues or is restored. While replay is stopped, the store's own
+    /// [`debug_exit_frames`](crate::StoreContextMut::debug_exit_frames)
+    /// returns the same frames.
+    #[cfg(feature = "debug")]
+    pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
+        self.driver.store.debug_exit_frames().collect()
+    }
+
+    /// Compiles every module in the trace now, rather than when replay
+    /// reaches it, and returns them in trace order. Replay then uses these
+    /// compiled modules. Their bytecode must already have been provided with
+    /// [`Replayer::add_bytecode`]. With guest debugging enabled, they are also
+    /// registered for debugging, as with
+    /// [`Store::debug_register_module`](crate::Store::debug_register_module),
+    /// so that a debugger can find them and set breakpoints in them before
+    /// replay starts.
+    pub fn preload_modules(&mut self) -> Result<Vec<crate::Module>> {
+        let engine = self.driver.store.engine().clone();
+        let mut reader = Reader::new(self.driver.reader.bytes());
+        reader.take(codec::MAGIC.len())?;
+        while reader.peek_tag().is_some() {
+            let (tag, mut body) = reader.record()?;
+            if tag != codec::MODULE {
+                continue;
+            }
+            let id = usize::try_from(body.u32()?)?;
+            let checksum = body.checksum()?;
+            let session = self.driver.store.rr.session.as_mut().unwrap();
+            ensure!(id <= session.objects.modules.len(), "invalid module id");
+            if id == session.objects.modules.len() {
+                let module = super::init::compile_module(&engine, session.bytecode(&checksum)?)?;
+                let modules = &mut session.objects.modules;
+                modules.try_reserve(1)?;
+                modules.push(module.clone());
+                #[cfg(feature = "debug")]
+                if engine.tunables().debug_guest {
+                    let (registry, engine, breakpoints) =
+                        self.driver.store.modules_and_engine_and_breakpoints_mut();
+                    registry.register_module(&module, engine, breakpoints)?;
+                }
+            }
+        }
+        let modules = &self
+            .driver
+            .store
+            .rr
+            .session
+            .as_ref()
+            .unwrap()
+            .objects
+            .modules;
+        let mut result = Vec::new();
+        result.try_reserve_exact(modules.len())?;
+        result.extend(modules.iter().cloned());
+        Ok(result)
     }
 
     /// Sets the granularity, in bytes, at which checkpoints track writes to
@@ -326,9 +414,22 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// The store being replayed into, for inspection.
     ///
     /// Only the replay may change the store's state, so this gives only
-    /// shared access to it.
+    /// shared access to it. Its debugging state, such as breakpoints and
+    /// watchpoints, can be changed through [`Replayer::edit_breakpoints`].
     pub fn store(&self) -> StoreContext<'_, T> {
         StoreContext(self.driver.store)
+    }
+
+    /// Borrow the [`BreakpointState`] of the store being replayed into, to
+    /// edit its breakpoints, single-stepping, and watchpoints, which unlike
+    /// the rest of the store can be changed (see [`Replayer::store`]).
+    ///
+    /// Returns `None` if guest debugging is not enabled.
+    ///
+    /// [`BreakpointState`]: crate::BreakpointState
+    #[cfg(feature = "debug")]
+    pub fn edit_breakpoints(&mut self) -> Option<crate::BreakpointState<'_>> {
+        self.driver.store.edit_breakpoints()
     }
 
     /// Looks up `instance`'s export `name`, as [`Instance::get_export`] does.
@@ -340,6 +441,19 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
     /// [`Instance::get_export`]: crate::Instance::get_export
     pub fn get_export(&mut self, instance: crate::Instance, name: &str) -> Option<crate::Extern> {
         instance.get_export(StoreContextMut(self.driver.store), name)
+    }
+
+    /// Looks up a function in `instance`'s function index space, as
+    /// [`Instance::debug_function`] does; see [`Replayer::get_export`].
+    ///
+    /// [`Instance::debug_function`]: crate::Instance::debug_function
+    #[cfg(feature = "debug")]
+    pub fn debug_function(
+        &mut self,
+        instance: crate::Instance,
+        function_index: u32,
+    ) -> Option<crate::Func> {
+        instance.debug_function(StoreContextMut(self.driver.store), function_index)
     }
 
     pub(super) fn into_replay(mut self) -> Replay {
@@ -362,6 +476,11 @@ impl<T: 'static> Driver<'_, T> {
     }
 
     fn step(&mut self) -> Result<()> {
+        if let Some(serial) = self.paused.take() {
+            self.pending_write = None;
+            let index = self.index_of(serial);
+            return self.resume(index, None, true);
+        }
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
             ensure!(
@@ -446,7 +565,7 @@ impl<T: 'static> Driver<'_, T> {
                     .map_err(|_| OutOfMemory::new(core::mem::size_of::<Activation>()))?;
                 let activation = self.activate(func, id, call, values)?;
                 self.activations.push(activation);
-                self.resume(self.activations.len() - 1, None)?;
+                self.resume(self.activations.len() - 1, None, false)?;
             }
             codec::ENTER_HOST => {
                 let Some(Observed::Host(activation, mut call)) = self.observed.take() else {
@@ -516,7 +635,7 @@ impl<T: 'static> Driver<'_, T> {
                 let outcome = body.outcome(&bound.results, values, |id| {
                     session.objects.decode_ref(self.store, id)
                 })?;
-                self.resume(index, outcome.err())?;
+                self.resume(index, outcome.err(), false)?;
             }
             codec::LEAVE_WASM => {
                 let Some(Observed::Complete(actual_call, result)) = self.observed.take() else {
@@ -708,6 +827,40 @@ impl<T: 'static> Driver<'_, T> {
         })
     }
 
+    /// Publishes the exit state of the activations whose frames a debugger
+    /// sees while replay is stopped (if `stopped`): the activation stopped at
+    /// a debug event, then those parked at host calls, most recently started
+    /// first.
+    fn publish_stopped(&mut self, stopped: bool) {
+        let paused = self.paused.filter(|_| stopped);
+        let mut list = Vec::new();
+        if let Some(paused) = paused {
+            let mut order = self
+                .activations
+                .iter()
+                .rev()
+                .filter(|a| a.serial == paused || a.host.is_some())
+                .collect::<Vec<_>>();
+            order.sort_by_key(|a| a.serial != paused);
+            list = order
+                .into_iter()
+                .map(|a| {
+                    let cx = &a.context;
+                    (
+                        cx.last_wasm_exit_pc,
+                        cx.last_wasm_exit_trampoline_fp,
+                        cx.last_wasm_entry_fp,
+                    )
+                })
+                .collect();
+        }
+        let Mode::Replaying { stopped, .. } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        *stopped = list;
+    }
+
     fn growth_failures(&mut self) -> &mut Vec<[u8; codec::GROWTH_FAILED_LEN]> {
         let Mode::Replaying {
             growth_failures, ..
@@ -734,18 +887,21 @@ impl<T: 'static> Driver<'_, T> {
 
     /// Runs the activation at `index` until its next yield and records what it
     /// yielded for. A `pending` error resumes a parked host call as failed.
-    fn resume(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
+    /// `paused` resumes an activation stopped at a debug event.
+    fn resume(&mut self, index: usize, pending: Option<Error>, paused: bool) -> Result<()> {
         // Guest growth failures recorded while the activation ran follow the
         // event that resumes it; queue them for the growth libcalls.
-        let mut failures = Vec::new();
-        while self.reader.peek_tag() == Some(codec::GROWTH_FAILED) {
-            let (_, mut body) = self.reader.record()?;
-            let record = body.take(codec::GROWTH_FAILED_LEN)?;
-            body.end()?;
-            failures.try_reserve(1)?;
-            failures.push(record.try_into().unwrap());
+        if !paused {
+            let mut failures = Vec::new();
+            while self.reader.peek_tag() == Some(codec::GROWTH_FAILED) {
+                let (_, mut body) = self.reader.record()?;
+                let record = body.take(codec::GROWTH_FAILED_LEN)?;
+                body.end()?;
+                failures.try_reserve(1)?;
+                failures.push(record.try_into().unwrap());
+            }
+            *self.growth_failures() = failures;
         }
-        *self.growth_failures() = failures;
 
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
@@ -809,6 +965,25 @@ impl<T: 'static> Driver<'_, T> {
         // SAFETY: the activation has yielded, and this reference does not
         // outlive this function.
         let control = unsafe { &*control };
+        if control.reason == VM_REPLAY_DEBUG {
+            self.paused = Some(serial);
+            #[cfg(feature = "debug")]
+            let Mode::Replaying { watchpoint, .. } =
+                &mut self.store.rr.session.as_mut().unwrap().mode
+            else {
+                unreachable!()
+            };
+            #[cfg(feature = "debug")]
+            if let Some(hit) = watchpoint.take() {
+                let start = usize::try_from(hit.address).unwrap_or(usize::MAX);
+                let end = start.saturating_add(usize::try_from(hit.len).unwrap_or(usize::MAX));
+                self.pending_write = Some((hit.memory, start..end));
+                self.stop = Some(ReplayStop::Watchpoint(hit));
+                return Ok(());
+            }
+            self.stop = Some(ReplayStop::Breakpoint);
+            return Ok(());
+        }
         ensure!(
             self.growth_failures().is_empty(),
             "replay diverged: a recorded guest growth failure did not occur"
