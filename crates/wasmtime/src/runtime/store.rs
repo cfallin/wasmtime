@@ -126,6 +126,8 @@ pub use self::async_::CallHookHandler;
 
 #[cfg(feature = "gc")]
 mod gc;
+#[cfg(all(feature = "gc", feature = "rr"))]
+pub(crate) use gc::RrGcImage;
 #[cfg(not(feature = "gc"))]
 mod gc_disabled;
 
@@ -1934,6 +1936,10 @@ impl StoreOpaque {
     ///
     /// * Wasm returning, trapping, or unwinding back to the host code that
     ///   called it, in `catch_traps`.
+    ///
+    /// Replay is the exception: it runs Wasm on raw fibers, which bypass both
+    /// of the points above, so `Replayer::run` invalidates before replaying
+    /// anything instead.
     ///
     /// No invalidation is needed when control passes from the host into Wasm
     /// (calling Wasm, returning from a host function, or resuming a fiber),
