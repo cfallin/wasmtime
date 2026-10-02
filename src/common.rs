@@ -107,6 +107,17 @@ pub struct RunCommon {
     #[cfg(feature = "gdbstub")]
     #[arg(short = 'g', long = "gdbstub", value_name = "[ADDR:]PORT")]
     pub gdbstub: Option<String>,
+
+    /// Record the execution into a trace file, which `wasmtime replay` can
+    /// replay deterministically, including under a debugger.
+    ///
+    /// The trace contains everything the guest received from the outside
+    /// world, along with its output. With `wasmtime serve`, each request's
+    /// execution is recorded to its own trace, `PATH.N` for the `N`th
+    /// request.
+    #[cfg(feature = "rr")]
+    #[arg(long = "record", value_name = "PATH")]
+    pub record: Option<std::path::PathBuf>,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, Option<String>)> {
@@ -588,5 +599,113 @@ impl wasmtime_wasi_http::WasiHttpHooks for HttpHooks {
 
     fn p2_outgoing_body_chunk_size(&mut self) -> usize {
         self.p2_outgoing_body_chunk_size
+    }
+}
+
+/// How a recorded program exited, recorded at the end of `--record` traces so
+/// that `wasmtime replay` exits the same way.
+#[cfg(feature = "rr")]
+#[derive(serde_derive::Serialize, serde_derive::Deserialize, Debug, Clone)]
+pub struct RecordedExit {
+    /// The WASI exit code, if the program exited explicitly.
+    code: Option<i32>,
+    /// Whether the program trapped.
+    trap: bool,
+    /// The error the program failed with, if any, as Wasmtime printed it.
+    error: Option<String>,
+}
+
+#[cfg(feature = "rr")]
+impl wasmtime::rr::TraceEvent for RecordedExit {
+    const TAG: u32 = 0x8000_0100;
+}
+
+/// Records WASI stdout and stderr (when inherited) through `sink`.
+#[cfg(feature = "rr")]
+pub fn record_output(
+    builder: &mut WasiCtxBuilder,
+    sink: &wasmtime::rr::EventSink,
+    stdout: bool,
+    stderr: bool,
+) {
+    use wasmtime_wasi::rr::{OutputKind, RecordedOutput};
+    if stdout {
+        builder.stdout(RecordedOutput::new(
+            wasmtime_wasi::cli::stdout(),
+            sink.clone(),
+            OutputKind::Stdout,
+        ));
+    }
+    if stderr {
+        builder.stderr(RecordedOutput::new(
+            wasmtime_wasi::cli::stderr(),
+            sink.clone(),
+            OutputKind::Stderr,
+        ));
+    }
+}
+
+/// Finishes `store`'s recording, recording how the program exited (`error`,
+/// if it failed), and writes the trace to `path`.
+#[cfg(feature = "rr")]
+pub fn finish_recording<T: 'static>(
+    store: &mut Store<T>,
+    path: &Path,
+    error: Option<&wasmtime::Error>,
+) -> Result<()> {
+    let exit = match error {
+        None => RecordedExit {
+            code: None,
+            trap: false,
+            error: None,
+        },
+        Some(e) => match e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+            Some(exit) => RecordedExit {
+                code: Some(exit.0),
+                trap: false,
+                error: None,
+            },
+            None => RecordedExit {
+                code: None,
+                trap: e.is::<wasmtime::Trap>(),
+                error: Some(format!("{e:?}")),
+            },
+        },
+    };
+    wasmtime::rr::record_event(&mut *store, &exit)?;
+    let trace = store
+        .finish_recording()
+        .context("failed to record the execution")?;
+    std::fs::write(path, trace.as_bytes())
+        .with_context(|| format!("failed to write trace to `{}`", path.display()))?;
+    Ok(())
+}
+
+/// Exits as a recorded program did, once its replay has finished.
+#[cfg(feature = "rr")]
+pub fn replay_exit(exit: Option<RecordedExit>) -> Result<()> {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let Some(exit) = exit else {
+        return Ok(());
+    };
+    if let Some(code) = exit.code {
+        std::process::exit(code);
+    }
+    match exit.error {
+        Some(error) if exit.trap => {
+            eprintln!("Error: {error}");
+            cfg_select! {
+                unix => {
+                    std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
+                }
+                windows => {
+                    std::process::exit(3);
+                }
+            }
+        }
+        Some(error) => Err(format_err!("{error}")),
+        None => Ok(()),
     }
 }

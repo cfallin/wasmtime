@@ -38,6 +38,10 @@ impl WizerCommand {
     /// Runs the command.
     pub fn execute(mut self) -> Result<()> {
         self.run.common.init_logging()?;
+        #[cfg(feature = "rr")]
+        if self.run.record.is_some() {
+            wasmtime::bail!("`wasmtime wizer` does not support --record");
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_time()
             .enable_io()
@@ -90,6 +94,8 @@ impl WizerCommand {
             }),
             module_and_args: vec![self.input.clone().into()],
             preloads: self.preloads.clone(),
+            #[cfg(feature = "rr")]
+            rr_sink: None,
             module_bytes: None,
         };
         let engine = run.new_engine()?;

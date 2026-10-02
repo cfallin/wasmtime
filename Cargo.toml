@@ -528,6 +528,7 @@ default = [
   "winch",
   "pulley",
   "debug",
+  "rr",
 
   # Enable some nice features of clap by default, but they come at a binary size
   # cost, so allow disabling this through disabling of our own `default`
@@ -554,6 +555,8 @@ component-model-async = [
   "wasmtime-wasi-tls?/p3",
   "dep:futures",
 ]
+# Record/replay: `wasmtime run --record`, `wasmtime serve --record`, and
+# `wasmtime replay`.
 rr = [
   "wasmtime/rr",
   "component-model",

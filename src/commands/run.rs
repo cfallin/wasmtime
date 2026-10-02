@@ -77,6 +77,11 @@ pub struct RunCommand {
     #[arg(skip)]
     pub module_bytes: Option<&'static [u8]>,
 
+    /// The sink through which WASI output is recorded with `--record`.
+    #[cfg(feature = "rr")]
+    #[arg(skip)]
+    pub(crate) rr_sink: Option<wasmtime::rr::EventSink>,
+
     /// The WebAssembly module to run and arguments to pass to it.
     ///
     /// Arguments passed to the wasm module will be configured as WASI CLI
@@ -244,6 +249,19 @@ impl RunCommand {
 
             #[cfg(feature = "debug")]
             let debug_run = self.debugger_run()?;
+            #[cfg(all(feature = "debug", feature = "rr"))]
+            if debug_run.is_some() && self.run.record.is_some() {
+                bail!("--record cannot be combined with a debugger; debug the replay instead");
+            }
+
+            // With `--record`, WASI output goes to the trace through this
+            // channel, whose receiver is attached once recording starts.
+            #[cfg(feature = "rr")]
+            let rr_receiver = self.run.record.as_ref().map(|_| {
+                let (sink, receiver) = wasmtime::rr::event_channel();
+                self.rr_sink = Some(sink);
+                receiver
+            });
 
             let engine = self.new_engine()?;
             let main = self.run.load_module(
@@ -252,6 +270,11 @@ impl RunCommand {
                 self.module_bytes.as_ref().map(|v| &v[..]),
             )?;
             let (mut store, mut linker) = self.new_store_and_linker(&engine, &main)?;
+            #[cfg(feature = "rr")]
+            if let Some(receiver) = rr_receiver {
+                store.start_recording()?;
+                store.rr_attach_events(receiver)?;
+            }
 
             #[cfg(feature = "debug")]
             if let Some(mut debug_run) = debug_run {
@@ -328,9 +351,47 @@ impl RunCommand {
         })
     }
 
+    /// Prints output of the CLI itself (rather than the guest), such as
+    /// `--invoke` results, to stdout or (if `stderr`) stderr. With
+    /// `--record`, it is recorded like guest output, so replay prints it too.
+    fn print_output(&self, stderr: bool, text: &str) {
+        use std::io::Write as _;
+        if stderr {
+            let _ = std::io::stderr().write_all(text.as_bytes());
+        } else {
+            let _ = std::io::stdout().write_all(text.as_bytes());
+        }
+        #[cfg(feature = "rr")]
+        if let Some(sink) = &self.rr_sink {
+            use wasmtime_wasi::rr::{Output, OutputKind};
+            sink.record(&Output {
+                kind: if stderr {
+                    OutputKind::Stderr
+                } else {
+                    OutputKind::Stdout
+                },
+                bytes: text.as_bytes().to_vec(),
+            });
+        }
+    }
+
     /// Creates a new `Engine` with the configuration for this command.
     pub fn new_engine(&mut self) -> Result<Engine> {
         let mut config = self.run.common.config(None)?;
+
+        #[cfg(feature = "rr")]
+        if self.run.record.is_some() {
+            if self.run.common.wasm.timeout.is_some() {
+                bail!("--record cannot be combined with -W timeout");
+            }
+            if self.run.common.wasm.fuel.is_some() {
+                bail!("--record cannot be combined with -W fuel");
+            }
+            if self.run.profile.is_some() {
+                bail!("--record cannot be combined with --profile");
+            }
+            config.rr(wasmtime::RRConfig::Recording);
+        }
 
         if self.run.common.wasm.timeout.is_some() {
             config.epoch_interruption(true);
@@ -477,11 +538,17 @@ impl RunCommand {
         })
         .await;
 
-        // Load the main wasm module.
-        let instance = match result.unwrap_or_else(|elapsed| {
+        let result = result.unwrap_or_else(|elapsed| {
             Err(wasmtime::Error::from(wasmtime::Trap::Interrupt))
                 .with_context(|| format!("timed out after {elapsed}"))
-        }) {
+        });
+        #[cfg(feature = "rr")]
+        if let Some(path) = &self.run.record {
+            crate::common::finish_recording(store, path, result.as_ref().err())?;
+        }
+
+        // Load the main wasm module.
+        let instance = match result {
             Ok(instance) => instance,
             Err(e) => {
                 // Exit the process if Wasmtime understands the error;
@@ -814,7 +881,7 @@ impl RunCommand {
         self.call_component_func(store, &params, func, &mut results)
             .await?;
 
-        println!("{}", DisplayFuncResults(&results));
+        self.print_output(false, &format!("{}\n", DisplayFuncResults(&results)));
         Ok(instance)
     }
 
@@ -1074,30 +1141,32 @@ impl RunCommand {
         }
 
         if !results.is_empty() {
-            eprintln!(
+            self.print_output(
+                true,
                 "warning: using `--invoke` with a function that returns values \
-                 is experimental and may break in the future"
+                 is experimental and may break in the future\n",
             );
         }
 
         for result in results {
-            match result {
-                Val::I32(i) => println!("{i}"),
-                Val::I64(i) => println!("{i}"),
-                Val::F32(f) => println!("{}", f32::from_bits(f)),
-                Val::F64(f) => println!("{}", f64::from_bits(f)),
-                Val::V128(i) => println!("{}", i.as_u128()),
-                Val::ExternRef(None) => println!("<null externref>"),
-                Val::ExternRef(Some(_)) => println!("<externref>"),
-                Val::FuncRef(None) => println!("<null funcref>"),
-                Val::FuncRef(Some(_)) => println!("<funcref>"),
-                Val::AnyRef(None) => println!("<null anyref>"),
-                Val::AnyRef(Some(_)) => println!("<anyref>"),
-                Val::ExnRef(None) => println!("<null exnref>"),
-                Val::ExnRef(Some(_)) => println!("<exnref>"),
-                Val::ContRef(None) => println!("<null contref>"),
-                Val::ContRef(Some(_)) => println!("<contref>"),
-            }
+            let line = match result {
+                Val::I32(i) => i.to_string(),
+                Val::I64(i) => i.to_string(),
+                Val::F32(f) => f32::from_bits(f).to_string(),
+                Val::F64(f) => f64::from_bits(f).to_string(),
+                Val::V128(i) => i.as_u128().to_string(),
+                Val::ExternRef(None) => "<null externref>".to_string(),
+                Val::ExternRef(Some(_)) => "<externref>".to_string(),
+                Val::FuncRef(None) => "<null funcref>".to_string(),
+                Val::FuncRef(Some(_)) => "<funcref>".to_string(),
+                Val::AnyRef(None) => "<null anyref>".to_string(),
+                Val::AnyRef(Some(_)) => "<anyref>".to_string(),
+                Val::ExnRef(None) => "<null exnref>".to_string(),
+                Val::ExnRef(Some(_)) => "<exnref>".to_string(),
+                Val::ContRef(None) => "<null contref>".to_string(),
+                Val::ContRef(Some(_)) => "<contref>".to_string(),
+            };
+            self.print_output(false, &format!("{line}\n"));
         }
 
         Ok(())
@@ -1339,6 +1408,15 @@ impl RunCommand {
             builder.inherit_stderr();
         }
         self.run.configure_wasip2(&mut builder)?;
+        #[cfg(feature = "rr")]
+        if let Some(sink) = &self.rr_sink {
+            crate::common::record_output(
+                &mut builder,
+                sink,
+                self.run.common.wasi.inherit_stdout.unwrap_or(true),
+                self.run.common.wasi.inherit_stderr.unwrap_or(true),
+            );
+        }
         store.data_mut().wasip1_ctx = Some(builder.build_p1());
         Ok(())
     }
