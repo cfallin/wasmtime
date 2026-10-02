@@ -164,6 +164,9 @@ enum Mode {
         // Recorded guest growth failures that the running activation has yet
         // to reproduce, in order.
         growth_failures: Vec<[u8; codec::GROWTH_FAILED_LEN]>,
+        // The watchpoint at which the running activation requested a stop.
+        #[cfg(feature = "debug")]
+        watchpoint: Option<crate::WatchpointHit>,
     },
 }
 
@@ -346,6 +349,27 @@ impl StoreOpaque {
         Ok(record)
     }
 
+    /// Records that guest code wrote `range` of `memory`, whose shadow has
+    /// clean bits there, for checkpoints.
+    pub(crate) fn rr_dirty(&mut self, memory: Memory, range: Range<usize>) -> Result<()> {
+        let _ = (memory, range);
+        Ok(())
+    }
+
+    /// Requests that the running replay activation, if any, stop at a
+    /// watchpoint, reporting `hit`.
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_debug_stop_at_watchpoint(&mut self, hit: crate::WatchpointHit) -> bool {
+        if !self.rr_debug_stop() {
+            return false;
+        }
+        let Mode::Replaying { watchpoint, .. } = &mut self.rr_session().mode else {
+            unreachable!()
+        };
+        *watchpoint = Some(hit);
+        true
+    }
+
     /// Requests that the running replay activation, if any, stop for a debug
     /// event. Its breakpoint trampoline yields to the driver once the libcall
     /// requesting this returns.
@@ -370,7 +394,10 @@ impl StoreOpaque {
             return Ok(false);
         }
         let record = self.rr_growth_record(object, delta)?;
-        let Mode::Replaying { growth_failures } = &mut self.rr_session().mode else {
+        let Mode::Replaying {
+            growth_failures, ..
+        } = &mut self.rr_session().mode
+        else {
             unreachable!()
         };
         if growth_failures.first() == Some(&record) {

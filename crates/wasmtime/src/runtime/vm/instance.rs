@@ -10,8 +10,8 @@ use crate::runtime::vm::memory::{Memory, RuntimeMemoryCreator};
 use crate::runtime::vm::table::{Table, TableElementType};
 use crate::runtime::vm::vmcontext::{
     VMBuiltinFunctionsArray, VMContext, VMFuncRef, VMFunctionImport, VMGlobalDefinition,
-    VMGlobalImport, VMMemoryDefinition, VMMemoryImport, VMOpaqueContext, VMStoreContext,
-    VMTableDefinition, VMTableImport, VMTagDefinition, VMTagImport,
+    VMGlobalImport, VMMemoryDefinition, VMMemoryImport, VMMemoryShadow, VMOpaqueContext,
+    VMStoreContext, VMTableDefinition, VMTableImport, VMTagDefinition, VMTagImport,
 };
 use crate::runtime::vm::{
     GcStore, HostResult, Imports, ModuleRuntimeInfo, SendSyncPtr, VMGcRef, VMGlobalKind, VMStore,
@@ -1331,6 +1331,31 @@ impl Instance {
                     ptr.write(VmPtr::from(owned_ptr));
                     owned_ptr = owned_ptr.add(1);
                 }
+                ptr = ptr.add(1);
+            }
+        }
+
+        // Point to each memory's watchpoint shadow, if it has one. An imported
+        // memory's shadow belongs to the instance that defines it.
+        //
+        // SAFETY: the imports were written above and refer to live instances.
+        unsafe {
+            let offsets = instance.runtime_info.offsets();
+            let mut ptr = instance
+                .vmctx_plus_offset_raw::<VmPtr<VMMemoryShadow>>(offsets.memory_shadows().begin());
+            for i in 0..module.memories.len() {
+                let index = MemoryIndex::new(i);
+                let memory = match module.defined_memory_index(index) {
+                    Some(def_index) => instance.get_defined_memory(def_index),
+                    None => {
+                        let import = instance.imported_memory(index);
+                        instance
+                            .sibling_vmctx(import.vmctx.as_non_null())
+                            .get_defined_memory(import.index)
+                    }
+                };
+                let cell = memory.shadow().map(|s| s.cell());
+                ptr.write(VmPtr::from(cell.unwrap_or(NonNull::dangling())));
                 ptr = ptr.add(1);
             }
         }

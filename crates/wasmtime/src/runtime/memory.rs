@@ -745,6 +745,30 @@ impl Memory {
             .rr_resize_memory(self.index, len)
     }
 
+    /// This memory's watchpoint shadow, if compiled code checks it.
+    pub(crate) fn vm_shadow<'a>(
+        &self,
+        store: &'a StoreOpaque,
+    ) -> Option<&'a crate::runtime::vm::MemoryShadow> {
+        store[self.instance].get_defined_memory(self.index).shadow()
+    }
+
+    /// This memory's watchpoint shadow, if compiled code checks it.
+    pub(crate) fn vm_shadow_mut<'a>(
+        &self,
+        store: &'a mut StoreOpaque,
+    ) -> Option<&'a mut crate::runtime::vm::MemoryShadow> {
+        self.instance
+            .get_mut(store)
+            .get_defined_memory_mut(self.index)
+            .shadow_mut()
+    }
+
+    /// Whether this is the same memory as `other`.
+    pub(crate) fn same(&self, other: &Memory) -> bool {
+        self.instance == other.instance && self.index == other.index
+    }
+
     #[cfg(feature = "rr")]
     pub(crate) fn rr_data<'a>(&self, store: &'a StoreOpaque) -> &'a [u8] {
         let definition = store[self.instance].memory(self.index);

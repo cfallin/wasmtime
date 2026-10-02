@@ -471,6 +471,8 @@ pub struct VMOffsets<P> {
     pub num_defined_memories: u32,
     /// The number of memories owned by the module instance.
     pub num_owned_memories: u32,
+    /// The number of memories, imported and defined.
+    pub num_memories: u32,
     /// The number of defined globals in the module.
     pub num_defined_globals: u32,
     /// The number of defined tags in the module.
@@ -498,6 +500,7 @@ pub struct VMOffsets<P> {
     startup_func_ref: u32,
     runtime_data_bases: u32,
     runtime_data_lengths: u32,
+    memory_shadows: u32,
     size: u32,
 }
 
@@ -647,6 +650,8 @@ pub struct VMOffsetsFields<P> {
     pub num_defined_memories: u32,
     /// The number of memories owned by the module instance.
     pub num_owned_memories: u32,
+    /// The number of memories, imported and defined.
+    pub num_memories: u32,
     /// The number of defined globals in the module.
     pub num_defined_globals: u32,
     /// The number of defined tags in the module.
@@ -681,6 +686,7 @@ impl<P: PtrSize> VMOffsets<P> {
             num_defined_tables: cast_to_u32(module.num_defined_tables()),
             num_defined_memories: cast_to_u32(module.num_defined_memories()),
             num_owned_memories,
+            num_memories: cast_to_u32(module.memories.len()),
             num_defined_globals: cast_to_u32(module.globals.len() - module.num_imported_globals),
             num_defined_tags: cast_to_u32(module.tags.len() - module.num_imported_tags),
             num_escaped_funcs: cast_to_u32(module.num_escaped_funcs),
@@ -716,6 +722,7 @@ impl<P: PtrSize> VMOffsets<P> {
                     num_defined_memories: _,
                     num_defined_tags: _,
                     num_owned_memories: _,
+                    num_memories: _,
                     num_escaped_funcs: _,
                     num_runtime_data: _,
                     has_startup_func: _,
@@ -747,6 +754,7 @@ impl<P: PtrSize> VMOffsets<P> {
         }
 
         calculate_sizes! {
+            memory_shadows: "memory shadows",
             runtime_data_lengths: "runtime data lengths",
             runtime_data_bases: "runtime data base pointers",
             startup_func_ref: "startup funcref",
@@ -786,6 +794,7 @@ impl<P: PtrSize> From<VMOffsetsFields<P>> for VMOffsets<P> {
             num_defined_tables: fields.num_defined_tables,
             num_defined_memories: fields.num_defined_memories,
             num_owned_memories: fields.num_owned_memories,
+            num_memories: fields.num_memories,
             num_defined_globals: fields.num_defined_globals,
             num_defined_tags: fields.num_defined_tags,
             num_escaped_funcs: fields.num_escaped_funcs,
@@ -805,6 +814,7 @@ impl<P: PtrSize> From<VMOffsetsFields<P>> for VMOffsets<P> {
             startup_func_ref: 0,
             runtime_data_bases: 0,
             runtime_data_lengths: 0,
+            memory_shadows: 0,
             size: 0,
         };
         ret.compute_field_offsets();

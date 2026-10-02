@@ -256,6 +256,8 @@ fn result_to_event(table: &mut ResourceTable, value: DebugRunResult) -> Result<w
         DebugRunResult::HostcallError => wit::Event::Trap,
         DebugRunResult::Trap(_t) => wit::Event::Trap,
         DebugRunResult::Breakpoint => wit::Event::Breakpoint,
+        // TODO: report watchpoints through the WIT interface.
+        DebugRunResult::Watchpoint(_) => wit::Event::Breakpoint,
         DebugRunResult::EpochYield => wit::Event::Interrupted,
         DebugRunResult::Exception(e) => {
             let e = table.push(WasmException(e))?;

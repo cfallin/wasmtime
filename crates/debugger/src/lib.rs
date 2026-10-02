@@ -24,7 +24,7 @@ use tokio::{
 };
 use wasmtime::{
     AsContextMut, DebugEvent, DebugHandler, Engine, ExnRef, OwnedRooted, Result, Store,
-    StoreContextMut, Trap,
+    StoreContextMut, Trap, WatchpointHit,
 };
 
 mod host;
@@ -181,6 +181,7 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
             DebugEvent::Exception(exn) => DebugRunResult::Exception(exn),
             DebugEvent::Trap(trap) => DebugRunResult::Trap(trap),
             DebugEvent::Breakpoint => DebugRunResult::Breakpoint,
+            DebugEvent::Watchpoint(hit) => DebugRunResult::Watchpoint(hit),
             DebugEvent::EpochYield => {
                 // Only pause on epoch yields that were requested via
                 // interrupt(). Other epoch ticks simply yield to the
@@ -517,6 +518,9 @@ pub enum DebugRunResult {
     Trap(Trap),
     /// A breakpoint was reached.
     Breakpoint,
+    /// Wasm is about to write watched memory; the write happens when
+    /// execution continues.
+    Watchpoint(WatchpointHit),
 }
 
 #[cfg(test)]

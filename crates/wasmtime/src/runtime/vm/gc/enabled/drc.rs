@@ -1370,6 +1370,7 @@ mod tests {
             num_defined_tables: 0,
             num_defined_memories: 0,
             num_owned_memories: 0,
+            num_memories: 0,
             num_defined_globals: 0,
             num_defined_tags: 0,
             num_escaped_funcs: 0,

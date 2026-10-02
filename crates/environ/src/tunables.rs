@@ -151,6 +151,10 @@ define_tunables! {
         /// enabled.
         pub concurrency_support: bool,
 
+        /// Whether compiled code checks a linear memory's shadow before each
+        /// store, for watchpoints (see `VMMemoryShadow`).
+        pub memory_watchpoints: bool,
+
         /// Whether record/replay compilation is enabled. Retains core Wasm
         /// bytecode, preserves component builtin calls for interception, and
         /// (for native targets) includes the replay trampolines.
@@ -283,6 +287,7 @@ impl Tunables {
             inlining_sum_size_threshold: 2000,
             debug_guest: false,
             concurrency_support: true,
+            memory_watchpoints: false,
             recording: false,
             gc_zeal_alloc_counter: None,
             gc_heap_reservation: 0,
@@ -390,6 +395,11 @@ impl<'a> MemoryTunables<'a> {
     /// Create a new `MemoryTunables` view.
     pub fn new(tunables: &'a Tunables, kind: MemoryKind) -> Self {
         Self { tunables, kind }
+    }
+
+    /// Whether compiled code checks this memory's shadow for watchpoints.
+    pub fn watchpoints(&self) -> bool {
+        self.tunables.memory_watchpoints && self.kind == MemoryKind::LinearMemory
     }
 
     /// The virtual memory reservation for this kind of memory.

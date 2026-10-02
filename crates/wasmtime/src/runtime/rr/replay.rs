@@ -188,6 +188,12 @@ pub enum ReplayStop {
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
+    /// Guest code is about to write bytes watched with
+    /// [`Memory::debug_watch`](crate::Memory::debug_watch); the write happens
+    /// when replay continues. The stopped frames are available as for
+    /// breakpoints.
+    #[cfg(feature = "debug")]
+    Watchpoint(crate::WatchpointHit),
 }
 
 impl<'a, T: Send + 'static> Replayer<'a, T> {
@@ -205,6 +211,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
             objects: Objects::default(),
             mode: Mode::Replaying {
                 growth_failures: Vec::new(),
+                #[cfg(feature = "debug")]
+                watchpoint: None,
             },
             pending: Vec::new(),
             failure: None,
@@ -694,7 +702,9 @@ impl<T: 'static> Driver<'_, T> {
     }
 
     fn growth_failures(&mut self) -> &mut Vec<[u8; codec::GROWTH_FAILED_LEN]> {
-        let Mode::Replaying { growth_failures } = &mut self.store.rr.session.as_mut().unwrap().mode
+        let Mode::Replaying {
+            growth_failures, ..
+        } = &mut self.store.rr.session.as_mut().unwrap().mode
         else {
             unreachable!()
         };
@@ -792,6 +802,17 @@ impl<T: 'static> Driver<'_, T> {
         let control = unsafe { &*control };
         if control.reason == VM_REPLAY_DEBUG {
             self.paused = Some(serial);
+            #[cfg(feature = "debug")]
+            let Mode::Replaying { watchpoint, .. } =
+                &mut self.store.rr.session.as_mut().unwrap().mode
+            else {
+                unreachable!()
+            };
+            #[cfg(feature = "debug")]
+            if let Some(hit) = watchpoint.take() {
+                self.stop = Some(ReplayStop::Watchpoint(hit));
+                return Ok(());
+            }
             self.stop = Some(ReplayStop::Breakpoint);
             return Ok(());
         }
