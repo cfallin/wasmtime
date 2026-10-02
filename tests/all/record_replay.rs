@@ -748,6 +748,268 @@ async fn initialization_replays_start_calls_and_retains_instance_exports() -> Re
     Ok(())
 }
 
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_initialization_and_lowered_host_calls() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let record_engine = engine(RRConfig::Recording)?;
+    let mut record = Store::new(&record_engine, 0_u32);
+    record.start_recording()?;
+    let component = Component::new(
+        &record_engine,
+        r#"(component
+        (import "host" (func $host (param "x" u32) (result u32)))
+        (core func $host (canon lower (func $host)))
+        (core module $m
+            (import "" "host" (func $host (param i32) (result i32)))
+            (global $g (export "g") (mut i32) (i32.const 0))
+            (func $start i32.const 10 call $host global.set $g)
+            (start $start)
+            (func (export "run") (param i32) (result i32)
+                local.get 0 call $host global.get $g i32.add))
+        (core instance $i (instantiate $m
+            (with "" (instance (export "host" (func $host))))))
+        (func (export "run") (param "x" u32) (result u32)
+            (canon lift (core func $i "run"))))"#,
+    )?;
+    let serialized = component.serialize()?;
+    // SAFETY: these unchanged artifacts were just compiled by the same engine.
+    let component = unsafe { Component::deserialize(&record_engine, &serialized)? };
+    let mut linker = Linker::new(&record_engine);
+    linker.root().func_wrap("host", |mut store, (x,): (u32,)| {
+        *store.data_mut() += 1;
+        Ok((x + 1,))
+    })?;
+    let instance = linker.instantiate(&mut record, &component)?;
+    let run = instance.get_typed_func::<(u32,), (u32,)>(&mut record, "run")?;
+    assert_eq!(run.call(&mut record, (30,))?, (42,));
+    assert_eq!(*record.data(), 2);
+    let trace = Trace::from_bytes(record.finish_recording()?.as_bytes().to_vec())?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, 0_u32);
+    let output = replay.replay(&trace).await?;
+    assert_eq!(*replay.data(), 0);
+    assert!(!output.instances().is_empty());
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_strings_realloc_and_post_return() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (import "host" (func $host (param "s" string) (result string)))
+      (core module $alloc
+        (memory (export "memory") 1)
+        (global $next (mut i32) (i32.const 64))
+        (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+          global.get $next
+          global.get $next local.get 3 i32.add global.set $next))
+      (core instance $a (instantiate $alloc))
+      (core func $host (canon lower (func $host) (memory (core memory $a "memory")) (realloc (core func $a "realloc"))))
+      (core module $run
+        (import "" "host" (func $host (param i32 i32 i32)))
+        (import "" "memory" (memory 1))
+        (func (export "run") (param i32 i32) (result i32)
+          local.get 0 local.get 1 i32.const 16 call $host i32.const 16)
+        (func (export "post") (param i32)
+          i32.const 32 i32.const 1 i32.store))
+      (core instance $r (instantiate $run
+        (with "" (instance (export "host" (func $host)) (export "memory" (memory $a "memory"))))))
+      (func (export "run") (param "s" string) (result string)
+        (canon lift (core func $r "run") (memory (core memory $a "memory"))
+          (realloc (core func $a "realloc")) (post-return (core func $r "post")))))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker
+        .root()
+        .func_wrap("host", |_, (s,): (String,)| Ok((format!("{s}!"),)))?;
+    let instance = linker.instantiate(&mut store, &c)?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ("héllo",))?, ("héllo!".to_owned(),));
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let output = replay.replay(&trace).await?;
+    let memory = output
+        .instances()
+        .iter()
+        .find_map(|i| i.get_memory(&mut replay, "memory"))
+        .unwrap();
+    assert_eq!(&memory.data(&replay)[32..36], &1_i32.to_le_bytes());
+    assert!(
+        memory
+            .data(&replay)
+            .windows("héllo!".len())
+            .any(|s| s == "héllo!".as_bytes())
+    );
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_resources_and_guest_destructor_callback() -> Result<()> {
+    use wasmtime::component::{Component, Linker, ResourceAny};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, 0);
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (import "notify" (func $notify (param "x" u32)))
+      (core func $notify (canon lower (func $notify)))
+      (core module $d
+        (import "" "notify" (func $notify (param i32)))
+        (global $count (export "count") (mut i32) (i32.const 0))
+        (func (export "dtor") (param i32)
+          local.get 0 call $notify
+          global.get $count i32.const 1 i32.add global.set $count))
+      (core instance $d (instantiate $d (with "" (instance (export "notify" (func $notify))))))
+      (type $r (resource (rep i32) (dtor (core func $d "dtor"))))
+      (export $exported-r "r" (type $r))
+      (core func $new (canon resource.new $r))
+      (core func $drop (canon resource.drop $r))
+      (core module $run
+        (import "" "new" (func $new (param i32) (result i32)))
+        (import "" "drop" (func $drop (param i32)))
+        (func (export "make") (result i32) i32.const 42 call $new)
+        (func (export "run") i32.const 42 call $new call $drop))
+      (core instance $run (instantiate $run
+        (with "" (instance (export "new" (func $new)) (export "drop" (func $drop))))))
+      (func (export "make") (result (own $exported-r)) (canon lift (core func $run "make")))
+      (func (export "run") (canon lift (core func $run "run"))))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker
+        .root()
+        .func_wrap("notify", |mut store, (x,): (u32,)| {
+            assert_eq!(x, 42);
+            *store.data_mut() += 1;
+            Ok(())
+        })?;
+    let instance = linker.instantiate(&mut store, &c)?;
+    instance
+        .get_typed_func::<(), ()>(&mut store, "run")?
+        .call(&mut store, ())?;
+    let (resource,) = instance
+        .get_typed_func::<(), (ResourceAny,)>(&mut store, "make")?
+        .call(&mut store, ())?;
+    resource.resource_drop(&mut store)?;
+    assert_eq!(*store.data(), 2);
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, 0);
+    let output = replay.replay(&trace).await?;
+    assert_eq!(*replay.data(), 0);
+    let count = output
+        .instances()
+        .iter()
+        .find_map(|i| i.get_global(&mut replay, "count"))
+        .unwrap();
+    assert_eq!(count.get(&mut replay).unwrap_i32(), 2);
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_to_component_adapter_and_transcoding() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (component $a
+        (core module $m
+          (memory (export "memory") 1)
+          (global $next (mut i32) (i32.const 64))
+          (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+            local.get 0 if (result i32) local.get 0 else
+              global.get $next
+              global.get $next local.get 3 i32.add global.set $next
+            end)
+          (func (export "echo") (param i32 i32) (result i32)
+            i32.const 16 local.get 0 i32.store
+            i32.const 20 local.get 1 i32.store
+            i32.const 16))
+        (core instance $m (instantiate $m))
+        (func (export "echo") (param "s" string) (result string)
+          (canon lift (core func $m "echo") (memory (core memory $m "memory"))
+            (realloc (core func $m "realloc")))))
+      (component $b
+        (import "echo" (func $echo (param "s" string) (result string)))
+        (core module $alloc
+          (memory (export "memory") 1)
+          (global $next (mut i32) (i32.const 64))
+          (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+            local.get 0 if (result i32) local.get 0 else
+              global.get $next
+              global.get $next local.get 3 i32.add global.set $next
+            end))
+        (core instance $alloc (instantiate $alloc))
+        (core func $echo (canon lower (func $echo)
+          (memory (core memory $alloc "memory")) (realloc (core func $alloc "realloc")) string-encoding=utf16))
+        (core module $m
+          (import "" "echo" (func $echo (param i32 i32 i32)))
+          (func (export "run") (param i32 i32) (result i32)
+            local.get 0 local.get 1 i32.const 16 call $echo i32.const 16))
+        (core instance $m (instantiate $m (with "" (instance (export "echo" (func $echo))))))
+        (func (export "run") (param "s" string) (result string)
+          (canon lift (core func $m "run") (memory (core memory $alloc "memory"))
+            (realloc (core func $alloc "realloc")) string-encoding=utf16)))
+      (instance $a (instantiate $a))
+      (instance $b (instantiate $b (with "echo" (func $a "echo"))))
+      (export "run" (func $b "run")))"#,
+    )?;
+    let instance = Linker::new(&e).instantiate(&mut store, &c)?;
+    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ("héllo 🌍",))?, ("héllo 🌍".into(),));
+    let trace = Trace::from_bytes(store.finish_recording()?.as_bytes().to_vec())?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let output = replay.replay(&trace).await?;
+    assert!(output.instances().len() >= 3);
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_async_host_and_trap_during_startup() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (import "host" (func $host))
+      (core func $host (canon lower (func $host)))
+      (core module $m
+        (import "" "host" (func $host))
+        (func $start call $host unreachable)
+        (start $start))
+      (core instance $m (instantiate $m (with "" (instance (export "host" (func $host)))))))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker.root().func_wrap_async("host", |_, (): ()| {
+        Box::new(async {
+            tokio::task::yield_now().await;
+            Ok(())
+        })
+    })?;
+    let error = linker.instantiate_async(&mut store, &c).await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<Trap>(),
+        Some(&Trap::UnreachableCodeReached)
+    );
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    replay.replay(&trace).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn host_objects_created_during_initialization() -> Result<()> {
     let e = engine(RRConfig::Recording)?;
@@ -811,6 +1073,261 @@ async fn host_objects_created_during_initialization() -> Result<()> {
     let trace = store.finish_recording()?;
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     replay.replay(&trace).await?;
+    Ok(())
+}
+
+#[cfg(feature = "component-model-async")]
+#[tokio::test]
+async fn concurrent_component_activations_can_finish_out_of_order() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Recording)
+        .wasm_component_model_async(true);
+    let e = Engine::new(&config)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (type $t (func async (param "x" u32) (result u32)))
+      (import "host" (func $host (type $t)))
+      (core func $host (canon lower (func $host)))
+      (core module $m
+        (import "" "host" (func $host (param i32) (result i32)))
+        (func (export "run") (param i32) (result i32) local.get 0 call $host))
+      (core instance $m (instantiate $m (with "" (instance (export "host" (func $host))))))
+      (func (export "run") (type $t) (canon lift (core func $m "run"))))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker
+        .root()
+        .func_wrap_concurrent("host", |_, (x,): (u32,)| {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                if x == 2 {
+                    tokio::task::yield_now().await;
+                }
+                Ok((x + 10,))
+            })
+        })?;
+    let a = linker.instantiate_async(&mut store, &c).await?;
+    let b = linker.instantiate_async(&mut store, &c).await?;
+    let a = a.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    let b = b.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    store
+        .run_concurrent(async |accessor| -> Result<()> {
+            let (a, b) = tokio::join!(
+                a.call_concurrent(accessor, (1,)),
+                b.call_concurrent(accessor, (2,))
+            );
+            assert_eq!(a?, (11,));
+            assert_eq!(b?, (12,));
+            Ok(())
+        })
+        .await??;
+    let trace = store.finish_recording()?;
+    config.rr(RRConfig::Replaying);
+    let mut replay = Store::new(&Engine::new(&config)?, ());
+    replay.replay(&trace).await?;
+    Ok(())
+}
+
+#[cfg(feature = "component-model-async")]
+#[tokio::test]
+async fn component_async_adapter_callbacks() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Recording)
+        .wasm_component_model_async(true);
+    let e = Engine::new(&config)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (type $t (func async (param "x" u32) (result u32)))
+      (import "host" (func $host (type $t)))
+      (component $a
+        (type $t (func async (param "x" u32) (result u32)))
+        (import "host" (func $host (type $t)))
+        (core func $host (canon lower (func $host)))
+        (core module $m
+          (import "" "host" (func $host (param i32) (result i32)))
+          (func (export "run") (param i32) (result i32) local.get 0 call $host))
+        (core instance $m (instantiate $m (with "" (instance (export "host" (func $host))))))
+        (func (export "run") (type $t) (canon lift (core func $m "run"))))
+      (instance $a (instantiate $a (with "host" (func $host))))
+      (instance $b (instantiate $a (with "host" (func $a "run"))))
+      (export "run" (func $b "run")))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker
+        .root()
+        .func_wrap_concurrent("host", |_, (x,): (u32,)| {
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                Ok((x + 1,))
+            })
+        })?;
+    let instance = linker.instantiate_async(&mut store, &c).await?;
+    let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, (41,)).await?, (42,));
+    let trace = store.finish_recording()?;
+    config.rr(RRConfig::Replaying);
+    let mut replay = Store::new(&Engine::new(&config)?, ());
+    replay.replay(&trace).await?;
+    Ok(())
+}
+
+#[cfg(feature = "component-model-async")]
+#[tokio::test]
+async fn component_async_stream_wait() -> Result<()> {
+    use wasmtime::component::{Component, Linker, StreamAny};
+    let mut config = Config::new();
+    config
+        .wasm_component_model_async(true)
+        .rr(RRConfig::Recording);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+    store.start_recording()?;
+    let component = Component::new(
+        &engine,
+        r#"
+(component
+    (type $s (stream u8))
+
+    (core module $libc (memory (export "mem") 1))
+    (core instance $libc (instantiate $libc))
+
+    (core module $m
+        (import "" "stream.new" (func $stream.new (result i64)))
+        (import "" "task.return" (func $task.return))
+        (import "" "waitable-set.new" (func $waitable-set.new (result i32)))
+        (import "" "waitable.join" (func $waitable.join (param i32 i32)))
+        (import "" "waitable-set.wait" (func $waitable-set.wait (param i32 i32) (result i32)))
+        (import "" "waitable-set.drop" (func $waitable-set.drop (param i32)))
+        (import "" "mem" (memory 1))
+
+        (global $w (mut i32) (i32.const 0))
+
+        (func (export "mk") (result i32)
+            (local $r i32) (local $tmp i64)
+            (local.set $tmp (call $stream.new))
+            (local.set $r (i32.wrap_i64 (local.get $tmp)))
+            (global.set $w (i32.wrap_i64 (i64.shr_u (local.get $tmp) (i64.const 32))))
+            local.get $r
+        )
+
+        (func (export "run") (result i32)
+            (local $ws i32)
+            (local.set $ws (call $waitable-set.new))
+            (call $waitable.join (global.get $w) (local.get $ws))
+            (call $waitable-set.wait (local.get $ws) (i32.const 0))
+            i32.const 3 ;; EVENT_STREAM_WRITE
+            i32.ne
+            if unreachable end
+
+            (if (i32.ne (i32.load (i32.const 0)) (global.get $w))
+              (then unreachable))
+            (if (i32.ne (i32.load (i32.const 4)) (i32.const 1)) ;; DROPPED | (0 << 4)
+              (then unreachable))
+
+            call $task.return
+
+            i32.const 0 ;; CALLBACK_CODE_EXIT
+        )
+
+        (func (export "cb") (param i32 i32 i32) (result i32) unreachable)
+    )
+    (core func $stream.new (canon stream.new $s))
+    (core func $task.return (canon task.return))
+    (core func $waitable-set.new (canon waitable-set.new))
+    (core func $waitable.join (canon waitable.join))
+    (core func $waitable-set.wait (canon waitable-set.wait (memory (core memory $libc "mem"))))
+    (core func $waitable-set.drop (canon waitable-set.drop))
+    (core instance $i (instantiate $m
+        (with "" (instance
+            (export "stream.new" (func $stream.new))
+            (export "task.return" (func $task.return))
+            (export "waitable-set.new" (func $waitable-set.new))
+            (export "waitable.join" (func $waitable.join))
+            (export "waitable-set.wait" (func $waitable-set.wait))
+            (export "waitable-set.drop" (func $waitable-set.drop))
+            (export "mem" (memory $libc "mem"))
+        ))
+    ))
+    (func (export "mk") (result (stream u8))
+        (canon lift (core func $i "mk")))
+    (func (export "run") async
+        (canon lift (core func $i "run") async (callback (core func $i "cb"))))
+)
+        "#,
+    )?;
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let mk = instance.get_typed_func::<(), (StreamAny,)>(&mut store, "mk")?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    store
+        .run_concurrent(async |store| {
+            let (mut stream,) = mk.call_concurrent(store, ()).await?;
+            tokio::try_join! {
+                async {
+                    run.call_concurrent(store, ()).await?;
+                    wasmtime::error::Ok(())
+                },
+                async {
+                    store.with(|store| stream.close(store))?;
+                    wasmtime::error::Ok(())
+                }
+            }?;
+            wasmtime::error::Ok(())
+        })
+        .await??;
+    let trace = store.finish_recording()?;
+    config.rr(RRConfig::Replaying);
+    let mut replay = Store::new(&Engine::new(&config)?, ());
+    replay.replay(&trace).await?;
+    Ok(())
+}
+
+#[cfg(feature = "component-model-async")]
+#[tokio::test]
+async fn component_async_lift_callback() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Recording)
+        .wasm_component_model_async(true);
+    let e = Engine::new(&config)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (core func $return (canon task.return (result u32)))
+      (core module $m
+        (import "" "return" (func $return (param i32)))
+        (global $calls (export "calls") (mut i32) (i32.const 0))
+        (func (export "run") (result i32) i32.const 1)
+        (func (export "cb") (param i32 i32 i32) (result i32)
+          global.get $calls i32.const 1 i32.add global.set $calls
+          i32.const 42 call $return i32.const 0))
+      (core instance $m (instantiate $m (with "" (instance (export "return" (func $return))))))
+      (func (export "run") async (result u32)
+        (canon lift (core func $m "run") async (callback (core func $m "cb")))))"#,
+    )?;
+    let instance = Linker::new(&e).instantiate_async(&mut store, &c).await?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?, (42,));
+    let trace = store.finish_recording()?;
+    config.rr(RRConfig::Replaying);
+    let mut replay = Store::new(&Engine::new(&config)?, ());
+    let output = replay.replay(&trace).await?;
+    let calls = output.instances()[0]
+        .get_global(&mut replay, "calls")
+        .unwrap();
+    assert_eq!(calls.get(&mut replay).unwrap_i32(), 1);
     Ok(())
 }
 
@@ -899,6 +1416,117 @@ async fn initialization_requires_exactly_one_startup() -> Result<()> {
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("repeated instance startup"));
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn existing_component_without_core_instances_is_rejected() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let trace = store.finish_recording()?;
+    for mode in [RRConfig::Recording, RRConfig::Replaying] {
+        let e = engine(mode.clone())?;
+        let mut store = Store::new(&e, ());
+        let component = Component::new(&e, "(component)")?;
+        Linker::new(&e).instantiate(&mut store, &component)?;
+        let error = match mode {
+            RRConfig::Recording => store.start_recording().unwrap_err(),
+            RRConfig::Replaying => store.replay(&trace).await.unwrap_err(),
+            _ => unreachable!(),
+        };
+        assert!(error.to_string().contains("empty store"));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_imported_core_module() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (import "host" (func $host (param "x" u32) (result u32)))
+      (import "module" (core module $m
+        (import "" "host" (func (param i32) (result i32)))
+        (export "run" (func (param i32) (result i32)))))
+      (core func $host (canon lower (func $host)))
+      (core instance $m (instantiate $m (with "" (instance (export "host" (func $host))))))
+      (func (export "run") (param "x" u32) (result u32) (canon lift (core func $m "run"))))"#,
+    )?;
+    let module = Module::new(
+        &e,
+        r#"(module
+      (import "" "host" (func $host (param i32) (result i32)))
+      (func (export "run") (param i32) (result i32) local.get 0 call $host))"#,
+    )?;
+    let mut linker = Linker::new(&e);
+    linker.root().module("module", &module)?;
+    linker
+        .root()
+        .func_wrap("host", |_, (x,): (u32,)| Ok((x + 1,)))?;
+    let instance = linker.instantiate(&mut store, &c)?;
+    let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, (41,))?, (42,));
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    replay.replay(&trace).await?;
+    Ok(())
+}
+
+#[cfg(feature = "component-model")]
+#[tokio::test]
+async fn component_without_core_instances() -> Result<()> {
+    use wasmtime::component::{Component, Linker, ResourceAny};
+    let e = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    let c = Component::new(
+        &e,
+        r#"(component
+      (type $r (resource (rep i32)))
+      (export $r-export "r" (type $r))
+      (core func $new (canon resource.new $r))
+      (func (export "make") (param "x" u32) (result (own $r-export)) (canon lift (core func $new))))"#,
+    )?;
+    let instance = Linker::new(&e).instantiate(&mut store, &c)?;
+    let make = instance.get_typed_func::<(u32,), (ResourceAny,)>(&mut store, "make")?;
+    let (resource,) = make.call(&mut store, (42,))?;
+    resource.resource_drop(&mut store)?;
+    let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    assert!(replay.replay(&trace).await?.instances().is_empty());
+    Ok(())
+}
+
+#[cfg(feature = "component-model-async")]
+#[tokio::test]
+async fn component_async_lower_futures_and_cancellation() -> Result<()> {
+    use wasmtime::component::{Component, Linker};
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Recording)
+        .wasm_component_model_async(true)
+        .wasm_component_model_more_async_builtins(true);
+    let e = Engine::new(&config)?;
+    let mut store = Store::new(&e, ());
+    store.start_recording()?;
+    // The component-model suite's cancellation scenario exercises async
+    // lowering, guest callbacks, future transfers, and subtask cancellation.
+    let c = Component::new(&e, include_str!("rr_async_component.wat"))?;
+    let instance = Linker::new(&e).instantiate_async(&mut store, &c).await?;
+    let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?, (42,));
+    let trace = store.finish_recording()?;
+    config.rr(RRConfig::Replaying);
+    let mut replay = Store::new(&Engine::new(&config)?, ());
+    replay.replay(&trace).await?;
     Ok(())
 }
 

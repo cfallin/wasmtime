@@ -2184,9 +2184,14 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // The value is identical either way, but funneling a whole set through
         // one slot lets GVN collapse those loads, and everything downstream of
         // them, into one.
+        //
+        // Record/replay gives each wrapped component builtin its own host
+        // context, so imports that would otherwise share the component's
+        // `vmctx` do not when recording.
         let vmctx = self.env.vmctx_val(&mut self.builder.cursor());
         let vmctx_index = self.env.translation.imported_func_vmctx_representative[callee_index]
             .expand()
+            .filter(|_| !self.env.tunables.recording)
             .unwrap_or(callee_index);
         let import_off = self.env.offsets.imported_functions().at(vmctx_index);
         let callee_vmctx = self
@@ -2205,7 +2210,17 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // If we statically know the imported function (e.g. this is a
         // component-to-component call where we statically know both components)
         // then we can avoid doing an indirect call.
-        match self.env.translation.known_imported_functions[callee_index].as_ref() {
+        //
+        // Record/replay routes component builtins through store-local
+        // wrappers, which a direct call or inline lowering would bypass, so
+        // only guest-to-guest calls are known when recording.
+        let known = self.env.translation.known_imported_functions[callee_index]
+            .as_ref()
+            .filter(|known| {
+                !self.env.tunables.recording
+                    || matches!(known, KnownFunc::FuncKey(FuncKey::DefinedWasmFunction(..)))
+            });
+        match known {
             // The import is always a compile-time builtin intrinsic. Make a
             // direct call to that function (presumably it will eventually be
             // inlined).
