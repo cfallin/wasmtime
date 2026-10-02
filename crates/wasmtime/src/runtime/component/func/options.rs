@@ -130,6 +130,20 @@ impl<'a, T: 'static> LowerContext<'a, T> {
         self.instance.options_memory_mut(self.store.0, self.options)
     }
 
+    /// Returns a view into memory, for bounds checks.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.instance.options_memory(self.store.0, self.options)
+    }
+
+    /// Returns the `len` bytes of memory at `offset`, panicking if they are
+    /// out of bounds. Unlike `as_slice_mut`, only these bytes are recorded as
+    /// written by record/replay.
+    pub(crate) fn slice_mut(&mut self, offset: usize, len: usize) -> &mut [u8] {
+        self.instance
+            .options_memory_range_mut(self.store.0, self.options, offset, len)
+            .expect("out-of-bounds lowering")
+    }
+
     /// Invokes the memory allocation function (which is style after `realloc`)
     /// with the specified parameters.
     ///
@@ -188,9 +202,9 @@ impl<'a, T: 'static> LowerContext<'a, T> {
         let result = usize::try_from(result)?;
 
         if self
-            .as_slice_mut()
-            .get_mut(result..)
-            .and_then(|s| s.get_mut(..new_size))
+            .as_slice()
+            .get(result..)
+            .and_then(|s| s.get(..new_size))
             .is_none()
         {
             bail!("realloc return: beyond end of memory")
@@ -228,7 +242,7 @@ impl<'a, T: 'static> LowerContext<'a, T> {
         // For now I figure we can leave in this bounds check and if it becomes
         // an issue we can optimize further later, probably with judicious use
         // of `unsafe`.
-        self.as_slice_mut()[offset..].first_chunk_mut().unwrap()
+        self.slice_mut(offset, N).try_into().unwrap()
     }
 
     /// Lowers an `own` resource into the guest, converting the `rep` specified

@@ -9,6 +9,7 @@ fn engine(mode: RRConfig) -> Result<Engine> {
 // Trace frame tags, for tests that edit traces (see `rr/codec.rs`).
 const ENTER_WASM: u8 = 1;
 const LEAVE_HOST: u8 = 4;
+const WRITE: u8 = 5;
 const MODULE: u8 = 8;
 
 /// The `(tag, body offset)` of each frame of a serialized trace.
@@ -265,6 +266,39 @@ async fn memory_growth_flushes_old_borrows_and_records_new_extent() -> Result<()
     assert_eq!(memory.grow(&mut store, 1)?, 1);
     memory.write(&mut store, 65536, b"new page")?;
     let trace = store.finish_recording()?;
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let output = replay.replay(&trace).await?;
+    let replay_memory = output.instances()[0]
+        .get_memory(&mut replay, "memory")
+        .unwrap();
+    assert_eq!(replay_memory.data(&replay), memory.data(&store));
+    Ok(())
+}
+
+#[tokio::test]
+async fn memory_ranges_record_only_what_they_borrow() -> Result<()> {
+    let (mut store, _, memory) = identity()?;
+    memory
+        .data_range_mut(&mut store, 100..104)?
+        .copy_from_slice(b"abcd");
+    assert!(memory.data_range_mut(&mut store, 65530..65540).is_err());
+    {
+        let (mut ranges, ()) = memory.data_ranges_and_store_mut(&mut store);
+        assert_eq!(ranges.len(), 65536);
+        assert_eq!(ranges.data_range(100..104)?, b"abcd");
+        ranges.data_range_mut(2000..2002)?.copy_from_slice(b"xy");
+        ranges.data_range_mut(5000..5001)?[0] = 7;
+        assert!(ranges.data_range_mut(65536..65537).is_err());
+    }
+    let trace = store.finish_recording()?;
+    // Only the three borrowed ranges were recorded, not all of memory.
+    let writes = frames(trace.as_bytes())
+        .into_iter()
+        .filter(|(tag, _)| *tag == WRITE)
+        .count();
+    assert_eq!(writes, 3);
+    assert!(trace.as_bytes().len() < 1000, "{}", trace.as_bytes().len());
+
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     let output = replay.replay(&trace).await?;
     let replay_memory = output.instances()[0]
@@ -832,6 +866,13 @@ async fn component_strings_realloc_and_post_return() -> Result<()> {
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
     assert_eq!(run.call(&mut store, ("héllo",))?, ("héllo!".to_owned(),));
     let trace = store.finish_recording()?;
+    // Lowering records the bytes it writes, not the whole 64 KiB memory.
+    let written = frames(trace.as_bytes())
+        .windows(2)
+        .filter(|f| f[0].0 == WRITE)
+        .map(|f| f[1].1 - f[0].1 - 5 - 12)
+        .sum::<usize>();
+    assert!(written < 64, "{written} bytes of memory recorded");
     let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
     let output = replay.replay(&trace).await?;
     let memory = output
