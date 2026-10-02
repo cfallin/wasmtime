@@ -66,6 +66,14 @@ impl StaticMemory {
     pub fn into_image_slot(self) -> MemoryImageSlot {
         self.image_slot
     }
+
+    /// Shrinks this memory to `new_size` bytes, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(super) fn rr_shrink_to(&mut self, new_size: usize) -> Result<()> {
+        self.image_slot.rr_shrink_heap_limit(new_size)?;
+        self.size = new_size;
+        Ok(())
+    }
 }
 
 // SAFETY:
