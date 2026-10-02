@@ -86,6 +86,7 @@ enum VmType {
         reason = "generated uniformly for all VM types via `for_each_vm_type!`"
     )]
     VMAsanStackSupport,
+    VMReplayControl,
 }
 
 /// A key that uniquely identifies an alias region across an entire compilation.

@@ -317,6 +317,227 @@ impl Compiler {
         })
     }
 
+    /// Compile the entry point of a record/replay activation's raw fiber.
+    ///
+    /// This is called by the fiber's start routine with the activation's
+    /// `VMReplayControl` and never returns:
+    ///
+    /// ```ignore
+    /// unsafe extern "C" fn replay_start(control: *mut VMReplayControl, _: *mut u8) -> ! {
+    ///     let f = (*control).entry;
+    ///     let ok = (f.array_call)(f.vmctx, (*control).entry_caller,
+    ///                             (*control).entry_values, (*control).entry_values_len);
+    ///     (*control).reason = if ok { VM_REPLAY_RETURNED } else { VM_REPLAY_TRAPPED };
+    ///     ((*control).switch)((*control).switch_arg);
+    ///     unreachable!() // the driver never resumes a finished activation
+    /// }
+    /// ```
+    ///
+    /// A trap in the entry function lands in its array-to-Wasm trampoline,
+    /// which returns `false` here, so every exit from the guest goes through
+    /// this function's final yield and no host frames remain on the fiber.
+    fn compile_replay_start(
+        &self,
+        key: FuncKey,
+        symbol: &str,
+    ) -> Result<CompiledFunctionBody, CompileError> {
+        log::trace!("compiling replay start trampoline: {key:?} = {symbol:?}");
+
+        let isa = &*self.isa;
+        let pointer_type = isa.pointer_type();
+        let call_conv = CallConv::triple_default(isa.triple());
+        let mut alias_regions = AliasRegions::new(isa.pointer_bytes());
+
+        let mut sig = ir::Signature::new(call_conv);
+        sig.params.push(ir::AbiParam::new(pointer_type));
+        sig.params.push(ir::AbiParam::new(pointer_type));
+
+        let mut compiler = self.function_compiler();
+        let func = ir::Function::with_name_signature(key_to_name(key), sig);
+        let (mut builder, block0) = compiler.builder(func);
+        let control = builder.func.dfg.block_params(block0)[0];
+
+        let mut cursor = builder.cursor();
+        let entry = alias_regions
+            .vm_replay_control()
+            .entry()
+            .load(&mut cursor, control);
+        let caller = alias_regions
+            .vm_replay_control()
+            .entry_caller()
+            .load(&mut cursor, control);
+        let values = alias_regions
+            .vm_replay_control()
+            .entry_values()
+            .load(&mut cursor, control);
+        let values_len = alias_regions
+            .vm_replay_control()
+            .entry_values_len()
+            .load(&mut cursor, control);
+        let array_call = alias_regions
+            .vm_func_ref()
+            .array_call()
+            .load(&mut cursor, entry);
+        let callee_vmctx = alias_regions.vm_func_ref().vmctx().load(&mut cursor, entry);
+
+        let array_call_sig = builder.func.import_signature(array_call_signature(isa));
+        let call = builder.ins().call_indirect(
+            array_call_sig,
+            array_call,
+            &[callee_vmctx, caller, values, values_len],
+        );
+        let succeeded = builder.func.dfg.inst_results(call)[0];
+        let returned = builder.ins().iconst(
+            ir::types::I32,
+            i64::from(wasmtime_environ::VM_REPLAY_RETURNED),
+        );
+        let trapped = builder.ins().iconst(
+            ir::types::I32,
+            i64::from(wasmtime_environ::VM_REPLAY_TRAPPED),
+        );
+        let reason = builder.ins().select(succeeded, returned, trapped);
+        alias_regions
+            .vm_replay_control()
+            .reason()
+            .store(&mut builder.cursor(), control, reason);
+
+        self.replay_yield(&mut builder, &mut alias_regions, control);
+        builder.ins().trap(TRAP_INTERNAL_ASSERT);
+
+        builder.finalize(self.isa().frontend_config());
+        crate::alias_region::debug_assert_all_mem_insts_have_alias_regions(
+            &compiler.cx.codegen_context.func,
+        );
+        Ok(CompiledFunctionBody {
+            code: box_dyn_any_compiler_context(Some(compiler.cx)),
+            needs_gc_heap: false,
+        })
+    }
+
+    /// Compile the array-call implementation of every host function during
+    /// replay:
+    ///
+    /// ```ignore
+    /// unsafe extern "C" fn replay_host_call(
+    ///     callee: *mut VMOpaqueContext,
+    ///     caller: *mut VMContext,
+    ///     values: *mut ValRaw,
+    ///     values_len: usize,
+    /// ) -> bool {
+    ///     let control = (*(*caller).store_context).replay_control;
+    ///     (*control).reason = VM_REPLAY_HOST_CALL;
+    ///     (*control).host_callee = callee;
+    ///     (*control).host_values = values;
+    ///     (*control).host_values_len = values_len;
+    ///     ((*control).switch)((*control).switch_arg);
+    ///     (*control).host_succeeded != 0
+    /// }
+    /// ```
+    ///
+    /// The driver identifies the callee, checks the arguments, and writes the
+    /// recorded results into `values` (or records the error that the calling
+    /// Wasm-to-array trampoline then raises) before resuming.
+    fn compile_replay_host_call(
+        &self,
+        key: FuncKey,
+        symbol: &str,
+    ) -> Result<CompiledFunctionBody, CompileError> {
+        log::trace!("compiling replay host-call trampoline: {key:?} = {symbol:?}");
+
+        let isa = &*self.isa;
+        let mut alias_regions = AliasRegions::new(isa.pointer_bytes());
+
+        let mut compiler = self.function_compiler();
+        let func = ir::Function::with_name_signature(key_to_name(key), array_call_signature(isa));
+        let (mut builder, block0) = compiler.builder(func);
+        let (callee, caller, values, values_len) = {
+            let params = builder.func.dfg.block_params(block0);
+            (params[0], params[1], params[2], params[3])
+        };
+
+        // Host functions are only called from core Wasm during replay.
+        self.debug_assert_vmctx_kind(
+            &mut builder,
+            &mut alias_regions,
+            caller,
+            wasmtime_environ::VMCONTEXT_MAGIC,
+        );
+        let mut cursor = builder.cursor();
+        let store_context = alias_regions
+            .vmctx()
+            .store_context()
+            .load(&mut cursor, caller);
+        let control = alias_regions
+            .vm_store_context()
+            .replay_control()
+            .load(&mut cursor, store_context);
+        let host_call = cursor.ins().iconst(
+            ir::types::I32,
+            i64::from(wasmtime_environ::VM_REPLAY_HOST_CALL),
+        );
+        alias_regions
+            .vm_replay_control()
+            .reason()
+            .store(&mut cursor, control, host_call);
+        alias_regions
+            .vm_replay_control()
+            .host_callee()
+            .store(&mut cursor, control, callee);
+        alias_regions
+            .vm_replay_control()
+            .host_values()
+            .store(&mut cursor, control, values);
+        alias_regions
+            .vm_replay_control()
+            .host_values_len()
+            .store(&mut cursor, control, values_len);
+
+        self.replay_yield(&mut builder, &mut alias_regions, control);
+
+        let succeeded = alias_regions
+            .vm_replay_control()
+            .host_succeeded()
+            .load(&mut builder.cursor(), control);
+        let succeeded = builder
+            .ins()
+            .icmp_imm_u(ir::condcodes::IntCC::NotEqual, succeeded, 0);
+        builder.ins().return_(&[succeeded]);
+
+        builder.finalize(self.isa().frontend_config());
+        crate::alias_region::debug_assert_all_mem_insts_have_alias_regions(
+            &compiler.cx.codegen_context.func,
+        );
+        Ok(CompiledFunctionBody {
+            code: box_dyn_any_compiler_context(Some(compiler.cx)),
+            needs_gc_heap: false,
+        })
+    }
+
+    /// Suspend a replay activation by calling the fiber switch routine named by
+    /// its `VMReplayControl`. This returns when the driver resumes it.
+    fn replay_yield(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        alias_regions: &mut AliasRegions<u8>,
+        control: ir::Value,
+    ) {
+        let isa = &*self.isa;
+        let pointer_type = isa.pointer_type();
+        let mut sig = ir::Signature::new(CallConv::triple_default(isa.triple()));
+        sig.params.push(ir::AbiParam::new(pointer_type));
+        let sig = builder.func.import_signature(sig);
+        let mut cursor = builder.cursor();
+        let switch = alias_regions
+            .vm_replay_control()
+            .switch()
+            .load(&mut cursor, control);
+        let switch_arg = alias_regions
+            .vm_replay_control()
+            .switch_arg()
+            .load(&mut cursor, control);
+        builder.ins().call_indirect(sig, switch, &[switch_arg]);
+    }
+
     fn compile_wasm_to_builtin(
         &self,
         key: FuncKey,
@@ -654,6 +875,9 @@ impl wasmtime_environ::Compiler for Compiler {
             }
 
             FuncKey::PulleyHostCall(_) => unreachable!(),
+
+            FuncKey::ReplayStart => self.compile_replay_start(key, symbol),
+            FuncKey::ReplayHostCall => self.compile_replay_host_call(key, symbol),
 
             FuncKey::ComponentTrampoline(..) | FuncKey::UnsafeIntrinsic(..) => {
                 unreachable!()
