@@ -23,11 +23,117 @@ use tokio::{
     task::JoinHandle,
 };
 use wasmtime::{
-    AsContextMut, DebugEvent, DebugHandler, Engine, ExnRef, OwnedRooted, Result, Store,
-    StoreContextMut, Trap, WatchpointHit,
+    AsContext, AsContextMut, BreakpointState, DebugEvent, DebugHandler, Engine, ExnRef,
+    FrameHandle, Func, Instance, Result, Store, StoreContext, StoreContextMut, Trap, Unrooted,
+    WatchpointHit,
 };
 
 mod host;
+
+/// A paused debuggee's store, as given to [`Debuggee::with_store`].
+///
+/// A live debuggee's store may be changed, through
+/// [`DebuggeeStore::store_mut`]. A replay's store is read-only: it can only be
+/// inspected, through [`AsContext`], and only its debugging state, such as its
+/// breakpoints, changed, through [`DebuggeeStore::edit_breakpoints`].
+pub struct DebuggeeStore<'a, T: 'static>(Access<'a, T>);
+
+enum Access<'a, T: 'static> {
+    Live(StoreContextMut<'a, T>),
+    #[cfg(feature = "rr")]
+    Replay(&'a mut (dyn PausedReplay<T> + Send)),
+}
+
+/// What a debugger may use of a stopped replay.
+#[cfg(feature = "rr")]
+trait PausedReplay<T: 'static> {
+    fn store(&self) -> StoreContext<'_, T>;
+    fn edit_breakpoints(&mut self) -> Option<BreakpointState<'_>>;
+    fn exit_frames(&mut self) -> Vec<FrameHandle>;
+    fn debug_function(&mut self, instance: Instance, index: u32) -> Option<Func>;
+}
+
+#[cfg(feature = "rr")]
+impl<T: Send + 'static> PausedReplay<T> for wasmtime::rr::Replayer<'_, T> {
+    fn store(&self) -> StoreContext<'_, T> {
+        wasmtime::rr::Replayer::store(self)
+    }
+
+    fn edit_breakpoints(&mut self) -> Option<BreakpointState<'_>> {
+        wasmtime::rr::Replayer::edit_breakpoints(self)
+    }
+
+    fn exit_frames(&mut self) -> Vec<FrameHandle> {
+        self.debug_exit_frames()
+    }
+
+    fn debug_function(&mut self, instance: Instance, index: u32) -> Option<Func> {
+        wasmtime::rr::Replayer::debug_function(self, instance, index)
+    }
+}
+
+impl<'a, T: 'static> DebuggeeStore<'a, T> {
+    /// Mutable access to the store, which only a live debuggee gives: `None`
+    /// for a replay.
+    pub fn store_mut(&mut self) -> Option<StoreContextMut<'_, T>> {
+        match &mut self.0 {
+            Access::Live(store) => Some(store.as_context_mut()),
+            #[cfg(feature = "rr")]
+            Access::Replay(_) => None,
+        }
+    }
+
+    /// The frames of the paused execution; see
+    /// [`StoreContextMut::debug_exit_frames`].
+    pub fn debug_exit_frames(&mut self) -> Vec<FrameHandle> {
+        match &mut self.0 {
+            Access::Live(store) => store.debug_exit_frames().collect(),
+            #[cfg(feature = "rr")]
+            Access::Replay(replay) => replay.exit_frames(),
+        }
+    }
+
+    /// A function in `instance`'s function index space; see
+    /// [`Instance::debug_function`].
+    pub fn debug_function(&mut self, instance: Instance, index: u32) -> Option<Func> {
+        match &mut self.0 {
+            Access::Live(store) => instance.debug_function(store, index),
+            #[cfg(feature = "rr")]
+            Access::Replay(replay) => replay.debug_function(instance, index),
+        }
+    }
+
+    fn reborrow(&mut self) -> DebuggeeStore<'_, T> {
+        DebuggeeStore(match &mut self.0 {
+            Access::Live(store) => Access::Live(store.as_context_mut()),
+            #[cfg(feature = "rr")]
+            Access::Replay(replay) => Access::Replay(&mut **replay),
+        })
+    }
+
+    /// Borrow the debuggee's [`BreakpointState`], to edit its breakpoints,
+    /// single-stepping, and watchpoints; see [`Store::edit_breakpoints`].
+    pub fn edit_breakpoints(&mut self) -> Option<BreakpointState<'_>> {
+        match &mut self.0 {
+            Access::Live(store) => store.as_context_mut().edit_breakpoints(),
+            #[cfg(feature = "rr")]
+            Access::Replay(replay) => replay.edit_breakpoints(),
+        }
+    }
+}
+
+impl<T: 'static> AsContext for DebuggeeStore<'_, T> {
+    type Data = T;
+
+    fn as_context(&self) -> StoreContext<'_, T> {
+        match &self.0 {
+            Access::Live(store) => store.as_context(),
+            #[cfg(feature = "rr")]
+            Access::Replay(replay) => replay.store(),
+        }
+    }
+}
+
 pub use host::{DebuggerComponent, add_debuggee, add_to_linker, wit};
 
 /// A `Debuggee` wraps up state associated with debugging the code
@@ -148,7 +254,7 @@ enum DebuggeeState {
 /// instead.
 enum Command<T: 'static> {
     Continue,
-    Query(Box<dyn FnOnce(StoreContextMut<'_, T>) -> Box<dyn Any + Send> + Send>),
+    Query(Box<dyn FnOnce(DebuggeeStore<'_, T>) -> Box<dyn Any + Send> + Send>),
 }
 
 enum Response<T: 'static> {
@@ -173,12 +279,13 @@ impl<T: Send + 'static> std::clone::Clone for Handler<T> {
 
 impl<T: Send + 'static> DebugHandler for Handler<T> {
     type Data = T;
-    async fn handle(&self, mut store: StoreContextMut<'_, T>, event: DebugEvent<'_>) {
-        let mut in_rx = self.0.in_rx.lock().await;
-
+    async fn handle(&self, store: StoreContextMut<'_, T>, event: DebugEvent<'_>) {
         let result = match event {
             DebugEvent::HostcallError(_) => DebugRunResult::HostcallError,
-            DebugEvent::Exception(exn) => DebugRunResult::Exception(exn),
+            DebugEvent::Exception(exn) => DebugRunResult::Exception(
+                exn.to_unrooted(&store)
+                    .expect("the event's exception is rooted"),
+            ),
             DebugEvent::Trap(trap) => DebugRunResult::Trap(trap),
             DebugEvent::Breakpoint => DebugRunResult::Breakpoint,
             DebugEvent::Watchpoint(hit) => DebugRunResult::Watchpoint(hit),
@@ -194,6 +301,15 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
                 DebugRunResult::EpochYield
             }
         };
+        self.pause(DebuggeeStore(Access::Live(store)), result).await;
+    }
+}
+
+impl<T: Send + 'static> Handler<T> {
+    /// Reports `result` to the outer `Debuggee` and serves its queries until
+    /// it continues.
+    async fn pause(&self, mut store: DebuggeeStore<'_, T>, result: DebugRunResult) {
+        let mut in_rx = self.0.in_rx.lock().await;
         if self.0.out_tx.send(Response::Paused(result)).await.is_err() {
             // Outer Debuggee has been dropped: just continue
             // executing.
@@ -203,7 +319,7 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
         while let Some(cmd) = in_rx.recv().await {
             match cmd {
                 Command::Query(closure) => {
-                    let result = closure(store.as_context_mut());
+                    let result = closure(store.reborrow());
                     if self
                         .0
                         .out_tx
@@ -239,13 +355,96 @@ impl<T: Send + 'static> Debuggee<T> {
     ///
     /// When paused, the holder of this object can access the `Store`
     /// indirectly by providing a closure
-    pub fn new<F>(mut store: Store<T>, inner: F) -> Debuggee<T>
+    pub fn new<F>(store: Store<T>, inner: F) -> Debuggee<T>
     where
         F: for<'a> FnOnce(
                 &'a mut Store<T>,
             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
             + Send
             + 'static,
+    {
+        Self::spawn(store, move |mut store, handler| async move {
+            // Emulate a breakpoint at startup.
+            log::trace!("inner debuggee task: first breakpoint");
+            handler
+                .handle(store.as_context_mut(), DebugEvent::Breakpoint)
+                .await;
+            log::trace!("inner debuggee task: first breakpoint resumed");
+
+            // Now invoke the actual inner body.
+            store.set_debug_handler(handler);
+            log::trace!("inner debuggee task: running `inner`");
+            let result = inner(&mut store).await;
+            log::trace!("inner debuggee task: done with `inner`");
+            (store, result)
+        })
+    }
+
+    /// Create a new Debugger that replays `trace` in `store`, which must be
+    /// empty and use an engine configured for replay with guest debugging.
+    /// `bytecode` holds the modules or components that the trace instantiates
+    /// (see [`wasmtime::rr::Replayer::add_bytecode`]).
+    ///
+    /// The replay is debugged like a live execution: it starts paused,
+    /// stops at breakpoints, single steps, and watchpoints, and while paused
+    /// the store shows the replay's state. Modules in the trace are compiled
+    /// and registered before the initial pause, so breakpoints can be set in
+    /// them. The replay cannot be changed: [`Debuggee::with_store`] gives
+    /// only read-only access to its store, apart from its debugging state
+    /// (see [`DebuggeeStore`]). `setup` can configure the replayer before it
+    /// starts, for example to observe embedder events such as WASI output.
+    ///
+    /// With an engine configured for epoch interruption, an interrupt request
+    /// (see [`Debuggee::interrupt_pending`]) pauses the replay, as an epoch
+    /// yield would, once the engine's epoch next advances.
+    #[cfg(feature = "rr")]
+    pub fn new_replay(
+        store: Store<T>,
+        trace: wasmtime::rr::Trace,
+        bytecode: Vec<Vec<u8>>,
+        setup: impl FnOnce(&mut wasmtime::rr::Replayer<'_, T>) + Send + 'static,
+    ) -> Debuggee<T> {
+        Self::spawn(store, move |mut store, handler| async move {
+            let result = async {
+                let mut replayer = store.replayer(&trace)?;
+                for wasm in &bytecode {
+                    replayer.add_bytecode(wasm)?;
+                }
+                replayer.preload_modules()?;
+                replayer.set_interrupt_flag(handler.0.interrupt_pending.clone());
+                setup(&mut replayer);
+                handler
+                    .pause(
+                        DebuggeeStore(Access::Replay(&mut replayer)),
+                        DebugRunResult::Breakpoint,
+                    )
+                    .await;
+                loop {
+                    use wasmtime::rr::ReplayStop;
+                    let result = match replayer.run().await? {
+                        ReplayStop::Finished => break,
+                        ReplayStop::Breakpoint => DebugRunResult::Breakpoint,
+                        ReplayStop::Interrupted => DebugRunResult::EpochYield,
+                        ReplayStop::Watchpoint(hit) => DebugRunResult::Watchpoint(hit),
+                        _ => continue,
+                    };
+                    handler
+                        .pause(DebuggeeStore(Access::Replay(&mut replayer)), result)
+                        .await;
+                }
+                Ok(())
+            }
+            .await;
+            (store, result)
+        })
+    }
+
+    /// Spawns the task that runs a debuggee's body, `body`, which receives
+    /// the store and the handler for its debug events and returns the store.
+    fn spawn<F, Fut>(store: Store<T>, body: F) -> Debuggee<T>
+    where
+        F: FnOnce(Store<T>, Handler<T>) -> Fut + Send + 'static,
+        Fut: Future<Output = (Store<T>, Result<()>)> + Send,
     {
         let engine = store.engine().clone();
         let (in_tx, in_rx) = mpsc::channel(1);
@@ -255,27 +454,13 @@ impl<T: Send + 'static> Debuggee<T> {
         let handle = tokio::spawn({
             let interrupt_pending = interrupt_pending.clone();
             async move {
-                // Create the handler that's invoked from within the async
-                // debug-event callback.
                 let out_tx_clone = out_tx.clone();
                 let handler = Handler(Arc::new(HandlerInner {
                     in_rx: Mutex::new(in_rx),
                     out_tx,
                     interrupt_pending,
                 }));
-
-                // Emulate a breakpoint at startup.
-                log::trace!("inner debuggee task: first breakpoint");
-                handler
-                    .handle(store.as_context_mut(), DebugEvent::Breakpoint)
-                    .await;
-                log::trace!("inner debuggee task: first breakpoint resumed");
-
-                // Now invoke the actual inner body.
-                store.set_debug_handler(handler);
-                log::trace!("inner debuggee task: running `inner`");
-                let result = inner(&mut store).await;
-                log::trace!("inner debuggee task: done with `inner`");
+                let (store, result) = body(store, handler).await;
                 let _ = out_tx_clone.send(Response::Finished(store)).await;
                 result
             }
@@ -438,17 +623,19 @@ impl<T: Send + 'static> Debuggee<T> {
     /// invocation was canceled, it must be re-invoked and return
     /// successfully before a query is made.
     ///
+    /// The store of a replay is read-only (see [`DebuggeeStore`]).
+    ///
     /// This is cancel-safe; if canceled, the result of the query will
     /// be dropped.
     pub async fn with_store<
-        F: FnOnce(StoreContextMut<'_, T>) -> R + Send + 'static,
+        F: FnOnce(DebuggeeStore<'_, T>) -> R + Send + 'static,
         R: Send + 'static,
     >(
         &mut self,
         f: F,
     ) -> Result<R> {
         if let Some(store) = self.store.as_mut() {
-            return Ok(f(store.as_context_mut()));
+            return Ok(f(DebuggeeStore(Access::Live(store.as_context_mut()))));
         }
 
         self.wait_for_initial().await?;
@@ -512,8 +699,8 @@ pub enum DebugRunResult {
     /// Wasm execution was interrupted by an epoch change.
     EpochYield,
     /// An exception is thrown by Wasm. The current state is at the
-    /// throw-point.
-    Exception(OwnedRooted<ExnRef>),
+    /// throw-point. The exception can be read until execution resumes.
+    Exception(Unrooted<ExnRef>),
     /// A Wasm trap occurred.
     Trap(Trap),
     /// A breakpoint was reached.
@@ -527,6 +714,111 @@ pub enum DebugRunResult {
 mod test {
     use super::*;
     use wasmtime::*;
+
+    #[cfg(feature = "rr")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn replay_debugging() -> wasmtime::Result<()> {
+        let _ = env_logger::try_init();
+        let wat = r#"
+            (module
+              (import "" "host" (func $host (result i32)))
+              (memory (export "memory") 1)
+              (func (export "main") (result i32)
+                (i32.store (i32.const 0) (call $host))
+                (i32.add (i32.load (i32.const 0)) (i32.const 1))))
+        "#;
+        let mut config = Config::new();
+        config.rr(RRConfig::Recording);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, ());
+        store.start_recording()?;
+        let host = Func::wrap(&mut store, || 41);
+        let module = Module::new(&engine, wat)?;
+        let instance = Instance::new(&mut store, &module, &[host.into()])?;
+        let main = instance.get_typed_func::<(), i32>(&mut store, "main")?;
+        assert_eq!(main.call(&mut store, ())?, 42);
+        let trace = store.finish_recording()?;
+
+        let mut config = Config::new();
+        config.rr(RRConfig::Replaying).guest_debug(true);
+        let engine = Engine::new(&config)?;
+        let mut debuggee =
+            Debuggee::new_replay(Store::new(&engine, ()), trace, vec![wat.into()], |_| {});
+        // The trace's module is available at the initial pause.
+        let modules = debuggee
+            .with_store(|mut store| {
+                store.edit_breakpoints().unwrap().single_step(true).unwrap();
+                store.as_context().debug_all_modules().len()
+            })
+            .await?;
+        assert_eq!(modules, 1);
+        let mut steps = 0;
+        loop {
+            match debuggee.run().await? {
+                DebugRunResult::Breakpoint => {
+                    steps += 1;
+                    let frames = debuggee
+                        .with_store(|mut store| store.debug_exit_frames().len())
+                        .await?;
+                    assert!(frames >= 1);
+                }
+                DebugRunResult::Finished => break,
+                e => panic!("unexpected event {e:?}"),
+            }
+        }
+        assert!(steps > 3, "{steps} steps");
+        debuggee.finish().await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "rr")]
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg_attr(miri, ignore)]
+    async fn replay_interrupt() -> wasmtime::Result<()> {
+        let wat = r#"
+            (module
+              (func (export "main") (result i32)
+                (local $i i32)
+                loop
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if 0 (i32.lt_u (local.get $i) (i32.const 1000000)))
+                end
+                local.get $i))
+        "#;
+        let mut config = Config::new();
+        config.rr(RRConfig::Recording);
+        let engine = Engine::new(&config)?;
+        let mut store = Store::new(&engine, ());
+        store.start_recording()?;
+        let module = Module::new(&engine, wat)?;
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let main = instance.get_typed_func::<(), i32>(&mut store, "main")?;
+        main.call(&mut store, ())?;
+        let trace = store.finish_recording()?;
+
+        let mut config = Config::new();
+        config
+            .rr(RRConfig::Replaying)
+            .guest_debug(true)
+            .epoch_interruption(true);
+        let engine = Engine::new(&config)?;
+        let mut debuggee =
+            Debuggee::new_replay(Store::new(&engine, ()), trace, vec![wat.into()], |_| {});
+        // Wait for the initial pause, then interrupt, as the debugger API's
+        // `interrupt` does.
+        debuggee.with_store(|_| ()).await?;
+        debuggee.interrupt_pending().store(true, Ordering::SeqCst);
+        engine.increment_epoch();
+        assert!(matches!(debuggee.run().await?, DebugRunResult::EpochYield));
+        let frames = debuggee
+            .with_store(|mut store| store.debug_exit_frames().len())
+            .await?;
+        assert_eq!(frames, 1);
+        assert!(matches!(debuggee.run().await?, DebugRunResult::Finished));
+        debuggee.finish().await?;
+        Ok(())
+    }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
@@ -570,7 +862,7 @@ mod test {
         // At (before executing) first `local.get`.
         debuggee
             .with_store(|mut store| {
-                let frame = store.debug_exit_frames().next().unwrap();
+                let frame = store.debug_exit_frames().remove(0);
                 assert_eq!(
                     frame
                         .wasm_function_index_and_pc(&mut store)
@@ -591,8 +883,8 @@ mod test {
                 );
                 assert_eq!(frame.num_locals(&mut store).unwrap(), 2);
                 assert_eq!(frame.num_stacks(&mut store).unwrap(), 0);
-                assert_eq!(frame.local(&mut store, 0).unwrap().unwrap_i32(), 1);
-                assert_eq!(frame.local(&mut store, 1).unwrap().unwrap_i32(), 2);
+                assert_eq!(frame.local(&store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.local(&store, 1).unwrap().unwrap_i32(), 2);
                 let frame = frame.parent(&mut store).unwrap();
                 assert!(frame.is_none());
             })
@@ -603,7 +895,7 @@ mod test {
         assert!(matches!(event, DebugRunResult::Breakpoint));
         debuggee
             .with_store(|mut store| {
-                let frame = store.debug_exit_frames().next().unwrap();
+                let frame = store.debug_exit_frames().remove(0);
                 assert_eq!(
                     frame
                         .wasm_function_index_and_pc(&mut store)
@@ -624,9 +916,9 @@ mod test {
                 );
                 assert_eq!(frame.num_locals(&mut store).unwrap(), 2);
                 assert_eq!(frame.num_stacks(&mut store).unwrap(), 1);
-                assert_eq!(frame.local(&mut store, 0).unwrap().unwrap_i32(), 1);
-                assert_eq!(frame.local(&mut store, 1).unwrap().unwrap_i32(), 2);
-                assert_eq!(frame.stack(&mut store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.local(&store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.local(&store, 1).unwrap().unwrap_i32(), 2);
+                assert_eq!(frame.stack(&store, 0).unwrap().unwrap_i32(), 1);
                 let frame = frame.parent(&mut store).unwrap();
                 assert!(frame.is_none());
             })
@@ -637,7 +929,7 @@ mod test {
         assert!(matches!(event, DebugRunResult::Breakpoint));
         debuggee
             .with_store(|mut store| {
-                let frame = store.debug_exit_frames().next().unwrap();
+                let frame = store.debug_exit_frames().remove(0);
                 assert_eq!(
                     frame
                         .wasm_function_index_and_pc(&mut store)
@@ -658,10 +950,10 @@ mod test {
                 );
                 assert_eq!(frame.num_locals(&mut store).unwrap(), 2);
                 assert_eq!(frame.num_stacks(&mut store).unwrap(), 2);
-                assert_eq!(frame.local(&mut store, 0).unwrap().unwrap_i32(), 1);
-                assert_eq!(frame.local(&mut store, 1).unwrap().unwrap_i32(), 2);
-                assert_eq!(frame.stack(&mut store, 0).unwrap().unwrap_i32(), 1);
-                assert_eq!(frame.stack(&mut store, 1).unwrap().unwrap_i32(), 2);
+                assert_eq!(frame.local(&store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.local(&store, 1).unwrap().unwrap_i32(), 2);
+                assert_eq!(frame.stack(&store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.stack(&store, 1).unwrap().unwrap_i32(), 2);
                 let frame = frame.parent(&mut store).unwrap();
                 assert!(frame.is_none());
             })
@@ -672,7 +964,7 @@ mod test {
         assert!(matches!(event, DebugRunResult::Breakpoint));
         debuggee
             .with_store(|mut store| {
-                let frame = store.debug_exit_frames().next().unwrap();
+                let frame = store.debug_exit_frames().remove(0);
                 assert_eq!(
                     frame
                         .wasm_function_index_and_pc(&mut store)
@@ -693,9 +985,9 @@ mod test {
                 );
                 assert_eq!(frame.num_locals(&mut store).unwrap(), 2);
                 assert_eq!(frame.num_stacks(&mut store).unwrap(), 1);
-                assert_eq!(frame.local(&mut store, 0).unwrap().unwrap_i32(), 1);
-                assert_eq!(frame.local(&mut store, 1).unwrap().unwrap_i32(), 2);
-                assert_eq!(frame.stack(&mut store, 0).unwrap().unwrap_i32(), 3);
+                assert_eq!(frame.local(&store, 0).unwrap().unwrap_i32(), 1);
+                assert_eq!(frame.local(&store, 1).unwrap().unwrap_i32(), 2);
+                assert_eq!(frame.stack(&store, 0).unwrap().unwrap_i32(), 3);
                 let frame = frame.parent(&mut store).unwrap();
                 assert!(frame.is_none());
             })
@@ -703,7 +995,7 @@ mod test {
 
         // Now disable breakpoints before continuing. Second call should proceed with no more events.
         debuggee
-            .with_store(|store| {
+            .with_store(|mut store| {
                 store
                     .edit_breakpoints()
                     .unwrap()
@@ -792,7 +1084,7 @@ mod test {
             }
         );
         debuggee
-            .with_store(move |store| {
+            .with_store(move |mut store| {
                 // The previous write has now happened, but not the
                 // fill.
                 assert_eq!(&memory.data(&store)[6..10], &0x11223344_u32.to_le_bytes());
