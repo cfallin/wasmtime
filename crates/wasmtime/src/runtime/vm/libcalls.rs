@@ -254,6 +254,18 @@ fn memory_grow(
     let (mut limiter, store) = store.resource_limiter_and_store_opaque();
     let limiter = limiter.as_mut();
     block_on!(store, async |store, _| {
+        #[cfg(feature = "rr")]
+        let object = crate::rr::Growable::Memory(unsafe {
+            crate::Memory::from_raw(
+                crate::store::StoreInstanceId::new(store.id(), instance),
+                memory_index,
+            )
+        });
+        #[cfg(feature = "rr")]
+        if store.rr_replay_growth_fails(&object, delta)? {
+            return Ok(None);
+        }
+
         let instance = store.instance_mut(instance);
         let module = instance.env_module();
         let page_size_log2 = module.memories[module.memory_index(memory_index)].page_size_log2;
@@ -265,7 +277,7 @@ fn memory_grow(
 
         #[cfg(feature = "rr")]
         if result.is_none() {
-            store.rr.poison("failed guest memory growth");
+            store.rr_growth_failed(&object, delta)?;
         }
 
         Ok(result)
@@ -320,6 +332,15 @@ unsafe fn table_grow(
     let (mut limiter, store) = store.resource_limiter_and_store_opaque();
     let limiter = limiter.as_mut();
     block_on!(store, async |store, _| unsafe {
+        #[cfg(feature = "rr")]
+        let object = crate::rr::Growable::Table(crate::Table::from_raw(
+            crate::store::StoreInstanceId::new(store.id(), instance),
+            defined_table_index,
+        ));
+        #[cfg(feature = "rr")]
+        if store.rr_replay_growth_fails(&object, delta)? {
+            return Ok(None);
+        }
         let result = store
             .instance_mut(instance)
             .defined_table_grow(defined_table_index, limiter, delta)
@@ -327,7 +348,7 @@ unsafe fn table_grow(
             .map(AllocationSize);
         #[cfg(feature = "rr")]
         if result.is_none() {
-            store.rr.poison("failed guest table growth");
+            store.rr_growth_failed(&object, delta)?;
         }
         Ok(result)
     })?

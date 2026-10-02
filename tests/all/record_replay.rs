@@ -11,6 +11,7 @@ const ENTER_WASM: u8 = 1;
 const LEAVE_HOST: u8 = 4;
 const WRITE: u8 = 5;
 const MODULE: u8 = 8;
+const GROWTH_FAILED: u8 = 14;
 
 /// The `(tag, body offset)` of each frame of a serialized trace.
 fn frames(bytes: &[u8]) -> Vec<(u8, usize)> {
@@ -405,6 +406,49 @@ fn replay_requires_a_native_target() -> Result<()> {
     config.target("pulley64")?.rr(RRConfig::Replaying);
     let error = Engine::new(&config).unwrap_err();
     assert!(error.to_string().contains("native"), "{error:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_guest_growth_is_replayed() -> Result<()> {
+    // Growth beyond a small, immovable reservation fails when recording but
+    // would succeed with the replaying engine's default configuration.
+    let mut config = Config::new();
+    config
+        .rr(RRConfig::Recording)
+        .memory_reservation(1 << 18)
+        .memory_reservation_for_growth(0)
+        .memory_may_move(false)
+        .memory_guard_size(0)
+        .signals_based_traps(false);
+    let recording = Engine::new(&config)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let module = Module::new(
+        &recording,
+        r#"(module
+        (memory (export "memory") 1)
+        (table 1 2 funcref)
+        (func (export "run") (result i32 i32 i32)
+            (memory.grow (i32.const 8))
+            (memory.grow (i32.const 1))
+            (table.grow (ref.null func) (i32.const 2))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let run = instance.get_typed_func::<(), (i32, i32, i32)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, ())?, (-1, 1, -1));
+    let trace = store.finish_recording()?;
+    let failures = frames(trace.as_bytes())
+        .iter()
+        .filter(|(tag, _)| *tag == GROWTH_FAILED)
+        .count();
+    assert_eq!(failures, 2);
+    let mut replay = Store::new(&engine(RRConfig::Replaying)?, ());
+    let output = replay.replay(&trace).await?;
+    let memory = output.instances()[0]
+        .get_memory(&mut replay, "memory")
+        .unwrap();
+    assert_eq!(memory.data_size(&replay), 2 << 16);
     Ok(())
 }
 
