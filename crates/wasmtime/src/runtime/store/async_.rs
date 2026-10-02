@@ -85,6 +85,8 @@ impl<T> Store<T> {
     /// [`Trap`]: crate::Trap
     #[cfg(feature = "call-hook")]
     pub fn call_hook_async(&mut self, hook: impl CallHookHandler<T> + Send + Sync + 'static) {
+        #[cfg(feature = "rr")]
+        self.inner.rr.poison("installing a call hook");
         self.inner.call_hook = Some(crate::store::CallHookInner::Async(Box::new(hook)));
         self.inner.set_async_required(Asyncness::Yes);
     }

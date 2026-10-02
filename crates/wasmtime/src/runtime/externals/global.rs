@@ -102,7 +102,10 @@ impl Global {
         val.ensure_matches_ty(store, ty.content()).context(
             "type mismatch: initial value provided does not match the type of this global",
         )?;
-        generate_global_export(store, ty, val)
+        let global = generate_global_export(store, ty, val)?;
+        #[cfg(feature = "rr")]
+        store.rr_created_global(global)?;
+        Ok(global)
     }
 
     pub(crate) fn new_host(store: &StoreOpaque, index: DefinedGlobalIndex) -> Global {
@@ -174,7 +177,10 @@ impl Global {
     ///
     /// Panics if `store` does not own this global.
     pub fn get(&self, store: impl AsContext) -> Val {
-        let store = store.as_context().0;
+        self._get(store.as_context().0)
+    }
+
+    pub(crate) fn _get(&self, store: &StoreOpaque) -> Val {
         unsafe {
             let definition = self.definition(store).as_ref();
             match self._ty(store).content() {
@@ -211,7 +217,10 @@ impl Global {
     ///
     /// Panics if `store` does not own this global.
     pub fn set(&self, mut store: impl AsContextMut, val: Val) -> Result<()> {
-        self._set(store.as_context_mut().0, val)
+        let store = store.as_context_mut().0;
+        #[cfg(feature = "rr")]
+        store.rr.reject("host global mutation")?;
+        self._set(store, val)
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, val: Val) -> Result<()> {
@@ -330,6 +339,11 @@ impl Global {
             instance: instance.instance().as_u32(),
             kind: VMGlobalKind::ComponentFlags(index),
         }
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_key(&self, store: &StoreOpaque) -> usize {
+        self.definition(store).as_ptr() as usize
     }
 
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Global {
