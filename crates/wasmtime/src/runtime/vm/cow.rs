@@ -406,6 +406,39 @@ impl MemoryImageSlot {
         Ok(())
     }
 
+    /// Shrinks the accessible heap to `size_bytes`, zeroing the rest of its
+    /// last host page and discarding the host pages beyond it so that they
+    /// read as zero once accessible again.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_shrink_heap_limit(&mut self, size_bytes: usize) -> Result<()> {
+        let size_bytes_aligned = HostAlignedByteCount::new_rounded_up(size_bytes)?;
+        let page_end = size_bytes_aligned
+            .byte_count()
+            .min(self.accessible.byte_count());
+        if size_bytes < page_end {
+            // SAFETY: `size_bytes..page_end` is accessible memory of this
+            // slot, and nothing borrows it.
+            unsafe {
+                self.base
+                    .as_mut_ptr()
+                    .add(size_bytes)
+                    .write_bytes(0, page_end - size_bytes);
+            }
+        }
+        if let Ok(rest) = self.accessible.checked_sub(size_bytes_aligned) {
+            // SAFETY: these pages are part of this slot and nothing borrows
+            // them.
+            unsafe {
+                vm::erase_existing_mapping(
+                    self.base.as_mut_ptr().add(size_bytes_aligned.byte_count()),
+                    rest.byte_count(),
+                )?;
+            }
+            self.accessible = size_bytes_aligned;
+        }
+        Ok(())
+    }
+
     /// Prepares this slot for the instantiation of a new instance with the
     /// provided linear memory image.
     ///

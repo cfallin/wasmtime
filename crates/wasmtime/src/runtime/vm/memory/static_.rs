@@ -70,6 +70,20 @@ impl RuntimeLinearMemory for StaticMemory {
         self.size = len;
     }
 
+    #[cfg(feature = "rr")]
+    fn shrink_to(&mut self, new_size: usize) -> Result<()> {
+        // SAFETY: the bytes beyond `new_size` are part of this memory, and
+        // nothing borrows them.
+        unsafe {
+            self.base
+                .as_mut_ptr()
+                .add(new_size)
+                .write_bytes(0, self.size - new_size);
+        }
+        self.size = new_size;
+        Ok(())
+    }
+
     fn base(&self) -> MemoryBase {
         self.base.clone()
     }

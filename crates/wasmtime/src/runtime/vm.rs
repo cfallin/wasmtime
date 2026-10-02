@@ -109,6 +109,8 @@ pub use crate::runtime::vm::instance::{
     PoolConcurrencyLimitError, PoolingAllocatorMetrics, PoolingInstanceAllocator,
 };
 pub use crate::runtime::vm::interpreter::*;
+#[cfg(feature = "rr")]
+pub use crate::runtime::vm::memory::WATCH_CLEAN;
 #[cfg(feature = "debug")]
 pub use crate::runtime::vm::memory::WATCH_DEBUG;
 pub use crate::runtime::vm::memory::{
@@ -122,6 +124,8 @@ pub use crate::runtime::vm::store_box::*;
 pub use crate::runtime::vm::sys::mmap::open_file_for_mmap;
 #[cfg(has_host_compiler_backend)]
 pub use crate::runtime::vm::sys::unwind::UnwindRegistration;
+#[cfg(feature = "rr")]
+pub(crate) use crate::runtime::vm::table::FuncTableElem;
 pub use crate::runtime::vm::table::{Table, TableElementType};
 #[cfg(feature = "gc")]
 pub use crate::runtime::vm::throw::*;

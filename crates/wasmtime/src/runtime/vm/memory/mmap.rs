@@ -225,6 +225,28 @@ impl RuntimeLinearMemory for MmapMemory {
         self.len = len;
     }
 
+    #[cfg(feature = "rr")]
+    fn shrink_to(&mut self, new_size: usize) -> Result<()> {
+        let new_accessible = HostAlignedByteCount::new_rounded_up(new_size)?;
+        let start = self.pre_guard_size.byte_count();
+        // SAFETY: `new_size..` up to the accessible end is accessible memory
+        // of this allocation, and nothing borrows it.
+        unsafe {
+            let base = self.mmap.as_mut_ptr().add(start);
+            let page_end = new_accessible.byte_count().min(self.len);
+            base.add(new_size)
+                .write_bytes(0, page_end.saturating_sub(new_size));
+            if let Ok(rest) = self.accessible().checked_sub(new_accessible) {
+                crate::vm::sys::vm::erase_existing_mapping(
+                    base.add(new_accessible.byte_count()),
+                    rest.byte_count(),
+                )?;
+            }
+        }
+        self.len = new_size;
+        Ok(())
+    }
+
     fn base(&self) -> MemoryBase {
         MemoryBase::Mmap(
             self.mmap

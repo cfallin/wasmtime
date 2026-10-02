@@ -89,6 +89,20 @@ impl RuntimeLinearMemory for MallocMemory {
         Ok(())
     }
 
+    #[cfg(feature = "rr")]
+    fn shrink_to(&mut self, new_size: usize) -> Result<()> {
+        // SAFETY: the bytes beyond `new_size` are initialized storage, and
+        // nothing borrows them.
+        unsafe {
+            self.base_ptr
+                .as_ptr()
+                .add(new_size)
+                .write_bytes(0, self.byte_len - new_size);
+        }
+        self.byte_len = new_size;
+        Ok(())
+    }
+
     fn base(&self) -> MemoryBase {
         MemoryBase::Raw(self.base_ptr)
     }

@@ -15,6 +15,11 @@ use wasmtime_core::alloc::new_zeroed_boxed_slice;
 #[cfg(feature = "debug")]
 pub const WATCH_DEBUG: u8 = 1 << 0;
 
+/// A shadow bit set for each byte of a page that record/replay has not seen
+/// written since its last checkpoint.
+#[cfg(feature = "rr")]
+pub const WATCH_CLEAN: u8 = 1 << 1;
+
 /// The shadow of a linear memory: one byte per byte of the memory.
 ///
 /// This is owned by the memory's `LocalMemory`, and so is freed along with the
@@ -30,6 +35,8 @@ pub struct ShadowMemory {
     definition: Box<VMDefinedShadowMemory>,
     bytes: Box<[u8]>,
     len: usize,
+    // The value of the bytes added when the memory grows.
+    fill: u8,
 }
 
 // SAFETY: the definition only points to `bytes`, which the shadow owns.
@@ -47,6 +54,7 @@ impl ShadowMemory {
             definition,
             bytes,
             len,
+            fill: 0,
         })
     }
 
@@ -65,6 +73,11 @@ impl ShadowMemory {
         &mut self.bytes[..self.len]
     }
 
+    /// Sets the value of the bytes added when the memory grows.
+    pub fn set_fill(&mut self, fill: u8) {
+        self.fill = fill;
+    }
+
     /// Follows the memory's size, which is now `len` bytes.
     pub fn resize(&mut self, len: usize) -> Result<()> {
         if len > self.bytes.len() {
@@ -74,7 +87,7 @@ impl ShadowMemory {
             self.bytes = bytes;
         }
         if len > self.len {
-            self.bytes[self.len..len].fill(0);
+            self.bytes[self.len..len].fill(self.fill);
         }
         self.len = len;
         Ok(())
