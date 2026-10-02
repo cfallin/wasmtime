@@ -483,6 +483,15 @@ macro_rules! for_each_vm_type {
                 ///
                 /// NB: `UnsafeCell` because JIT code writes to this field.
                 pub current_thread: UnsafeCell<VMLazyThread>,
+
+                /// The control block of the record/replay guest activation that
+                /// is currently running, if any.
+                ///
+                /// The replay driver installs this before every resumption of an
+                /// activation, and `FuncKey::ReplayHostCall` trampolines read it.
+                /// Like `component_context` it is present even without the `rr`
+                /// feature to keep `VMOffsets` unconditional.
+                pub replay_control: Option<VmPtr<VMReplayControl>>,
             }
 
             /// The shadow of a linear memory, used for watchpoints when compiled
@@ -499,6 +508,54 @@ macro_rules! for_each_vm_type {
             pub struct VMMemoryShadow {
                 /// The start of the shadow bytes.
                 pub base: VmPtr<u8>,
+            }
+
+            /// The fixed-layout state shared between a record/replay guest
+            /// activation's raw fiber and the replay driver.
+            ///
+            /// Each activation owns one at a stable address for its entire
+            /// lifetime. The activation's generated code communicates with the
+            /// driver only through this structure and the fiber switch routine.
+            #[derive(Debug)]
+            #[repr(C)]
+            #[snake_name = vm_replay_control]
+            pub struct VMReplayControl {
+                /// The fiber switch routine, called with the C calling convention
+                /// and `switch_arg` to yield to the driver.
+                pub switch: VmPtr<u8>,
+
+                /// The argument for `switch`.
+                pub switch_arg: VmPtr<u8>,
+
+                /// The function that the activation calls, with the array calling
+                /// convention.
+                pub entry: VmPtr<VMFuncRef>,
+
+                /// The caller vmctx for `entry`.
+                pub entry_caller: VmPtr<VMOpaqueContext>,
+
+                /// The argument and result storage for `entry`.
+                pub entry_values: VmPtr<ValRaw>,
+
+                /// The capacity of `entry_values`, in `ValRaw`s.
+                pub entry_values_len: usize,
+
+                /// Why the activation last yielded: one of the `VM_REPLAY_*`
+                /// constants.
+                pub reason: u32,
+
+                /// Set by the driver before resuming a host call: nonzero if the
+                /// call succeeded and zero if it raised an error.
+                pub host_succeeded: u32,
+
+                /// The host function context of the pending host call.
+                pub host_callee: Option<VmPtr<VMOpaqueContext>>,
+
+                /// The array-call storage of the pending host call.
+                pub host_values: Option<VmPtr<ValRaw>>,
+
+                /// The capacity of `host_values`, in `ValRaw`s.
+                pub host_values_len: usize,
             }
 
             /// JIT-visible representation of the store's current thread for the component

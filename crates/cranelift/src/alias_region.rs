@@ -81,6 +81,7 @@ enum VmType {
     ComponentBuiltinFunctionsArray,
     HostValRaw,
     VMMemoryShadow,
+    VMReplayControl,
 }
 
 /// A key that uniquely identifies an alias region across an entire compilation.
