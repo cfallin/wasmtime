@@ -2534,15 +2534,10 @@ async fn debugging_nested_activations_through_host_frames() -> Result<()> {
     // is 1, and `run` is 2.
     fn stack<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Result<Vec<u32>> {
         let frames = replayer.debug_exit_frames();
-        let mut store = replayer.store();
+        let store = replayer.store();
         frames
             .iter()
-            .map(|f| {
-                Ok(f.wasm_function_index_and_pc(&mut store)?
-                    .unwrap()
-                    .0
-                    .as_u32())
-            })
+            .map(|f| Ok(f.wasm_function_index_and_pc(&store)?.unwrap().0.as_u32()))
             .collect()
     }
     let mut stacks = Vec::new();
@@ -2627,8 +2622,8 @@ async fn checkpoints_copy_only_written_pages() -> Result<()> {
     let trace = record_pages()?;
     let contents = |replayer: &mut rr::Replayer<'_, ()>| {
         let instance = replayer.instances()[0];
-        let mut store = replayer.store();
-        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let store = replayer.store();
+        let memory = instance.get_memory(&store, "memory").unwrap();
         memory.data(&store).to_vec()
     };
     for page_size in [4096, 64, 1] {
@@ -2831,6 +2826,248 @@ async fn checkpoints_copy_only_written_table_slots() -> Result<()> {
     replayer.stop_at_events(false);
     assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
     assert_eq!(contents(&mut replayer), end);
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn gc_during_callbacks_sees_parked_roots() -> Result<()> {
+    const WAT: &str = r#"
+    (module
+      (type $s (struct (field (mut i32)) (field (mut (ref null $s)))))
+      (import "" "host" (func $host))
+      (func $build (param $n i32) (param $base i32) (result (ref null $s))
+        (local $i i32) (local $x (ref null $s))
+        loop
+          (local.set $x (struct.new $s (i32.add (local.get $base) (local.get $i)) (local.get $x)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $x)
+      (func $sum (param $x (ref null $s)) (result i32) (local $sum i32)
+        block
+          loop
+            (br_if 1 (ref.is_null (local.get $x)))
+            (local.set $sum (i32.add (local.get $sum) (struct.get $s 0 (local.get $x))))
+            (local.set $x (struct.get $s 1 (local.get $x)))
+            br 0
+          end
+        end
+        local.get $sum)
+      (func (export "churn") (result i32)
+        (local $k i32) (local $t i32)
+        loop
+          (local.set $t (i32.add (local.get $t)
+            (call $sum (call $build (i32.const 1000) (local.get $k)))))
+          (local.set $k (i32.add (local.get $k) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $k) (i32.const 200)))
+        end
+        local.get $t)
+      (func (export "run") (result i32)
+        (local $x (ref null $s))
+        (local.set $x (call $build (i32.const 500) (i32.const 7)))
+        call $host
+        (call $sum (local.get $x))))
+    "#;
+    let mk = |mode, collector| -> Result<Engine> {
+        let mut config = Config::new();
+        config
+            .rr(mode)
+            .wasm_gc(true)
+            .wasm_function_references(true)
+            .collector(collector);
+        Engine::new(&config)
+    };
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = mk(RRConfig::Recording, collector)?;
+        let mut store = Store::new(&recording, ());
+        store.start_recording()?;
+        let host = Func::wrap(&mut store, |mut caller: Caller<'_, ()>| -> Result<()> {
+            let churn = caller.get_export("churn").unwrap().into_func().unwrap();
+            let churn = churn.typed::<(), i32>(&caller)?;
+            churn.call(&mut caller, ())?;
+            Ok(())
+        });
+        let module = new_module(&recording, WAT)?;
+        let instance = Instance::new(&mut store, &module, &[host.into()])?;
+        let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+        // The callback allocates enough to collect while `run` holds a list.
+        assert_eq!(run.call(&mut store, ())?, (7..507).sum::<i32>());
+        let trace = store.finish_recording()?;
+        let mut store = Store::new(&mk(RRConfig::Replaying, collector)?, ());
+        // Replay checks the recorded result.
+        let mut replayer = store.replayer_all(&trace)?;
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+const GC_LIST: &str = r#"
+(module
+  (type $s (struct (field (mut i32)) (field (ref null $s))))
+  (import "" "report" (func $report (param i32)))
+  (global $list (export "list") (mut (ref null $s)) (ref.null $s))
+  (func $churn (param $n i32)
+    (local $i i32)
+    loop
+      (drop (struct.new $s (local.get $i) (ref.null $s)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+    end)
+  (func (export "step") (param $k i32) (result i32)
+    (local $x (ref null $s)) (local $sum i32)
+    ;; Existing objects change too: the previous head gains 100.
+    (if (i32.eqz (ref.is_null (global.get $list)))
+      (then (struct.set $s 0 (global.get $list)
+              (i32.add (struct.get $s 0 (global.get $list)) (i32.const 100)))))
+    (global.set $list (struct.new $s (local.get $k) (global.get $list)))
+    (call $churn (i32.const 20000))
+    (call $report (local.get $k))
+    (local.set $x (global.get $list))
+    block
+      loop
+        (br_if 1 (ref.is_null (local.get $x)))
+        (local.set $sum (i32.add (local.get $sum) (struct.get $s 0 (local.get $x))))
+        (local.set $x (struct.get $s 1 (local.get $x)))
+        br 0
+      end
+    end
+    local.get $sum))
+"#;
+
+#[cfg(feature = "gc")]
+fn gc_engine(mode: RRConfig, collector: Collector) -> Result<Engine> {
+    let mut config = Config::new();
+    config
+        .rr(mode)
+        .wasm_gc(true)
+        .wasm_function_references(true)
+        .collector(collector);
+    Engine::new(&config)
+}
+
+/// The values in the list in the `list` global, read through frozen
+/// references, which leave the replay's GC roots alone.
+#[cfg(feature = "gc")]
+fn gc_list<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> Result<Vec<i32>> {
+    let instance = replayer.instances()[0];
+    let store = replayer.store();
+    let list = instance.get_global(&store, "list").unwrap();
+    let mut values = Vec::new();
+    let mut next = list.get(&store).unwrap_frozen_anyref();
+    while let Some(node) = next {
+        let node = node.as_struct(&store)?.unwrap();
+        values.push(node.field(&store, 0)?.unwrap_i32());
+        next = node.field(&store, 1)?.unwrap_frozen_anyref();
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn checkpoints_rewind_gc_heaps() -> Result<()> {
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = gc_engine(RRConfig::Recording, collector)?;
+        let mut store = Store::new(&recording, ());
+        store.start_recording()?;
+        let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+            rr::record_event(&mut caller, &Step(k))
+        });
+        let module = new_module(&recording, GC_LIST)?;
+        let instance = Instance::new(&mut store, &module, &[report.into()])?;
+        let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+        for k in 0..6 {
+            // Fails with the null collector once its heap is exhausted;
+            // replay reproduces that too.
+            if step.call(&mut store, k).is_err() {
+                break;
+            }
+        }
+        let trace = store.finish_recording()?;
+
+        let mut store = Store::new(&gc_engine(RRConfig::Replaying, collector)?, ());
+        let mut replayer = store.replayer_all(&trace)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = Vec::new();
+        let mut lists = Vec::new();
+        while let rr::ReplayStop::Event(_) = replayer.run().await? {
+            checkpoints.push(replayer.checkpoint()?);
+            lists.push(gc_list(&mut replayer)?);
+        }
+        assert!(lists.len() >= 2, "{collector:?}");
+        assert_eq!(lists[1], [1, 100]);
+
+        // Rewind in every direction: the heap, and the globals and stacks
+        // referring into it, are as they were. Replaying on from each
+        // checkpoint reproduces the recorded results, which replay checks.
+        let order = (0..lists.len()).rev().chain([0, lists.len() - 1, 1]);
+        for which in order {
+            replayer.restore(&checkpoints[which])?;
+            assert_eq!(gc_list(&mut replayer)?, lists[which], "{collector:?}");
+            replayer.stop_at_events(false);
+            assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+            replayer.stop_at_events(true);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn frozen_gc_refs_last_until_replay_moves() -> Result<()> {
+    let collector = Collector::DeferredReferenceCounting;
+    let recording = gc_engine(RRConfig::Recording, collector)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = new_module(&recording, GC_LIST)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    for k in 0..3 {
+        step.call(&mut store, k)?;
+    }
+    let trace = store.finish_recording()?;
+
+    let mut store = Store::new(&gc_engine(RRConfig::Replaying, collector)?, ());
+    let mut replayer = store.replayer_all(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    let checkpoint = replayer.checkpoint()?;
+    let instance = replayer.instances()[0];
+    let head = |replayer: &rr::Replayer<'_, ()>| {
+        let s = replayer.store();
+        instance
+            .get_global(&s, "list")
+            .unwrap()
+            .get(&s)
+            .unwrap_frozen_anyref()
+            .unwrap()
+    };
+    let frozen = head(&replayer);
+    assert!(frozen.as_struct(&replayer.store())?.is_some());
+    // Restoring a checkpoint replaces the heap.
+    replayer.restore(&checkpoint)?;
+    assert!(!frozen.is_valid(&replayer.store()));
+    let frozen = head(&replayer);
+    assert!(frozen.is_valid(&replayer.store()));
+    assert_eq!(gc_list(&mut replayer)?, [0]);
+    // So does replaying on.
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    assert!(!frozen.is_valid(&replayer.store()));
+    assert_eq!(gc_list(&mut replayer)?, [1, 100]);
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
     Ok(())
 }
 

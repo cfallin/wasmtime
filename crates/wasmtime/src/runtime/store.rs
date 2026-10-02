@@ -126,6 +126,8 @@ pub use self::async_::CallHookHandler;
 
 #[cfg(feature = "gc")]
 mod gc;
+#[cfg(all(feature = "gc", feature = "rr"))]
+pub(crate) use gc::RrGcImage;
 #[cfg(not(feature = "gc"))]
 mod gc_disabled;
 
