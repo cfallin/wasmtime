@@ -48,6 +48,32 @@ pub(crate) struct Activation {
 }
 
 impl Activation {
+    /// An activation that exited Wasm at `exit_pc` from the trampoline with
+    /// frame pointer `exit_trampoline_fp`, and entered Wasm through the
+    /// trampoline with frame pointer `entry_trampoline_fp`.
+    ///
+    /// # Safety
+    ///
+    /// The frame pointers must be those of a suspended activation whose stack
+    /// is intact.
+    #[cfg(all(feature = "debug", feature = "rr"))]
+    pub(crate) unsafe fn from_exit(
+        exit_pc: usize,
+        exit_trampoline_fp: usize,
+        entry_trampoline_fp: usize,
+    ) -> Activation {
+        Activation {
+            exit_pc,
+            // SAFETY: per this function's contract.
+            exit_fp: unsafe {
+                crate::runtime::vm::VMStoreContext::wasm_exit_fp_from_trampoline_fp(
+                    exit_trampoline_fp,
+                )
+            },
+            entry_trampoline_fp,
+        }
+    }
+
     /// Create a frame cursor starting at the exit frame of this activation.
     ///
     /// # Safety
