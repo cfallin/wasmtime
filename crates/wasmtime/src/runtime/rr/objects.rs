@@ -28,7 +28,7 @@ pub(super) struct Objects {
     pub flags: Vec<usize>,
     pub modules: Vec<crate::Module>,
     // During replay, how many of `modules` have been defined so far. Modules
-    // remain compiled across checkpoint restores.
+    // remain compiled, and keep their breakpoints, across checkpoint restores.
     pub modules_defined: usize,
 }
 
