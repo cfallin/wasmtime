@@ -219,6 +219,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 watchpoint: None,
                 histories: Default::default(),
                 page_size: 4096,
+                parked: Vec::new(),
                 embedder_access: false,
                 stopped: Vec::new(),
             },
@@ -865,6 +866,29 @@ impl<T: 'static> Driver<'_, T> {
             }
             *self.growth_failures() = failures;
         }
+
+        // A collection while this activation runs must find the GC roots of
+        // the others, which are parked on their own fibers.
+        let Mode::Replaying { parked, .. } = &mut self.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        parked.clear();
+        parked.try_reserve(self.activations.len())?;
+        parked.extend(
+            self.activations
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| *i != index && (a.host.is_some() || Some(a.serial) == self.paused))
+                .map(|(_, a)| {
+                    let cx = &a.context;
+                    (
+                        cx.last_wasm_exit_pc,
+                        cx.last_wasm_exit_trampoline_fp,
+                        cx.last_wasm_entry_fp,
+                    )
+                }),
+        );
 
         let store: &mut StoreOpaque = self.store;
         let activation = &mut self.activations[index];
