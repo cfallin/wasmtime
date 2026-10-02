@@ -155,7 +155,9 @@ define_tunables! {
         /// store, for watchpoints (see `VMMemoryShadow`).
         pub memory_watchpoints: bool,
 
-        /// Whether recording in RR is enabled or not.
+        /// Whether record/replay compilation is enabled. Retains core Wasm
+        /// bytecode, preserves component builtin calls for interception, and
+        /// (for native targets) includes the replay trampolines.
         pub recording: bool,
 
         /// An allocation counter that triggers GC when it reaches zero.
@@ -210,6 +212,12 @@ define_tunables! {
 }
 
 impl Tunables {
+    /// Whether compiled artifacts retain the original Wasm bytecode, which
+    /// guest debugging and record/replay need.
+    pub fn retain_wasm_bytecode(&self) -> bool {
+        self.debug_guest || self.recording
+    }
+
     /// Returns a `Tunables` configuration assumed for running code on the host.
     pub fn default_host() -> Self {
         if cfg!(miri) {

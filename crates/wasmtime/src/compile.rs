@@ -120,7 +120,7 @@ pub(crate) fn build_module_artifacts<T: FinishedObject>(
         dwarf_package,
     )?;
 
-    if tunables.debug_guest {
+    if tunables.retain_wasm_bytecode() {
         object.append_wasm_bytecode(std::iter::once(wasm));
     }
 
@@ -198,7 +198,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
     }
 
     // Collect bytecode slices here before moving `module_translations` below.
-    let module_wasms = if tunables.debug_guest {
+    let module_wasms = if tunables.retain_wasm_bytecode() {
         module_translations
             .values()
             .map(|t| t.wasm)
@@ -219,7 +219,7 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
         None, // TODO: Support dwarf packages for components.
     )?;
 
-    if tunables.debug_guest {
+    if tunables.retain_wasm_bytecode() {
         object.append_wasm_bytecode(module_wasms);
     }
 

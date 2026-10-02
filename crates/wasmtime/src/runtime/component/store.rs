@@ -81,6 +81,11 @@ pub struct RuntimeInstance {
 }
 
 impl ComponentStoreData {
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_is_empty(&self) -> bool {
+        self.instances.is_empty() && self.component_host_table.is_empty()
+    }
+
     pub fn new(engine: &Engine) -> ComponentStoreData {
         ComponentStoreData {
             instances: Default::default(),

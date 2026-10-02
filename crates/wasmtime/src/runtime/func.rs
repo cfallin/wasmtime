@@ -1461,6 +1461,14 @@ pub(crate) unsafe fn invoke_wasm_and_catch_traps<T>(
     caller: Option<NonNull<VMContext>>,
     params_and_returns: NonNull<[ValRaw]>,
 ) -> Result<()> {
+    #[cfg(feature = "rr")]
+    // SAFETY: the caller supplies initialized arguments of func_ref's type.
+    let rr = unsafe {
+        store
+            .0
+            .rr_enter(func_ref, params_and_returns.as_ptr().cast(), false)?
+    };
+
     // The `enter_wasm` call below will reset the store context's
     // `stack_chain` to a new `InitialStack`, pointing to the
     // stack-allocated `initial_stack_csi`.
@@ -1488,6 +1496,13 @@ pub(crate) unsafe fn invoke_wasm_and_catch_traps<T>(
     }
     core::mem::drop(previous_runtime_state);
     store.0.call_hook(CallHook::ReturningFromWasm)?;
+    #[cfg(feature = "rr")]
+    // SAFETY: successful array calls initialize the signature's results.
+    unsafe {
+        store
+            .0
+            .rr_leave(rr, params_and_returns.as_ptr().cast(), &result, false)?;
+    }
     result
 }
 
@@ -2399,6 +2414,15 @@ impl HostFunc {
                 &*(state as *const _ as *const HostFuncState<F>)
             };
 
+            #[cfg(feature = "rr")]
+            // SAFETY: callee_vmctx is the live host context, and args contains
+            // the initialized parameters specified by that context's type.
+            let rr = unsafe {
+                store
+                    .0
+                    .rr_enter_host(instance, callee_vmctx, args.as_ptr())?
+            };
+
             let (gc_lifo_scope, ret) = {
                 let gc_lifo_scope = store.0.enter_gc_lifo_scope();
 
@@ -2419,6 +2443,13 @@ impl HostFunc {
             };
 
             store.0.exit_gc_lifo_scope(gc_lifo_scope);
+
+            #[cfg(feature = "rr")]
+            // SAFETY: successful host functions initialize their results;
+            // unsuccessful ones do not cause rr_leave to read any slots.
+            unsafe {
+                store.0.rr_leave(rr, args.as_ptr(), &ret, true)?;
+            }
 
             ret
         };
