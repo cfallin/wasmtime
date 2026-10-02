@@ -421,6 +421,30 @@ impl ServeCommand {
     }
 
     fn new_store(&self, engine: &Engine, instance_id: Option<u64>) -> Result<Store<Host>> {
+        self.new_store_with(engine, instance_id, None)
+    }
+
+    /// Like `new_store`, but with `-R`, starts recording into the
+    /// store, capturing its WASI output.
+    fn new_instance_store(&self, engine: &Engine, instance_id: u64) -> Result<Store<Host>> {
+        #[cfg(feature = "rr")]
+        if self.run.recording() {
+            let (sink, receiver) = wasmtime::rr::event_channel();
+            let mut store = self.new_store_with(engine, Some(instance_id), Some(sink))?;
+            store.start_recording()?;
+            store.rr_attach_events(receiver)?;
+            return Ok(store);
+        }
+        self.new_store_with(engine, Some(instance_id), None)
+    }
+
+    fn new_store_with(
+        &self,
+        engine: &Engine,
+        instance_id: Option<u64>,
+        #[cfg(feature = "rr")] sink: Option<wasmtime::rr::EventSink>,
+        #[cfg(not(feature = "rr"))] sink: Option<()>,
+    ) -> Result<Store<Host>> {
         let mut builder = WasiCtxBuilder::new();
         self.run.configure_wasip2(
             &mut builder,
@@ -443,8 +467,24 @@ impl ServeCommand {
                 stderr_prefix = "".to_string();
             }
         }
-        builder.stdout(LogStream::new(stdout_prefix, Output::Stdout));
-        builder.stderr(LogStream::new(stderr_prefix, Output::Stderr));
+        let stdout = LogStream::new(stdout_prefix, Output::Stdout);
+        let stderr = LogStream::new(stderr_prefix, Output::Stderr);
+        match sink {
+            #[cfg(feature = "rr")]
+            Some(sink) => {
+                use wasmtime_wasi::rr::{OutputKind, RecordedOutput};
+                builder.stdout(RecordedOutput::new(
+                    stdout,
+                    sink.clone(),
+                    OutputKind::Stdout,
+                ));
+                builder.stderr(RecordedOutput::new(stderr, sink, OutputKind::Stderr));
+            }
+            _ => {
+                builder.stdout(stdout);
+                builder.stderr(stderr);
+            }
+        }
 
         let mut table = wasmtime::component::ResourceTable::new();
         if let Some(max) = self.run.common.wasi.max_resources {
@@ -625,6 +665,24 @@ impl ServeCommand {
                 config.epoch_interruption(true);
             }
             None => {}
+        }
+
+        #[cfg(feature = "rr")]
+        if self.run.recording() {
+            #[cfg(feature = "debug")]
+            if debug_run.is_some() {
+                bail!(
+                    "recording with -R cannot be combined with a debugger; debug the replay instead"
+                );
+            }
+            if self.run.common.wasm.timeout.is_some() {
+                bail!("recording with -R cannot be combined with -W timeout");
+            }
+            if self.run.profile.is_some() {
+                bail!("recording with -R cannot be combined with --profile");
+            }
+            // Record one request per trace, unless asked otherwise.
+            self.max_instance_reuse_count.get_or_insert(1);
         }
 
         let engine = Engine::new(&config)?;
@@ -966,6 +1024,9 @@ impl WorkerExpiration for HostWorkerExpiration {
 
 struct HostWorkerState {
     instance_id: u64,
+    /// Where to write the instance's trace, with `-R`.
+    #[cfg(feature = "rr")]
+    record: Option<crate::common::RecordTarget>,
     max_instance_reuse_count: usize,
     max_instance_concurrent_reuse_count: usize,
     request_timeout: Duration,
@@ -1004,10 +1065,22 @@ impl WorkerState for HostWorkerState {
     }
 
     fn drop(&self, mut store: Store<Self::StoreData>, result: Result<(), wasmtime::Error>) {
-        if let Err(error) = result {
+        if let Err(error) = &result {
             eprintln!("worker failed: {error:?}");
             #[cfg(feature = "coredump")]
             write_serve_coredump(self, &mut store, &error);
+        }
+
+        #[cfg(feature = "rr")]
+        if let Some(target) = &self.record {
+            match crate::common::finish_recording(&mut store, target, result.as_ref().err()) {
+                Ok(()) => log::info!(
+                    "Recorded instance {} to {}",
+                    self.instance_id,
+                    std::path::Path::display(&target.path)
+                ),
+                Err(e) => eprintln!("failed to record instance {}: {e:?}", self.instance_id),
+            }
         }
 
         if let Some(write_profile) = store.data_mut().write_profile.take() {
@@ -1068,7 +1141,7 @@ impl HandlerState for HostHandlerState {
         let instance_id = self.next_instance_id.fetch_add(1, Ordering::Relaxed);
         let mut store = self
             .cmd
-            .new_store(self.component.engine(), Some(instance_id))?;
+            .new_instance_store(self.component.engine(), instance_id)?;
         let proxy = self.instantiate_into(&mut store).await?;
 
         let request_timeout = self
@@ -1096,6 +1169,12 @@ impl HandlerState for HostHandlerState {
                 sleep: tokio::time::sleep(Duration::MAX),
             },
             state: HostWorkerState {
+                #[cfg(feature = "rr")]
+                record: self.cmd.run.record_target().map(|mut target| {
+                    target.path =
+                        format!("{}.{instance_id}", std::path::Path::display(&target.path)).into();
+                    target
+                }),
                 max_instance_reuse_count: self.max_instance_reuse_count,
                 max_instance_concurrent_reuse_count: self.max_instance_concurrent_reuse_count,
                 instance_id,

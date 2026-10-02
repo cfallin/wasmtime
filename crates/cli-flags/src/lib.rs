@@ -674,6 +674,7 @@ wasmtime_option_group! {
     #[env = "RECORD"]
     pub struct RecordOptions {
         /// Filename for the recorded execution trace (or empty string to skip writing a file).
+        /// `wasmtime serve` records each instance to its own trace, `PATH.N`.
         pub path: Option<String>,
         /// Include (optional) signatures to facilitate validation checks during replay
         /// (see `wasmtime replay` for details).
@@ -681,6 +682,11 @@ wasmtime_option_group! {
         /// Window size of internal buffering for record events (large windows offer more opportunities
         /// for coalescing events at the cost of memory usage).
         pub event_window_size: Option<usize>,
+        /// Write a trace bundle: a directory at `path` holding the trace and
+        /// the bytecode of every module it instantiates, which `wasmtime
+        /// replay` can replay on its own. Otherwise the trace refers to
+        /// modules only by checksum, and replay needs the program's Wasm.
+        pub bundle: Option<bool>,
     }
 
     enum Record {
@@ -1477,7 +1483,10 @@ impl CommonOptions {
         match_feature! {
             ["rr" : &record.path]
             _path => {
-                bail!("recording configuration for `rr` feature is not supported yet");
+                if record.validation_metadata.is_some() || record.event_window_size.is_some() {
+                    bail!("`-R validation-metadata` and `-R event-window-size` are not supported");
+                }
+                config.rr(wasmtime::RRConfig::Recording);
             },
             _ => err,
         }
