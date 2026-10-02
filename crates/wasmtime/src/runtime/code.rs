@@ -182,9 +182,9 @@ impl EngineCode {
     // patch trampolines in StoreCode, so we can freely mix in
     // EngineCode variants.
 
-    /// Get the Wasm-to-array trampoline for the given raw range in
-    /// the text segment.
-    pub(crate) fn raw_wasm_to_array_trampoline_data(&self, range: Range<usize>) -> &[u8] {
+    /// Get the store-invariant function (such as a Wasm-to-array
+    /// trampoline) for the given raw range in the text segment.
+    pub(crate) fn raw_store_invariant_func_data(&self, range: Range<usize>) -> &[u8] {
         &self.original_code.text()[range]
     }
 
