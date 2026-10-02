@@ -243,6 +243,39 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
         }
     }
 
+    // Record the component-model async tests, and replay their recordings.
+    #[cfg(feature = "rr")]
+    if !should_fail
+        && !test_config.gc_types()
+        && !test_config.exceptions()
+        && !config.pooling
+        && config.compiler == Compiler::CraneliftNative
+        && test
+            .path
+            .to_str()
+            .is_some_and(|p| p.contains("component-model") && p.contains("async"))
+    {
+        let mut cfg = cfg.clone();
+        cfg.cranelift_nan_canonicalization(true)
+            .relaxed_simd_deterministic(true);
+        let mut recording = cfg.clone();
+        recording.rr(wasmtime::RRConfig::Recording);
+        let mut replaying = cfg;
+        replaying.rr(wasmtime::RRConfig::Replaying);
+        let mut wast_context = WastContext::new(&Engine::new(&recording)?, Async::Yes, |_| {});
+        wast_context.record_replay(Engine::new(&replaying)?);
+        wast_context.register_spectest(&SpectestConfig {
+            use_shared_memory: false,
+            suppress_prints: true,
+        })?;
+        if test.path.to_str().unwrap().contains("misc_testsuite") {
+            wast_context.register_wasmtime()?;
+        }
+        wast_context
+            .run_wast(test.path.to_str().unwrap(), test.contents.as_bytes())
+            .context("failed to record and replay")?;
+    }
+
     Ok(())
 }
 

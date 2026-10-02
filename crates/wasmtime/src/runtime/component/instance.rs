@@ -504,6 +504,8 @@ impl Instance {
             Some(m) => m,
             None => return &mut [],
         };
+        #[cfg(feature = "rr")]
+        store.rr_track_memory_definition(memory, 0..usize::MAX);
         // SAFETY: See `options_memory` comment above, and note that this is
         // taking `&mut StoreOpaque` to thread the lifetime through instead.
         unsafe {
@@ -694,9 +696,22 @@ impl<'a> Instantiator<'a> {
     ) -> Result<Instantiator<'a>> {
         let env_component = component.env_component();
         #[cfg(feature = "rr")]
-        store.rr.reject("components")?;
+        let recording = store.rr.recording();
         let (modules, engine, breakpoints) = store.modules_and_engine_and_breakpoints_mut();
         modules.register_component(component, engine, breakpoints)?;
+        #[cfg(feature = "rr")]
+        if recording {
+            // RR wrappers need the component's wasm-to-array trampolines
+            // before any core instance is constructed.
+            let imported_modules = imports.values().filter_map(|import| match import {
+                RuntimeImport::Module(module) => Some(module),
+                _ => None,
+            });
+            for module in component.static_modules().chain(imported_modules) {
+                let (modules, engine, breakpoints) = store.modules_and_engine_and_breakpoints_mut();
+                modules.register_module(module, engine, breakpoints)?;
+            }
+        }
         let imported_resources: ImportedResources =
             TryPrimaryMap::with_capacity(env_component.imported_resources.len())?;
 
@@ -717,7 +732,7 @@ impl<'a> Instantiator<'a> {
         })
     }
 
-    async fn run<T>(
+    async fn run<T: 'static>(
         &mut self,
         store: &mut StoreContextMut<'_, T>,
         asyncness: Asyncness,
@@ -757,6 +772,12 @@ impl<'a> Instantiator<'a> {
                 ptrs.array_call,
                 signature,
             );
+            #[cfg(feature = "rr")]
+            if store.0.rr.recording() {
+                let original = self.instance_mut(store.0).trampoline_func_ref(idx);
+                let wrapper = crate::rr::component::wrap(store, original)?;
+                self.instance_mut(store.0).rr_set_trampoline(idx, wrapper);
+            }
         }
 
         // Initialize the unsafe intrinsics used by this component, if any.
@@ -782,6 +803,15 @@ impl<'a> Instantiator<'a> {
                 ptrs.array_call,
                 shared_ty,
             );
+            #[cfg(feature = "rr")]
+            if store.0.rr.recording() {
+                let original = self
+                    .instance_mut(store.0)
+                    .unsafe_intrinsic_func_ref(intrinsic);
+                let wrapper = crate::rr::component::wrap(store, original)?;
+                self.instance_mut(store.0)
+                    .rr_set_intrinsic(intrinsic, wrapper);
+            }
         }
 
         for initializer in env_component.initializers.iter() {
@@ -917,13 +947,18 @@ impl<'a> Instantiator<'a> {
                     self.extract_post_return(store.0, post_return)
                 }
 
-                GlobalInitializer::Resource(r) => self.resource(store.0, r)?,
+                GlobalInitializer::Resource(r) => self.resource(store, r)?,
             }
         }
         Ok(())
     }
 
-    fn resource(&mut self, store: &mut StoreOpaque, resource: &Resource) -> Result<()> {
+    fn resource<T: 'static>(
+        &mut self,
+        context: &mut StoreContextMut<'_, T>,
+        resource: &Resource,
+    ) -> Result<()> {
+        let store = &mut *context.0;
         let dtor = resource
             .dtor
             .as_ref()
@@ -932,6 +967,19 @@ impl<'a> Instantiator<'a> {
             crate::runtime::vm::Export::Function(f) => f.vm_func_ref(store),
             _ => unreachable!(),
         });
+        #[cfg(feature = "rr")]
+        let dtor = if context.0.rr.recording() {
+            match dtor {
+                Some(dtor) => {
+                    let wrapper = crate::rr::component::wrap(context, dtor)?;
+                    Some(context.0.func_refs_and_modules().0.rr_copy(wrapper)?)
+                }
+                None => None,
+            }
+        } else {
+            dtor
+        };
+        let store = &mut *context.0;
         let index = self
             .component
             .env_component()

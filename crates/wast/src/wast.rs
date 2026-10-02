@@ -36,6 +36,11 @@ pub struct WastContext {
     modules_by_filename: Arc<HashMap<String, Vec<u8>>>,
     configure_store: Arc<dyn Fn(&mut Store<()>) + Send + Sync>,
     ignore_error_messages: bool,
+
+    /// When set, component stores are recorded and their recordings are
+    /// replayed with this engine.
+    #[cfg(feature = "rr")]
+    replay_engine: Option<Engine>,
 }
 
 enum Outcome<T = Results> {
@@ -147,7 +152,39 @@ impl WastContext {
             modules_by_filename: Arc::default(),
             configure_store: Arc::new(configure),
             ignore_error_messages: false,
+            #[cfg(feature = "rr")]
+            replay_engine: None,
         }
+    }
+
+    /// Records the execution of each component instantiated by the test,
+    /// which requires an engine configured for recording, and checks that
+    /// the recording replays with `replay_engine`.
+    #[cfg(feature = "rr")]
+    pub fn record_replay(&mut self, replay_engine: Engine) -> &mut Self {
+        self.replay_engine = Some(replay_engine);
+        self
+    }
+
+    /// Finishes the recording of a component's store, if recording, and
+    /// replays it.
+    #[cfg(feature = "component-model")]
+    fn finish_component_store(&mut self, store: Store<()>) -> Result<()> {
+        #[cfg(feature = "rr")]
+        if let Some(engine) = &self.replay_engine {
+            let mut store = store;
+            let trace = store.finish_recording().context("recording failed")?;
+            let check = crate::rr::check_replay(engine, &trace);
+            return match &self.async_runtime {
+                Some(rt) => rt.block_on(check),
+                None => tokio::runtime::Builder::new_current_thread()
+                    .build()?
+                    .block_on(check),
+            }
+            .context("replaying the recording failed");
+        }
+        let _ = store;
+        Ok(())
     }
 
     fn engine(&self) -> &Engine {
@@ -224,6 +261,10 @@ impl WastContext {
     ) -> Result<Outcome<(component::Component, Store<()>, component::Instance)>> {
         let mut store = Store::new(self.engine(), ());
         (self.configure_store)(&mut store);
+        #[cfg(feature = "rr")]
+        if self.replay_engine.is_some() {
+            store.start_recording()?;
+        }
         let instance = match &self.async_runtime {
             Some(rt) => rt.block_on(
                 self.component_linker
@@ -361,6 +402,13 @@ impl WastContext {
     /// Instantiates the `module` provided and registers the instance under the
     /// `name` provided if successful.
     fn module(&mut self, name: Option<&str>, module: &ModuleKind) -> Result<()> {
+        #[cfg(feature = "component-model")]
+        if let Some(InstanceKind::Component(..)) = &self.current {
+            let Some(InstanceKind::Component(store, _)) = self.current.take() else {
+                unreachable!()
+            };
+            self.finish_component_store(store)?;
+        }
         match module {
             ModuleKind::Core(module) => {
                 let instance = match self.instantiate_module(&module)? {
@@ -653,6 +701,10 @@ impl WastContext {
                 self.run_directive(directive, filename, &scope, &mut threads)
                     .with_context(|| format!("failed directive on {filename}:{line}"))?;
             }
+            #[cfg(feature = "component-model")]
+            if let Some(InstanceKind::Component(store, _)) = self.current.take() {
+                self.finish_component_store(store)?;
+            }
             Ok(())
         })
     }
@@ -822,6 +874,8 @@ impl WastContext {
                     precompile_save: self.precompile_save.clone(),
                     configure_store: self.configure_store.clone(),
                     ignore_error_messages: self.ignore_error_messages,
+                    #[cfg(feature = "rr")]
+                    replay_engine: self.replay_engine.clone(),
                 };
                 let child = scope.spawn(move || child_cx.run_directives(commands, filename));
                 threads.insert(name.to_string(), child);

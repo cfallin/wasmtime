@@ -2,9 +2,9 @@
 //!
 //! Recording and replay begin with empty stores. Objects receive numeric
 //! identities automatically; all construction is part of the trace.
-//! Replay uses only the modules in the trace and reconstructs core instances.
-//! It executes guest code on independent fibers and never invokes the original
-//! host functions.
+//! Replay uses only the modules in the trace and reconstructs core instances,
+//! including those inside components. It executes guest code on independent
+//! fibers and never invokes the original host functions or component builtins.
 //!
 //! Core function boundaries support numbers, vectors, and nullable abstract
 //! function references. Modules that use GC or exceptions are unsupported.
@@ -31,6 +31,9 @@ mod replay;
 use codec::{Kind, Reader};
 
 /// Core instances constructed while replaying initialization.
+///
+/// Components replay as their constituent core instances. Their exports can
+/// be inspected here without rebuilding component host state.
 #[derive(Debug)]
 pub struct Replay {
     instances: Vec<crate::Instance>,
@@ -76,6 +79,8 @@ impl Trace {
     }
 }
 
+#[cfg(feature = "component-model")]
+pub(crate) mod component;
 mod init;
 mod objects;
 use objects::{Objects, RecordedFunc};
@@ -96,6 +101,7 @@ pub(crate) struct State {
     // Set once a replay ends: replayed host functions only run under the
     // replay driver, so the store's functions may no longer be called.
     replayed: bool,
+    passthrough: TryHashSet<(usize, usize)>,
 }
 
 struct Session {
@@ -167,7 +173,7 @@ impl<T: 'static> Store<T> {
     /// The engine must use [`crate::RRConfig::Recording`]. See [`crate::rr`]
     /// for the restrictions on the recorded execution. Store data `T` may be
     /// initialized, but no functions, memories, globals, tables, GC objects, or
-    /// core instances may have been created in this store.
+    /// core/component instances may have been created in this store.
     pub fn start_recording(&mut self) -> Result<()> {
         let store = self.as_context_mut().0;
         store.rr_validate()?;
@@ -203,7 +209,8 @@ impl<T: 'static> Store<T> {
     /// recording is discarded and recording is disabled on the store.
     ///
     /// A recording may end while guest calls are unfinished, for example
-    /// after a host panic; replay then ends with them suspended.
+    /// with component-model tasks suspended in host calls or after a host
+    /// panic; replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
@@ -267,6 +274,55 @@ impl StoreOpaque {
         id
     }
 
+    #[cfg(feature = "component-model")]
+    /// Tracks a host write to `written` (clamped to the memory's size) of a
+    /// component's memory.
+    pub(crate) fn rr_track_memory_definition(
+        &mut self,
+        definition: NonNull<crate::vm::VMMemoryDefinition>,
+        written: Range<usize>,
+    ) {
+        if !self.rr.active() {
+            return;
+        }
+        let objects = &self.rr_session().objects;
+        let memory = objects
+            .memories_by_key
+            .get(&(definition.as_ptr() as usize))
+            .map(|id| objects.memories[*id]);
+        match memory {
+            Some(memory) => {
+                let len = memory.internal_data_size(self);
+                self.rr_track_memory(memory, written.start.min(len)..written.end.min(len));
+            }
+            None => self
+                .rr_session()
+                .fail(format_err!("unregistered component memory")),
+        }
+    }
+
+    #[cfg(feature = "component-model")]
+    pub(crate) fn rr_track_raw_memory(&mut self, ptr: *mut u8, len: usize) {
+        if !self.rr.active() || len == 0 {
+            return;
+        }
+        let address = ptr as usize;
+        let memory = self
+            .all_memories()
+            .filter_map(|m| m.unshared())
+            .find_map(|m| {
+                let data = m.rr_data(self);
+                let offset = address.checked_sub(data.as_ptr() as usize)?;
+                (offset.checked_add(len)? <= data.len()).then_some((m, offset))
+            });
+        match memory {
+            Some((memory, offset)) => self.rr_track_memory(memory, offset..offset + len),
+            None => self
+                .rr_session()
+                .fail(format_err!("component write outside registered memories")),
+        }
+    }
+
     pub(crate) fn rr_memory_grown(&mut self, memory: Memory, old_size: usize) -> Result<()> {
         if !self.rr.recording() {
             return Ok(());
@@ -298,15 +354,22 @@ impl StoreOpaque {
     /// Commit host writes while the store is exclusively borrowed and before
     /// any guest execution. Pending ranges also cover forgotten guards.
     pub(crate) fn rr_flush(&mut self) -> Result<()> {
+        self.rr_flush_boundary(true)
+    }
+
+    fn rr_flush_boundary(&mut self, flags: bool) -> Result<()> {
         self.rr_check()?;
         if !self.rr.recording() {
             return Ok(());
         }
-        let result = self.rr_flush_writes();
+        let result = self.rr_flush_writes(flags);
         self.rr_poison_on_err(result)
     }
 
-    fn rr_flush_writes(&mut self) -> Result<()> {
+    fn rr_flush_writes(&mut self, flags: bool) -> Result<()> {
+        if flags {
+            self.rr_flush_flags()?;
+        }
         // Detach the pending ranges and the trace while reading memories; this
         // never runs guest or embedder code.
         let session = self.rr_session();
@@ -461,12 +524,18 @@ impl StoreOpaque {
         raw: *const ValRaw,
         host: bool,
     ) -> Result<Option<usize>> {
-        self.rr_flush()?;
+        self.rr_flush_boundary(!host)?;
         // Calling a host Func from host code is not a Wasm boundary. Its
         // effects (writes and any guest callbacks) are recorded normally.
         // SAFETY: the caller supplies a live, store-rooted function reference.
         let magic = unsafe { func.as_ref().vmctx.as_non_null().as_ref().magic };
-        if !host && magic == wasmtime_environ::VM_ARRAY_CALL_HOST_FUNC_MAGIC {
+        let is_host = magic == wasmtime_environ::VM_ARRAY_CALL_HOST_FUNC_MAGIC;
+        #[cfg(feature = "component-model")]
+        let is_host = is_host || magic == wasmtime_environ::component::VMCOMPONENT_MAGIC;
+        if !host && is_host {
+            return Ok(None);
+        }
+        if host && self.rr.passthrough.contains(&func_key(func)) {
             return Ok(None);
         }
         let id = self.rr_session().objects.find_func(func)?;
@@ -536,7 +605,7 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return Ok(());
         }
-        self.rr_flush()?;
+        self.rr_flush_boundary(host)?;
         let Mode::Recording { outstanding, .. } = &self.rr_session().mode else {
             unreachable!()
         };

@@ -22,6 +22,7 @@ pub(super) const INSTANCE: u8 = 9;
 pub(super) const GLOBAL: u8 = 10;
 pub(super) const MEMORY: u8 = 11;
 pub(super) const TABLE: u8 = 12;
+pub(super) const GLOBAL_WRITE: u8 = 13;
 
 const UNSUPPORTED: &str = "record/replay does not support GC or typed reference boundaries";
 

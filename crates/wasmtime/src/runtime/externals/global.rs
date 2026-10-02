@@ -356,6 +356,15 @@ impl Global {
     }
 
     #[cfg(feature = "rr")]
+    pub(crate) fn rr_is_component_flag(&self) -> bool {
+        #[cfg(feature = "component-model")]
+        if matches!(self.kind, VMGlobalKind::ComponentFlags(_)) {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "rr")]
     pub(crate) fn rr_read(&self, store: &mut StoreOpaque) -> Val {
         self._get(&mut AutoAssertNoGc::new(store))
     }

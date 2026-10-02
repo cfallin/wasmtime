@@ -506,7 +506,7 @@ impl Component {
         &self.inner.static_modules[idx]
     }
 
-    #[cfg(any(feature = "profiling", feature = "debug"))]
+    #[cfg(any(feature = "profiling", feature = "debug", feature = "rr"))]
     pub(crate) fn static_modules(&self) -> impl Iterator<Item = &Module> {
         self.inner.static_modules.values()
     }

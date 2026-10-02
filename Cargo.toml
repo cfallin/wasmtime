@@ -554,7 +554,12 @@ component-model-async = [
   "wasmtime-wasi-tls?/p3",
   "dep:futures",
 ]
-rr = ["wasmtime/rr", "component-model", "run"]
+rr = [
+  "wasmtime/rr",
+  "component-model",
+  "run",
+  "wasmtime-wast?/rr",
+]
 
 # Enabled in release builds. We cannot enable the built-in gdbstub component in
 # the default build because the published-to-crates.io crates cannot build the
