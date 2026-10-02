@@ -706,8 +706,9 @@ impl Module {
     /// available.
     ///
     /// Bytecode is only retained when the [`Engine`] was configured with
-    /// `guest-debug` support enabled (see [`Config::guest_debug`]). Returns
-    /// `None` when the module was compiled without that option.
+    /// guest debugging or record/replay enabled (see [`Config::guest_debug`]
+    /// and [`Config::rr`](crate::Config::rr)). Returns `None` when neither
+    /// option retained the bytecode.
     ///
     /// [`Config::guest_debug`]: crate::Config::guest_debug
     pub fn debug_bytecode(&self) -> Option<&[u8]> {
