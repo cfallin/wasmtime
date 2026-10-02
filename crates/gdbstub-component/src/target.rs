@@ -13,6 +13,9 @@ use gdbstub::target::ext::base::multithread::{
     MultiThreadBase, MultiThreadResume, MultiThreadResumeOps, MultiThreadSchedulerLocking,
     MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
+use gdbstub::target::ext::base::reverse_exec::{
+    ReverseCont, ReverseContOps, ReverseStep, ReverseStepOps,
+};
 use gdbstub::target::ext::base::single_register_access::{
     SingleRegisterAccess, SingleRegisterAccessOps,
 };
@@ -196,6 +199,16 @@ impl<'a> MultiThreadResume for Debugger<'a> {
         Ok(())
     }
 
+    #[inline(always)]
+    fn support_reverse_step(&mut self) -> Option<ReverseStepOps<'_, Tid, Self>> {
+        Some(self)
+    }
+
+    #[inline(always)]
+    fn support_reverse_cont(&mut self) -> Option<ReverseContOps<'_, Tid, Self>> {
+        Some(self)
+    }
+
     fn set_resume_action_continue(
         &mut self,
         _tid: Tid,
@@ -228,6 +241,25 @@ impl<'a> MultiThreadSingleStep for Debugger<'a> {
 impl<'a> MultiThreadSchedulerLocking for Debugger<'a> {
     fn set_resume_action_scheduler_lock(&mut self) -> Result<(), Self::Error> {
         // We have a single thread, so scheduler locking is a no-op.
+        Ok(())
+    }
+}
+
+/// Reverse execution, for debuggees that are replays of recorded
+/// executions. Others report that they have no history to run back
+/// through.
+impl<'a> ReverseStep<Tid> for Debugger<'a> {
+    fn reverse_step(&mut self, _tid: Tid) -> Result<(), Self::Error> {
+        self.frame_cache.clear();
+        self.start_reverse(true);
+        Ok(())
+    }
+}
+
+impl<'a> ReverseCont<Tid> for Debugger<'a> {
+    fn reverse_cont(&mut self) -> Result<(), Self::Error> {
+        self.frame_cache.clear();
+        self.start_reverse(false);
         Ok(())
     }
 }
