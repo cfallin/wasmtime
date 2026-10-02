@@ -27,6 +27,8 @@ use crate::hash_map::HashMap;
 use crate::hash_set::HashSet;
 use crate::prelude::*;
 use std::{any::Any, borrow::Cow, mem, ops::Range};
+#[cfg(feature = "component-model")]
+use wasmtime_environ::component::Translator;
 use wasmtime_environ::{
     Abi, CompiledFunctionBody, CompiledFunctionsTable, CompiledFunctionsTableBuilder,
     CompiledModuleInfo, Compiler, DefinedFuncIndex, FilePos, FinishedObject, FuncKey,
@@ -34,8 +36,6 @@ use wasmtime_environ::{
     ModuleTypes, ModuleTypesBuilder, ObjectKind, PrimaryMap, StaticModuleIndex, Tunables,
     graphs::{EntityGraph, Graph as _},
 };
-#[cfg(feature = "component-model")]
-use wasmtime_environ::{WasmChecksum, component::Translator};
 
 mod stratify;
 
@@ -234,7 +234,6 @@ pub(crate) fn build_component_artifacts<T: FinishedObject>(
         ty,
         types,
         static_modules: compilation_artifacts.modules,
-        checksum: WasmChecksum::from_binary(binary, tunables.recording),
     };
     object.serialize_info(&artifacts);
 

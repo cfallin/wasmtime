@@ -151,8 +151,7 @@ define_tunables! {
         /// enabled.
         pub concurrency_support: bool,
 
-        /// Whether recording in RR is enabled or not. This is used primarily
-        /// to signal checksum computation for compiled artifacts.
+        /// Whether recording in RR is enabled or not.
         pub recording: bool,
 
         /// An allocation counter that triggers GC when it reaches zero.
