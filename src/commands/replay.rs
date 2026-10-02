@@ -1,10 +1,11 @@
 //! The module that implements the `wasmtime replay` command.
 
+use crate::commands::RunCommand;
 use crate::common::{RecordedExit, RunCommon, replay_exit};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use wasmtime::rr::{ReplayStop, Trace};
+use wasmtime::rr::{ReplayStop, Replayer, Trace};
 use wasmtime::{Engine, RRConfig, Result, Store, error::Context as _};
 
 /// Replays an execution recorded with `wasmtime run --record` or
@@ -13,7 +14,8 @@ use wasmtime::{Engine, RRConfig, Result, Store, error::Context as _};
 /// Replay reproduces the recorded execution deterministically, without
 /// running any host code: everything the guest received from the outside
 /// world comes from the trace, and the guest's recorded output is printed
-/// again.
+/// again. A replay can be debugged with `-g` or `-Ddebugger=...` like
+/// `wasmtime run`.
 #[derive(Parser)]
 pub struct ReplayCommand {
     #[command(flatten)]
@@ -35,29 +37,46 @@ impl ReplayCommand {
         runtime.block_on(self.replay())
     }
 
-    async fn replay(mut self) -> Result<()> {
+    async fn replay(self) -> Result<()> {
         if self.run.record.is_some() {
             wasmtime::bail!("a replay cannot be recorded");
         }
         let trace_path = self.trace;
-        self.run.common.init_logging()?;
+        let mut cmd = RunCommand::for_replay(self.run, trace_path.clone());
+        cmd.run.common.init_logging()?;
+        #[cfg(feature = "debug")]
+        // This also enables epoch interruption, so the debugger can interrupt
+        // the replay.
+        let debug_run = cmd.debugger_run()?;
 
         let bytes = std::fs::read(&trace_path)
             .with_context(|| format!("failed to read trace `{}`", trace_path.display()))?;
         let trace = Trace::from_bytes(bytes)?;
-        let mut config = self.run.common.config(None)?;
+        let mut config = cmd.run.common.config(None)?;
         config.rr(RRConfig::Replaying);
         let engine = Engine::new(&config)?;
-        let mut store = Store::new(&engine, ());
-        let mut replayer = store.replayer(&trace)?;
+        let store = Store::new(&engine, ());
 
         // Print the recorded output again, and note how the program exited.
         let exit = Arc::new(Mutex::new(None));
-        wasmtime_wasi::rr::replay_output(&mut replayer, std::io::stdout(), std::io::stderr());
-        replayer.on_event({
+        let observe = {
             let exit = exit.clone();
-            move |e: RecordedExit| *exit.lock().unwrap() = Some(e)
-        });
+            move |replayer: &mut Replayer<'_, ()>| {
+                wasmtime_wasi::rr::replay_output(replayer, std::io::stdout(), std::io::stderr());
+                replayer.on_event(move |e: RecordedExit| *exit.lock().unwrap() = Some(e));
+            }
+        };
+
+        #[cfg(feature = "debug")]
+        if let Some(mut debug_run) = debug_run {
+            let debuggee = wasmtime_debugger::Debuggee::new_replay(store, trace, observe);
+            debug_run.run_debugger(debuggee).await?;
+            return replay_exit(exit.lock().unwrap().take());
+        }
+
+        let mut store = store;
+        let mut replayer = store.replayer(&trace)?;
+        observe(&mut replayer);
         while replayer.run().await? != ReplayStop::Finished {}
         drop(replayer);
         replay_exit(exit.lock().unwrap().take())
