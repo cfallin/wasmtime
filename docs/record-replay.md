@@ -217,10 +217,25 @@ its own timeline's object identities. Compiled modules are shared between
 timelines, so breakpoints on them persist. Embedder events are delivered to
 observers again as replay passes them. Frame handles become invalid.
 
-Memory images are 4 KiB pages shared with the previous checkpoint's image of
-the same memory, so a checkpoint retains only changed pages, and restoring
-writes only pages that differ from the current contents. Changed pages are
-still found by comparing memory; dirty-page tracking is future work.
+Memory contents are layered images (`rr/overlay.rs`), found without
+comparing or copying all of memory. Replaying engines compile every guest
+store with a check of the memory's watchpoint shadow (see
+`runtime/vm/memory/shadow.rs`). A memory's first checkpoint starts tracking it: its current contents
+become its baseline, and every shadow byte, including those of later growth,
+is marked clean (`WATCH_CLEAN`). The first write to a clean page reports the
+page, whose pre-write contents are kept as its baseline if it has none yet;
+its shadow bytes are then cleared, so later writes to it run at full speed.
+A checkpoint copies just the pages written since the previous one into a new
+immutable layer on top of the previous checkpoint's, and marks them clean
+again. A page's contents at a checkpoint are those in the nearest layer of
+its chain that has it, or else its baseline. Restoring writes only the pages
+written on either side since the two checkpoints' common ancestor layer, plus
+those written since the current one. Host writes during replay (trace memory
+updates, component intrinsics, and transcoders) report their ranges in the
+same way, as do data segments, which are initialized by compiled startup
+code. The page size is a software granularity, set with
+`Replayer::set_checkpoint_page_size` (4 KiB by default), and
+`Checkpoint::memory_bytes` reports the memory contents a checkpoint copied.
 
 To keep traces independent of the replaying engine's configuration, record/
 replay engines give every module an unconditional startup function and treat
@@ -247,7 +262,11 @@ at host calls, most recent first: for a callback beneath a host frame, its
 guest callers. `ReplayStop::Event` (enabled by `Replayer::stop_at_events`)
 stops after embedder events.
 
-Debug events other than breakpoints and steps (traps, host errors,
+Memory watchpoints (`Memory::debug_watch`) stop replay with
+`ReplayStop::Watchpoint` before the watched write happens: the watchpoint
+builtin's trampoline yields like the breakpoint trampoline.
+
+Debug events other than breakpoints, steps, and watchpoints (traps, host errors,
 exceptions) are not reported on replay, and the store's async
 `DebugHandler` is not invoked. Recording with guest debugging is rejected,
 since a debug handler would run unrecorded host code.
@@ -274,8 +293,8 @@ Restrictions:
 
 The remaining implementation work is:
 
-1. Dirty-page tracking for checkpoints, instead of comparing memory, e.g.
-   with `PAGEMAP_SCAN` or write protection.
+1. Dirty tracking for tables, globals, and GC heaps, which checkpoints still
+   copy whole.
 2. Trap, host-error, and exception debug events on replay. Traps are raised
    from the synchronous `raise` libcall, which would need to yield a stop
    (with driver-owned payload storage) before unwinding.

@@ -41,6 +41,11 @@ impl MemoryImageSlot {
         match *self {}
     }
 
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_shrink_heap_limit(&mut self, _size_bytes: usize) -> Result<()> {
+        match *self {}
+    }
+
     pub(crate) fn has_image(&self) -> bool {
         match *self {}
     }

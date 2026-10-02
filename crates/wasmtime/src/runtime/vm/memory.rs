@@ -803,20 +803,6 @@ impl LocalMemory {
         } else if new < old {
             match &mut self.memory_image {
                 Some(image) => {
-                    // Zero the rest of the last accessible host page; the
-                    // pages beyond it are discarded.
-                    let page_end = crate::vm::HostAlignedByteCount::new_rounded_up(new)?
-                        .byte_count()
-                        .min(old);
-                    // SAFETY: `new..page_end` is accessible memory owned by
-                    // this allocation, and nothing borrows it.
-                    unsafe {
-                        self.alloc
-                            .base()
-                            .as_mut_ptr()
-                            .add(new)
-                            .write_bytes(0, page_end - new);
-                    }
                     image.rr_shrink_heap_limit(new)?;
                     self.alloc.set_byte_size(new);
                 }

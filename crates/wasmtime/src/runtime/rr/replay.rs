@@ -160,6 +160,10 @@ struct Driver<'a, T: 'static> {
     // The activation stopped at a debug event, which resumes before any
     // further trace events are processed.
     paused: Option<u64>,
+    // The write that the paused activation, stopped at a watchpoint, performs
+    // when resumed. It has passed its shadow check, so checkpoints that would
+    // mark its pages clean must leave them dirty.
+    pending_write: Option<(Memory, Range<usize>)>,
     // Why the current `run` should return, once the current step completes.
     stop: Option<ReplayStop>,
     next_serial: u64,
@@ -213,6 +217,8 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 growth_failures: Vec::new(),
                 #[cfg(feature = "debug")]
                 watchpoint: None,
+                histories: Default::default(),
+                page_size: 4096,
             },
             pending: Vec::new(),
             failure: None,
@@ -231,6 +237,7 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
                 stop_at_events: false,
                 finished: false,
                 paused: None,
+                pending_write: None,
                 stop: None,
                 next_serial: 0,
                 checkpoints: Default::default(),
@@ -313,6 +320,28 @@ impl<'a, T: Send + 'static> Replayer<'a, T> {
         frames
     }
 
+    /// Sets the granularity, in bytes, at which checkpoints track writes to
+    /// guest memory: a checkpoint copies each such block written since the
+    /// previous one. The default is 4096. Must be set before the first
+    /// checkpoint.
+    pub fn set_checkpoint_page_size(&mut self, size: usize) -> Result<()> {
+        ensure!(size > 0, "checkpoint page size must be nonzero");
+        let Mode::Replaying {
+            histories,
+            page_size,
+            ..
+        } = &mut self.driver.store.rr.session.as_mut().unwrap().mode
+        else {
+            unreachable!()
+        };
+        ensure!(
+            histories.is_empty(),
+            "checkpoint page size set after a checkpoint"
+        );
+        *page_size = size;
+        Ok(())
+    }
+
     /// Also stop [`Replayer::run`] after each embedder event is replayed.
     pub fn stop_at_events(&mut self, enabled: bool) {
         self.driver.stop_at_events = enabled;
@@ -352,6 +381,7 @@ impl<T: 'static> Driver<'_, T> {
 
     fn step(&mut self) -> Result<()> {
         if let Some(serial) = self.paused.take() {
+            self.pending_write = None;
             let index = self.index_of(serial);
             return self.resume(index, None, true);
         }
@@ -573,6 +603,11 @@ impl<T: 'static> Driver<'_, T> {
                 let end = offset
                     .checked_add(bytes.len())
                     .ok_or_else(|| format_err!("memory range overflow"))?;
+                ensure!(
+                    end <= memory.internal_data_size(self.store),
+                    "trace memory write out of bounds"
+                );
+                self.store.rr_dirty(memory, offset..end)?;
                 memory
                     .rr_data_mut(self.store)
                     .get_mut(offset..end)
@@ -810,6 +845,9 @@ impl<T: 'static> Driver<'_, T> {
             };
             #[cfg(feature = "debug")]
             if let Some(hit) = watchpoint.take() {
+                let start = usize::try_from(hit.address).unwrap_or(usize::MAX);
+                let end = start.saturating_add(usize::try_from(hit.len).unwrap_or(usize::MAX));
+                self.pending_write = Some((hit.memory, start..end));
                 self.stop = Some(ReplayStop::Watchpoint(hit));
                 return Ok(());
             }

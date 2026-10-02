@@ -1706,6 +1706,9 @@ impl FuncEnvironment<'_> {
         dst: ir::Value,
         len: ir::Value,
     ) {
+        if !self.tunables.memory_watchpoints {
+            return;
+        }
         let heap = self.get_or_create_heap(builder.func, memory);
         if self.heaps[heap].shadow.is_none() {
             return;
@@ -6329,6 +6332,7 @@ impl FuncEnvironment<'_> {
         let start = builder.ins().iconst(I32, 0);
         let cost = self.tunables.operator_cost.variable().memory_init_per_byte;
         let fuel = self.pre_translate_bulk_op(builder, len, cost);
+        self.watch_range(builder, memory, offset, len);
         self.translate_entity_copy(builder, memory, data, offset, start, len)?;
         self.post_translate_bulk_op(builder, fuel)?;
 

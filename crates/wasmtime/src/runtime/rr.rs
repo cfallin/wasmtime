@@ -32,6 +32,7 @@ use core::ops::Range;
 use core::ptr::NonNull;
 
 mod codec;
+mod overlay;
 pub(crate) mod replay;
 use codec::{Kind, Reader};
 pub use replay::{Checkpoint, ReplayStop, Replayer};
@@ -167,6 +168,11 @@ enum Mode {
         // The watchpoint at which the running activation requested a stop.
         #[cfg(feature = "debug")]
         watchpoint: Option<crate::WatchpointHit>,
+        // The checkpointed contents of each memory that has been
+        // checkpointed, by `rr_key`.
+        histories: alloc::collections::BTreeMap<usize, overlay::History>,
+        // The granularity at which checkpoints track memory writes.
+        page_size: usize,
     },
 }
 
@@ -349,11 +355,44 @@ impl StoreOpaque {
         Ok(record)
     }
 
-    /// Records that guest code wrote `range` of `memory`, whose shadow has
-    /// clean bits there, for checkpoints.
+    /// Records that `range` of `memory` is about to be written during replay,
+    /// for checkpoints.
     pub(crate) fn rr_dirty(&mut self, memory: Memory, range: Range<usize>) -> Result<()> {
-        let _ = (memory, range);
-        Ok(())
+        if range.is_empty() {
+            return Ok(());
+        }
+        self.rr_with_history(memory, |history, memory| history.write(memory, range))
+            .map(|_| ())
+    }
+
+    /// Runs `f` on the checkpoint history of `memory`, if it has one. The
+    /// history is detached from the session meanwhile.
+    fn rr_with_history<R>(
+        &mut self,
+        memory: Memory,
+        f: impl FnOnce(&mut overlay::History, &mut overlay::StoreMemory<'_>) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let key = memory.rr_key(self);
+        let Some(Mode::Replaying { histories, .. }) =
+            self.rr.session.as_deref_mut().map(|s| &mut s.mode)
+        else {
+            return Ok(None);
+        };
+        let Some(mut history) = histories.remove(&key) else {
+            return Ok(None);
+        };
+        let result = f(
+            &mut history,
+            &mut overlay::StoreMemory {
+                store: self,
+                memory,
+            },
+        );
+        let Mode::Replaying { histories, .. } = &mut self.rr_session().mode else {
+            unreachable!()
+        };
+        histories.insert(key, history);
+        result.map(Some)
     }
 
     /// Requests that the running replay activation, if any, stop at a
@@ -452,7 +491,7 @@ impl StoreOpaque {
         definition: NonNull<crate::vm::VMMemoryDefinition>,
         written: Range<usize>,
     ) {
-        if !self.rr.recording() {
+        if !self.rr.active() {
             return;
         }
         let objects = &self.rr_session().objects;
@@ -473,7 +512,7 @@ impl StoreOpaque {
 
     #[cfg(feature = "component-model")]
     pub(crate) fn rr_track_raw_memory(&mut self, ptr: *mut u8, len: usize) {
-        if !self.rr.recording() || len == 0 {
+        if !self.rr.active() || len == 0 {
             return;
         }
         let address = ptr as usize;
@@ -585,7 +624,14 @@ impl StoreOpaque {
     }
 
     pub(crate) fn rr_track_memory(&mut self, memory: Memory, range: Range<usize>) {
-        if !self.rr.recording() || range.is_empty() {
+        if !self.rr.active() || range.is_empty() {
+            return;
+        }
+        if !self.rr.recording() {
+            // Replay reproduces the write, but checkpoints must see it.
+            if let Err(e) = self.rr_dirty(memory, range) {
+                self.rr_session().fail(e);
+            }
             return;
         }
         let Some(id) = self.rr_memory_id(memory) else {

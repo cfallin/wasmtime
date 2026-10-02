@@ -2190,3 +2190,171 @@ async fn debugging_nested_activations_through_host_frames() -> Result<()> {
     }
     Ok(())
 }
+
+const PAGES: &str = r#"
+(module
+  (import "" "report" (func $report (param i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "abc")
+  (func (export "step") (param $k i32)
+    (i32.store (i32.mul (local.get $k) (i32.const 8192))
+               (i32.add (local.get $k) (i32.const 1)))
+    (memory.fill (i32.add (i32.const 100000) (i32.mul (local.get $k) (i32.const 16)))
+                 (local.get $k) (i32.const 16))
+    (call $report (local.get $k))))
+"#;
+
+const PAGES_SEGMENT: &str = r#"
+(module
+  (import "" "memory" (memory 4))
+  (data (i32.const 150000) "xyz"))
+"#;
+
+/// Guest stores and bulk writes, host writes, and another instance's data
+/// segment, each writing a few bytes of memory at a time.
+fn record_pages() -> Result<rr::Trace> {
+    let recording = engine(RRConfig::Recording)?;
+    let mut store = Store::new(&recording, ());
+    store.start_recording()?;
+    let report = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, ()>, k: i32| -> Result<()> {
+            rr::record_event(&mut caller, &Step(k))?;
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            memory.write(&mut caller, 200_000 + k as usize, &[k as u8 + 1; 3])?;
+            Ok(())
+        },
+    );
+    let module = Module::new(&recording, PAGES)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, ()>(&mut store, "step")?;
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    for k in 0..6 {
+        if k == 3 {
+            let module = Module::new(&recording, PAGES_SEGMENT)?;
+            Instance::new(&mut store, &module, &[memory.into()])?;
+        }
+        step.call(&mut store, k)?;
+    }
+    store.finish_recording()
+}
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_pages() -> Result<()> {
+    let trace = record_pages()?;
+    let contents = |replayer: &mut rr::Replayer<'_, ()>| {
+        let instance = replayer.instances()[0];
+        let mut store = replayer.store();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        memory.data(&store).to_vec()
+    };
+    for page_size in [4096, 64, 1] {
+        let mut store = Store::new(&engine(RRConfig::Replaying)?, ());
+        let mut replayer = store.replayer(&trace)?;
+        replayer.set_checkpoint_page_size(page_size)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = Vec::new();
+        let mut images = Vec::new();
+        while let rr::ReplayStop::Event(_) = replayer.run().await? {
+            let checkpoint = replayer.checkpoint()?;
+            let stored = checkpoint.memory_bytes();
+            if checkpoints.is_empty() {
+                // The memory's contents so far are its tracking baseline.
+                assert_eq!(stored, 0);
+            } else {
+                // A few pages written since the previous checkpoint.
+                assert!(stored > 0 && stored <= 8 * page_size.max(16), "{stored}");
+            }
+            checkpoints.push(checkpoint);
+            images.push(contents(&mut replayer));
+        }
+        assert_eq!(checkpoints.len(), 6);
+        assert!(set_checkpoint_page_size_fails(&mut replayer));
+        let end = contents(&mut replayer);
+        assert_eq!(&end[150_000..150_003], b"xyz");
+        assert_eq!(&end[200_005..200_008], &[6; 3]);
+
+        for &which in &[3, 0, 5, 1, 4, 2, 2, 0] {
+            replayer.restore(&checkpoints[which])?;
+            assert!(
+                contents(&mut replayer) == images[which],
+                "checkpoint {which}"
+            );
+        }
+        // Replaying forward from a restored checkpoint reproduces the rest.
+        replayer.restore(&checkpoints[1])?;
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, rr::ReplayStop::Finished);
+        assert!(contents(&mut replayer) == end);
+        replayer.restore(&checkpoints[4])?;
+        assert!(contents(&mut replayer) == images[4]);
+    }
+    Ok(())
+}
+
+fn set_checkpoint_page_size_fails<T: Send>(replayer: &mut rr::Replayer<'_, T>) -> bool {
+    replayer.set_checkpoint_page_size(128).is_err()
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn watchpoints_stop_replay_before_writes() -> Result<()> {
+    let trace = record_pages()?;
+    let mut store = Store::new(&debug_engine()?, ());
+    let mut replayer = store.replayer(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, rr::ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    let instance = replayer.instances()[0];
+    let memory = instance.get_memory(replayer.store(), "memory").unwrap();
+    // Step 1's store, and the second instance's data segment.
+    memory.debug_watch(replayer.store(), 8192..8194, true)?;
+    memory.debug_watch(replayer.store(), 150_002..150_010, true)?;
+    let first = replayer.checkpoint()?;
+
+    let mut hits = Vec::new();
+    let mut at_hits = Vec::new();
+    loop {
+        match replayer.run().await? {
+            rr::ReplayStop::Watchpoint(hit) => {
+                assert_eq!(
+                    hit.memory.debug_index_in_store(),
+                    memory.debug_index_in_store()
+                );
+                // The write has not happened yet.
+                let at = usize::try_from(hit.address)?;
+                let data = memory.data(replayer.store());
+                assert!(data[at..at + 4].iter().all(|b| *b == 0));
+                at_hits.push(replayer.checkpoint()?);
+                hits.push((hit.address, hit.len, hit.value));
+            }
+            rr::ReplayStop::Finished => break,
+            stop => panic!("unexpected stop {stop:?}"),
+        }
+    }
+    assert_eq!(hits, [(8192, 4, Some(2)), (150_000, 3, None)]);
+    let data = memory.data(replayer.store());
+    assert_eq!(&data[8192..8196], &2_u32.to_le_bytes());
+    assert_eq!(&data[150_000..150_003], b"xyz");
+
+    // A checkpoint taken at a watchpoint resumes into the write.
+    replayer.restore(&at_hits[0])?;
+    assert_eq!(&memory.data(replayer.store())[8192..8196], &[0; 4]);
+    match replayer.run().await? {
+        rr::ReplayStop::Watchpoint(hit) => assert_eq!(hit.address, 150_000),
+        stop => panic!("unexpected stop {stop:?}"),
+    }
+    assert_eq!(
+        &memory.data(replayer.store())[8192..8196],
+        &2_u32.to_le_bytes()
+    );
+
+    // Watchpoints persist across restores, like breakpoints.
+    replayer.restore(&first)?;
+    let mut again = Vec::new();
+    while let rr::ReplayStop::Watchpoint(hit) = replayer.run().await? {
+        again.push((hit.address, hit.len, hit.value));
+    }
+    assert_eq!(again, hits);
+    Ok(())
+}
