@@ -102,8 +102,11 @@ stack, Wasm locals, globals, memories, tables, and GC objects.
 
    Type `help` for the full list of commands. Values are named with
    simple "access paths" (`p->x`, `arr[2].y`, `*p`, `&x`, `t.0`) rooted at
-   variables, value-history entries (`$1`, `$`, `$$2`) or Wasm-level
-   entities (`$local3`, `$stack0`, `$global1`, `$table0[4]`).
+   variables, value-history entries (`$1`, `$`, `$$2`), Wasm-level
+   entities named in the module's name section (`$x` for a local
+   declared as `(local $x i32)`, or a named global or table), or
+   built-in indexed entities (`%local3`, `%stack0`, `%global1`,
+   `%table0[4]`, `%pc`).
 
 The debugger is itself a WebAssembly component running in Wasmtime's
 debugger world, and by default has no filesystem access. To let it

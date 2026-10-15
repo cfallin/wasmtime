@@ -14,7 +14,7 @@ pub enum WVal {
     Extern {
         null: bool,
     },
-    /// A table, which can be indexed (`$table0[3]`).
+    /// A table, which can be indexed (`%table0[3]`, `$mytable[3]`).
     Table(api::Table),
 }
 
