@@ -936,6 +936,141 @@ check: [Program exited]
     Ok(())
 }
 
+#[test]
+#[ignore]
+fn debug_tui_rust_std_containers() -> Result<()> {
+    let mut tui = Tui::spawn(DEBUG_TUI_RUST_STD, &[])?;
+    tui.script(
+        r#"
+        b consume
+        c
+        up
+        info locals
+        p arc.id
+        p *arc
+        p refcell[1]
+        p deque[3]
+        p linked_list[2]
+        p mutex.label
+        p nested[0]
+        p/r cell
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: (wasmtime-debug) info locals
+check: vec = vec![10, 20, 30]
+check: deque = VecDeque[0, 3, 4, 5]
+check: hash_map = HashMap(len=2) {
+unordered: "a": 1
+unordered: "b": 2
+check: btree_map = BTreeMap(len=20) { 0: "even", 1: "odd", 2: "even",
+sameln: 18: "even", 19: "odd" }
+check: hash_set = HashSet(len=3) {
+check: btree_set = BTreeSet(len=3) { 'x', 'y', 'z' }
+check: tokens = vec![Token::Num(-5), Token::Ident("foo"), Token::Pair { a: 1, b: 2 }, Token::Eof]
+check: string = "hello"
+check: cow_borrowed = Cow::Borrowed("borrowed")
+check: cow_owned = Cow::Owned("owned")
+check: cow_slice = Cow::Borrowed(&[1, 2, 3])
+check: boxed = Box(Inner { id: 1, label: "boxed" })
+check: boxed_slice = Box([4, 5, 6])
+check: boxed_str = Box("boxed str")
+check: mutex = Mutex(Inner { id: 2, label: "mutex" })
+check: rwlock = RwLock(vec![1, 2])
+check: arc = Arc(Inner { id: 3, label: "arc" }) [strong=2, weak=0]
+check: arc2 = Arc(Inner { id: 3, label: "arc" }) [strong=2, weak=0]
+check: rc = Rc("rc") [strong=1, weak=1]
+check: weak = Weak("rc") [strong=1, weak=1]
+check: refcell = RefCell(vec![1, -1])
+check: cell = Cell(42)
+check: unsafe_cell = UnsafeCell(7)
+check: once_cell = OnceCell(99)
+check: option_box = Some(Box(Inner { id: 4, label: "opt" }))
+check: result = Ok(vec![1])
+check: manually_drop = ManuallyDrop(Inner { id: 5, label: "md" })
+check: wrapping = Wrapping(250)
+check: non_zero = 17
+check: range = Range { start: 3, end: 9 }
+check: linked_list = LinkedList[100, 200, 300]
+check: binary_heap = BinaryHeap[8, 1, 5]
+check: arc_mutex = Arc(Mutex(HashMap(len=1) { 1: 'a' })) [strong=1, weak=0]
+check: nested = vec![Some(Rc(RefCell(Token::Num(3))) [strong=1, weak=0]), None]
+check: array = [1, 2, 3]
+check: tuple = (1, "two", 3.0)
+check: %1 = 3
+check: %2 = Inner { id: 3, label: "arc" }
+check: %3 = -1
+check: %4 = 5
+check: %5 = 300
+check: %6 = "mutex"
+check: %7 = Some(Rc(RefCell(Token::Num(3))) [strong=1, weak=0])
+check: %8 = Cell { value: UnsafeCell { value: 42 } }
+"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_cpp_std() -> Result<()> {
+    let mut tui = Tui::spawn(DEBUG_TUI_CPP, &[])?;
+    tui.script(
+        r#"
+        b consume
+        c
+        up
+        info locals
+        p vec[1]
+        p points[1].y
+        p long_str[2]
+        p *uptr
+        p uptr->y
+        p sptr->x
+        p sptr2.y
+        p cstr
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: (wasmtime-debug) info locals
+check: vec = std::vector of length 3, capacity 3 = {1, 2, 3}
+check: points = std::vector of length 2, capacity 2 = {{ .x = 1, .y = 2 }, { .x = 3, .y = 4 }}
+check: short_str = "hi"
+check: long_str = "a string too long for the small-string buffer"
+check: map = std::map with 3 elements = {[1] = "one", [2] = "two", [3] = "three"}
+check: set = std::set with 4 elements = {1, 3, 5, 9}
+check: umap = std::unordered_map with 2 elements = {
+unordered: ["x"] = 10
+unordered: ["y"] = 20
+check: uset = std::unordered_set with 2 elements = {
+check: uptr = std::unique_ptr(
+sameln: ) = { .x = 5, .y = 6 }
+check: null_uptr = std::unique_ptr(nullptr)
+check: sptr = std::shared_ptr(use_count=2, weak_count=0) = { .x = 7, .y = 8 }
+check: sptr2 = std::shared_ptr(use_count=2, weak_count=0) = { .x = 7, .y = 8 }
+check: cstr =
+sameln: "a C string"
+check: %1 = 2
+check: %2 = 4
+check: %3 = 115 's'
+check: %4 = Point { .x = 5, .y = 6 }
+check: %5 = 6
+check: %6 = 7
+check: %7 = 8
+check: %8 =
+sameln: "a C string"
+"#,
+    )?;
+    Ok(())
+}
+
 macro_rules! assert_test_exists {
     ($name:ident) => {
         #[expect(unused_imports, reason = "here to assert the test exists")]
@@ -955,3 +1090,13 @@ fn debug_tui_c() {}
     reason = "test-program names checked by `assert_test_exists`"
 )]
 fn debug_tui_rust() {}
+#[expect(
+    dead_code,
+    reason = "test-program names checked by `assert_test_exists`"
+)]
+fn debug_tui_rust_std() {}
+#[expect(
+    dead_code,
+    reason = "test-program names checked by `assert_test_exists`"
+)]
+fn debug_tui_cpp() {}

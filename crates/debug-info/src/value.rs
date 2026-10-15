@@ -31,6 +31,9 @@ pub struct Value {
 pub struct Ctx<'a> {
     pub info: &'a DebugInfo,
     pub target: &'a dyn Target,
+    /// Nesting depth of "look-through" fallbacks (member/index access
+    /// via a pretty-printer's `deref`), to bound recursion.
+    look_through: std::cell::Cell<u32>,
 }
 
 impl Value {
@@ -81,7 +84,11 @@ impl Value {
 
 impl<'a> Ctx<'a> {
     pub fn new(info: &'a DebugInfo, target: &'a dyn Target) -> Self {
-        Ctx { info, target }
+        Ctx {
+            info,
+            target,
+            look_through: std::cell::Cell::new(0),
+        }
     }
 
     /// Pointer size for values of the given type's language/unit.
@@ -363,6 +370,11 @@ impl<'a> Ctx<'a> {
                         return Ok(r);
                     }
                 }
+                // Look through "transparent" pretty-printed wrappers
+                // (e.g. `Arc<T>`, `RefCell<T>`, `std::unique_ptr<T>`).
+                if let Some(r) = self.look_through(v, |inner| self.member(inner, name)) {
+                    return r;
+                }
                 bail!(
                     "type `{}` has no member `{name}`",
                     self.info.type_name(v.ty)
@@ -387,8 +399,9 @@ impl<'a> Ctx<'a> {
             if m.name.as_deref() == Some(name) {
                 return Ok(Some(mv()));
             }
-            if m.name.is_none() {
-                // Anonymous struct/union member: search inside.
+            // Anonymous struct/union members, and C++ base classes
+            // (named `<Base>`), are searched recursively.
+            if m.name.as_deref().is_none_or(|n| n.starts_with('<')) {
                 let inner = mv();
                 let it = self.info.ty(self.info.strip(m.ty));
                 if let TypeKind::Struct(ist) = &it.kind {
@@ -401,10 +414,32 @@ impl<'a> Ctx<'a> {
         Ok(None)
     }
 
+    /// If `v` has a pretty-printer that dereferences it (smart pointers,
+    /// cells), apply `f` to the dereferenced value. Bounded in depth.
+    fn look_through(
+        &self,
+        v: &Value,
+        f: impl FnOnce(&Value) -> Result<Value>,
+    ) -> Option<Result<Value>> {
+        let depth = self.look_through.get();
+        if depth >= 8 {
+            return None;
+        }
+        let p = pretty::find(self, v.ty)?;
+        let inner = p.deref(self, v)?.ok()?;
+        self.look_through.set(depth + 1);
+        let r = f(&inner);
+        self.look_through.set(depth);
+        Some(r)
+    }
+
     /// Index into an array, pointer, or indexable pretty-printed type.
     pub fn index(&self, v: &Value, i: u64) -> Result<Value> {
         if let Some(p) = pretty::find(self, v.ty) {
             if let Some(r) = p.index(self, v, i) {
+                return r;
+            }
+            if let Some(r) = self.look_through(v, |inner| self.index(inner, i)) {
                 return r;
             }
         }
