@@ -9,8 +9,8 @@ use crate::host::{
 #[cfg(feature = "threads")]
 use std::sync::atomic::{AtomicU8, Ordering};
 use wasmtime::{
-    AnyRef, Engine, ExnRef, RootScope, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance, Module,
-    OwnedRooted, Result, Table, Tag, TagType, Val, ValType,
+    AnyRef, Engine, ExnRef, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance,
+    Module, OwnedRooted, Result, RootScope, Table, Tag, TagType, Val, ValType,
 };
 
 #[cfg(feature = "threads")]

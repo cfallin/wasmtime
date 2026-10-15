@@ -1119,7 +1119,7 @@ jobs:
         tar -xzf wasi-sdk-32.0-x86_64-linux.tar.gz
         mv wasi-sdk-32.0-x86_64-linux wasi-sdk
     - run: |
-        cargo test --features gdbstub --test all -- --ignored --test-threads 1 guest_debug::
+        cargo test --features gdbstub,debug-tui --test all -- --ignored --test-threads 1 guest_debug:: debug_tui::
       env:
         LLDB: /tmp/wasi-sdk/bin/lldb
         WASI_SDK_PATH: /tmp/wasi-sdk

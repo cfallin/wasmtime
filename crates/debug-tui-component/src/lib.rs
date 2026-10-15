@@ -45,10 +45,7 @@ impl api::exports::bytecodealliance::wasmtime::debugger::Guest for Component {
 
 async fn run(d: &api::Debuggee, options: &Options) -> Result<()> {
     let listener = TcpListener::bind(&options.tcp_address).await?;
-    api::print_debugger_info(&format!(
-        "Debugger listening on {}",
-        options.tcp_address
-    ));
+    api::print_debugger_info(&format!("Debugger listening on {}", options.tcp_address));
     api::print_debugger_info(&format!(
         "Connect with: nc {}",
         options.tcp_address.replace(':', " ")
@@ -75,7 +72,9 @@ async fn run(d: &api::Debuggee, options: &Options) -> Result<()> {
         match session.execute(&line).await {
             Flow::Continue => {}
             Flow::Quit => {
-                session.conn.println("Detaching; the program will run to completion.");
+                session
+                    .conn
+                    .println("Detaching; the program will run to completion.");
                 let _ = session.conn.flush().await;
                 break;
             }

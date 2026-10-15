@@ -1,8 +1,6 @@
 //! Command parsing and execution.
 
-use crate::session::{
-    FrameTarget, HistEntry, Outcome, RunState, Session, StopReason, to_wasm_val,
-};
+use crate::session::{FrameTarget, HistEntry, Outcome, RunState, Session, StopReason, to_wasm_val};
 use crate::wasmval::{self, WVal};
 use anyhow::{Result, anyhow, bail};
 use std::fmt::Write;
@@ -61,8 +59,8 @@ Wasm machine level:
                            Show a table's size and elements.
   wasm-instances           List all instances in the store.
   wasm-modules             List all modules in the store.
-  wasm-functions [-i INST] [TEXT]
-                           List functions of an instance's module.
+  wasm-functions [-i INST | -m MODULE] [TEXT]
+                           List functions of a module.
 Other:
   help                     Show this help.
   quit (q), detach         Detach (the program runs to completion).
@@ -132,7 +130,9 @@ fn parse_flags(args: &str, index_flag: &str) -> Result<Flags> {
     let mut it = args.split_whitespace();
     while let Some(a) = it.next() {
         if a == "-i" {
-            let v = it.next().ok_or_else(|| anyhow!("-i requires an instance number"))?;
+            let v = it
+                .next()
+                .ok_or_else(|| anyhow!("-i requires an instance number"))?;
             f.inst = Some(usize::try_from(parse_u64(v)?)?);
         } else if a == index_flag {
             let v = it
@@ -229,9 +229,7 @@ impl Session<'_> {
             "wasm-instances" => self.cmd_wasm_instances(),
             "wasm-modules" => self.cmd_wasm_modules(),
             "wasm-functions" => self.cmd_wasm_functions(args),
-            _ => Err(anyhow!(
-                "Undefined command: \"{cmd}\". Try \"help\"."
-            )),
+            _ => Err(anyhow!("Undefined command: \"{cmd}\". Try \"help\".")),
         };
         if let Err(e) = r {
             self.conn.println(&format!("{e}"));
@@ -325,9 +323,9 @@ impl Session<'_> {
             .cloned();
         match text {
             Some(t) => self.conn.println(&format!("{line}\t{t}")),
-            None => self.conn.println(&format!(
-                "{line}\tin {path} (source unavailable)"
-            )),
+            None => self
+                .conn
+                .println(&format!("{line}\tin {path} (source unavailable)")),
         }
     }
 
@@ -340,7 +338,12 @@ impl Session<'_> {
         let mut s = format!("{} ({args})", v.name);
         match &v.loc {
             Some(loc) => {
-                let _ = write!(s, " at {}:{}", self.file_display(p.module, loc.file), loc.line);
+                let _ = write!(
+                    s,
+                    " at {}:{}",
+                    self.file_display(p.module, loc.file),
+                    loc.line
+                );
             }
             None => {
                 let _ = write!(s, " in {} at pc {:#x}", self.modules[p.module].label, p.pc);
@@ -398,7 +401,7 @@ impl Session<'_> {
                     .get(i)
                     .and_then(|(n, _)| n.clone())
                     .unwrap_or_else(|| format!("${i}"));
-                let val = truncate(wasmval::format(self.d, &WVal::from_api(self.d, l), false, 0), 40);
+                let val = truncate(wasmval::format(self.d, &WVal::from_api(l), false, 0), 40);
                 format!("{name}={val}")
             })
             .collect::<Vec<_>>()
@@ -435,7 +438,12 @@ impl Session<'_> {
             .info
             .func_at_pc(pc)
             .and_then(|f| self.modules[module].info.disassemble_func(f.index).ok())
-            .and_then(|lines| lines.iter().find(|l| l.offset == pc).map(|l| demangle_wat(&l.text)));
+            .and_then(|lines| {
+                lines
+                    .iter()
+                    .find(|l| l.offset == pc)
+                    .map(|l| demangle_wat(&l.text))
+            });
         match text {
             Some(t) => self.conn.println(&format!("=> {pc:#x}: {t}")),
             None => self.conn.println(&format!("=> {pc:#x}")),
@@ -465,7 +473,8 @@ impl Session<'_> {
         if let Resume::Finish = how {
             self.require_stopped()?;
             let desc = self.frame_desc(self.selected);
-            self.conn.println(&format!("Run till exit from #{}  {desc}", self.selected));
+            self.conn
+                .println(&format!("Run till exit from #{}  {desc}", self.selected));
         }
         // Remember the callee (for return values) when finishing.
         let finishing = match how {
@@ -500,7 +509,12 @@ impl Session<'_> {
             }
             Resume::Finish => self.finish().await,
         }?;
-        self.report(outcome, before, finishing, matches!(how, Resume::StepI | Resume::NextI));
+        self.report(
+            outcome,
+            before,
+            finishing,
+            matches!(how, Resume::StepI | Resume::NextI),
+        );
         Ok(())
     }
 
@@ -538,18 +552,21 @@ impl Session<'_> {
                 let desc = self.frame_desc(0);
                 if temp {
                     self.delete_breakpoint(id);
-                    self.conn.println(&format!("\nTemporary breakpoint {id}, {desc}"));
+                    self.conn
+                        .println(&format!("\nTemporary breakpoint {id}, {desc}"));
                 } else {
                     self.conn.println(&format!("\nBreakpoint {id}, {desc}"));
                 }
                 self.print_current_line(0);
             }
             StopReason::Breakpoint(None) => {
-                self.conn.println(&format!("\nStopped at {}", self.frame_desc(0)));
+                self.conn
+                    .println(&format!("\nStopped at {}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Interrupted => {
-                self.conn.println(&format!("\nProgram interrupted.\n{}", self.frame_desc(0)));
+                self.conn
+                    .println(&format!("\nProgram interrupted.\n{}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Trap => {
@@ -560,7 +577,8 @@ impl Session<'_> {
                 self.print_current_line(0);
             }
             StopReason::Exception => {
-                self.conn.println(&format!("\nWasm exception thrown.\n{}", self.frame_desc(0)));
+                self.conn
+                    .println(&format!("\nWasm exception thrown.\n{}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Step => {
@@ -640,14 +658,16 @@ impl Session<'_> {
                     value: v,
                 });
                 let n = self.history.len();
-                self.conn.println(&format!("Value returned is ${n} = {text}"));
+                self.conn
+                    .println(&format!("Value returned is ${n} = {text}"));
             }
             None => {
                 let vals: Vec<String> = results
                     .iter()
-                    .map(|r| wasmval::format(self.d, &WVal::from_api(self.d, r), false, 1))
+                    .map(|r| wasmval::format(self.d, &WVal::from_api(r), false, 1))
                     .collect();
-                self.conn.println(&format!("Wasm results: {}", vals.join(", ")));
+                self.conn
+                    .println(&format!("Wasm results: {}", vals.join(", ")));
             }
         }
     }
@@ -782,13 +802,21 @@ impl Session<'_> {
             args.to_string()
         };
         let locs = self.resolve_location(&spec)?;
-        let descs: Vec<String> = locs.iter().map(|(m, pc)| self.describe_pc(*m, *pc)).collect();
+        let descs: Vec<String> = locs
+            .iter()
+            .map(|(m, pc)| self.describe_pc(*m, *pc))
+            .collect();
         let id = self.add_breakpoint(spec, locs, temporary)?;
-        let kind = if temporary { "Temporary breakpoint" } else { "Breakpoint" };
+        let kind = if temporary {
+            "Temporary breakpoint"
+        } else {
+            "Breakpoint"
+        };
         if descs.len() == 1 {
             self.conn.println(&format!("{kind} {id} at {}", descs[0]));
         } else {
-            self.conn.println(&format!("{kind} {id} at {} locations:", descs.len()));
+            self.conn
+                .println(&format!("{kind} {id} at {} locations:", descs.len()));
             for d in descs {
                 self.conn.println(&format!("  {d}"));
             }
@@ -807,7 +835,9 @@ impl Session<'_> {
             return Ok(());
         }
         for a in args.split_whitespace() {
-            let id: u32 = a.parse().map_err(|_| anyhow!("Bad breakpoint number '{a}'"))?;
+            let id: u32 = a
+                .parse()
+                .map_err(|_| anyhow!("Bad breakpoint number '{a}'"))?;
             if !self.delete_breakpoint(id) {
                 self.conn.println(&format!("No breakpoint number {id}."));
             }
@@ -822,10 +852,18 @@ impl Session<'_> {
         }
         let mut out = String::from("Num  Type          Hits  Where\n");
         for b in &self.breakpoints {
-            let kind = if b.temporary { "tbreakpoint" } else { "breakpoint" };
+            let kind = if b.temporary {
+                "tbreakpoint"
+            } else {
+                "breakpoint"
+            };
             let _ = writeln!(out, "{:<4} {:<13} {:<5} {}", b.id, kind, b.hits, b.spec);
             for (m, pc) in &b.locs {
-                let _ = writeln!(out, "                         {}", self.describe_pc(*m, *pc));
+                let _ = writeln!(
+                    out,
+                    "                         {}",
+                    self.describe_pc(*m, *pc)
+                );
             }
         }
         self.conn.print(&out);
@@ -901,7 +939,9 @@ impl Session<'_> {
                 // `list_pos` holds the next line to show.
                 Some((m, f, l)) => (m, f, l + 5),
                 None => {
-                    let m = self.default_module().ok_or_else(|| anyhow!("No debug info."))?;
+                    let m = self
+                        .default_module()
+                        .ok_or_else(|| anyhow!("No debug info."))?;
                     let dbg = self.modules[m].info.debug.as_ref().unwrap();
                     let f = dbg
                         .find_functions("main")
@@ -1012,7 +1052,9 @@ impl Session<'_> {
 
     fn inst_index_of(&self, inst: &crate::api::Instance) -> Option<usize> {
         let id = inst.unique_id();
-        self.instances.iter().position(|i| i.handle.unique_id() == id)
+        self.instances
+            .iter()
+            .position(|i| i.handle.unique_id() == id)
     }
 
     fn history_index(&self, h: &HistoryRef) -> Result<usize> {
@@ -1039,16 +1081,16 @@ impl Session<'_> {
             let v = locals
                 .get(usize::try_from(i)?)
                 .ok_or_else(|| anyhow!("No local {i} (frame has {}).", locals.len()))?;
-            return Ok(WVal::from_api(self.d, v));
+            return Ok(WVal::from_api(v));
         }
         if let Some(i) = num("stack") {
             self.require_stopped()?;
             let f = &self.phys[self.vframes[self.selected].phys].frame;
             let stack = f.get_stack(self.d).map_err(|e| anyhow!("{e:?}"))?;
-            let v = stack.get(usize::try_from(i)?).ok_or_else(|| {
-                anyhow!("No operand-stack slot {i} (depth {}).", stack.len())
-            })?;
-            return Ok(WVal::from_api(self.d, v));
+            let v = stack
+                .get(usize::try_from(i)?)
+                .ok_or_else(|| anyhow!("No operand-stack slot {i} (depth {}).", stack.len()))?;
+            return Ok(WVal::from_api(v));
         }
         if let Some(i) = num("global") {
             let inst = &self.instances[self.default_inst()?].handle;
@@ -1056,7 +1098,7 @@ impl Session<'_> {
                 .get_global(self.d, i)
                 .map_err(|_| anyhow!("No global {i}."))?;
             let v = g.get(self.d).map_err(|e| anyhow!("{e:?}"))?;
-            return Ok(WVal::from_api(self.d, &v));
+            return Ok(WVal::from_api(&v));
         }
         if let Some(i) = num("table") {
             let inst = &self.instances[self.default_inst()?].handle;
@@ -1216,7 +1258,11 @@ impl Session<'_> {
     fn cmd_examine(&mut self, args: &str, fmt: &str) -> Result<()> {
         // Parse N, F, U from e.g. `16xb`.
         let digits: String = fmt.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let count: u64 = if digits.is_empty() { 1 } else { digits.parse()? };
+        let count: u64 = if digits.is_empty() {
+            1
+        } else {
+            digits.parse()?
+        };
         let letters = &fmt[digits.len()..];
         let mut format = 'x';
         let mut unit = 0u64;
@@ -1239,14 +1285,15 @@ impl Session<'_> {
         } else {
             let e = self.eval(args)?;
             match &e {
-                HistEntry::Src { module, inst, value } => {
+                HistEntry::Src {
+                    module,
+                    inst,
+                    value,
+                } => {
                     let dbg = self.modules[*module].info.debug.as_ref().unwrap();
                     let t = dbg.ty(dbg.strip(value.ty));
-                    let target = FrameTarget::new(
-                        self.d,
-                        None,
-                        &self.instances[inst.unwrap_or(0)].handle,
-                    );
+                    let target =
+                        FrameTarget::new(self.d, None, &self.instances[inst.unwrap_or(0)].handle);
                     let ctx = Ctx::new(dbg, &target);
                     match t.kind {
                         TypeKind::Pointer { .. } | TypeKind::Base(_) => ctx.read_uint(value)?,
@@ -1337,7 +1384,9 @@ impl Session<'_> {
             "source" => self.info_source(),
             "modules" => self.cmd_wasm_modules(),
             "instances" => self.cmd_wasm_instances(),
-            "" => bail!("\"info\" must be followed by a subcommand (breakpoints, locals, args, frame, functions, variables, source)."),
+            "" => bail!(
+                "\"info\" must be followed by a subcommand (breakpoints, locals, args, frame, functions, variables, source)."
+            ),
             _ => bail!("Undefined info command: \"{sub}\"."),
         }
     }
@@ -1367,7 +1416,11 @@ impl Session<'_> {
             let _ = writeln!(out, "{} = {text}", var.name);
         }
         if !any {
-            out.push_str(if params { "No arguments.\n" } else { "No locals.\n" });
+            out.push_str(if params {
+                "No arguments.\n"
+            } else {
+                "No locals.\n"
+            });
         }
         self.conn.print(&out);
         Ok(())
@@ -1386,7 +1439,11 @@ impl Session<'_> {
             p.module, m.label, p.inst, p.pc
         );
         if let Some(f) = p.func {
-            let sig = m.info.func_sig(f).map(|s| s.to_string()).unwrap_or_default();
+            let sig = m
+                .info
+                .func_sig(f)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let _ = writeln!(
                 out,
                 "  Wasm function {f}: {} {sig}",
@@ -1416,7 +1473,12 @@ impl Session<'_> {
                 .collect();
             names.sort();
             names.dedup();
-            let _ = writeln!(out, "Module [{mi}] {}: {} matching functions", m.label, names.len());
+            let _ = writeln!(
+                out,
+                "Module [{mi}] {}: {} matching functions",
+                m.label,
+                names.len()
+            );
             for n in names.iter().take(200) {
                 let _ = writeln!(out, "  {n}");
             }
@@ -1440,7 +1502,12 @@ impl Session<'_> {
                 .collect();
             names.sort();
             names.dedup();
-            let _ = writeln!(out, "Module [{mi}] {}: {} matching globals", m.label, names.len());
+            let _ = writeln!(
+                out,
+                "Module [{mi}] {}: {} matching globals",
+                m.label,
+                names.len()
+            );
             for n in names.iter().take(200) {
                 let _ = writeln!(out, "  {n}");
             }
@@ -1526,7 +1593,12 @@ impl Session<'_> {
         for l in &lines[start..end] {
             let marker = if Some(l.offset) == cur { "=>" } else { "  " };
             let indent = "  ".repeat(l.indent.saturating_sub(2));
-            let _ = writeln!(out, "{marker} {:#08x}: {indent}{}", l.offset, demangle_wat(&l.text));
+            let _ = writeln!(
+                out,
+                "{marker} {:#08x}: {indent}{}",
+                l.offset,
+                demangle_wat(&l.text)
+            );
         }
         if end < lines.len() {
             out.push_str("   ...\n");
@@ -1554,7 +1626,7 @@ impl Session<'_> {
             let _ = writeln!(
                 out,
                 "local {i}{name}: {}",
-                wasmval::format(self.d, &WVal::from_api(self.d, v), false, 1)
+                wasmval::format(self.d, &WVal::from_api(v), false, 1)
             );
         }
         if locals.is_empty() {
@@ -1577,7 +1649,7 @@ impl Session<'_> {
             let _ = writeln!(
                 out,
                 "stack[{i}]: {}{top}",
-                wasmval::format(self.d, &WVal::from_api(self.d, v), false, 1)
+                wasmval::format(self.d, &WVal::from_api(v), false, 1)
             );
         }
         self.conn.print(&out);
@@ -1589,11 +1661,14 @@ impl Session<'_> {
         let ii = self.inst_arg(f.inst)?;
         let module = self.instances[ii].module;
         let n = self.modules[module].info.num_globals();
-        let mut out = format!("Globals of instance #{ii} ({}):\n", self.modules[module].label);
+        let mut out = format!(
+            "Globals of instance #{ii} ({}):\n",
+            self.modules[module].label
+        );
         for g in 0..n {
             let inst = &self.instances[ii].handle;
             let text = match inst.get_global(self.d, g).and_then(|g| g.get(self.d)) {
-                Ok(v) => wasmval::format(self.d, &WVal::from_api(self.d, &v), false, 1),
+                Ok(v) => wasmval::format(self.d, &WVal::from_api(&v), false, 1),
                 Err(e) => format!("<{e:?}>"),
             };
             let name = self.modules[module]
@@ -1647,7 +1722,11 @@ impl Session<'_> {
             }
             out.push_str("  |");
             for b in chunk {
-                out.push(if (0x20..0x7f).contains(b) { *b as char } else { '.' });
+                out.push(if (0x20..0x7f).contains(b) {
+                    *b as char
+                } else {
+                    '.'
+                });
             }
             out.push_str("|\n");
         }
@@ -1675,7 +1754,7 @@ impl Session<'_> {
         let mut out = format!("Table {ti} of instance #{ii}: {len} elements\n");
         for i in start..(start + count).min(len) {
             let text = match table.get_element(self.d, i) {
-                Ok(v) => wasmval::format(self.d, &WVal::from_api(self.d, &v), false, 1),
+                Ok(v) => wasmval::format(self.d, &WVal::from_api(&v), false, 1),
                 Err(e) => format!("<{e:?}>"),
             };
             let _ = writeln!(out, "  [{i}] {text}");
@@ -1726,11 +1805,29 @@ impl Session<'_> {
     }
 
     fn cmd_wasm_functions(&mut self, args: &str) -> Result<()> {
-        let f = parse_flags(args, "-f")?;
-        let ii = self.inst_arg(f.inst)?;
+        let f = parse_flags(args, "-m")?;
         let filter = f.rest.join(" ");
-        let m = &self.modules[self.instances[ii].module];
-        let mut out = format!("Functions of instance #{ii} ({}):\n", m.label);
+        // Functions are a property of the module; select it via an
+        // instance (`-i`), directly (`-m`), or by default.
+        let (mi, what) = match (f.inst, f.index) {
+            (_, Some(m)) => (usize::try_from(m)?, format!("module [{m}]")),
+            (Some(_), None) => {
+                let ii = self.inst_arg(f.inst)?;
+                (self.instances[ii].module, format!("instance #{ii}"))
+            }
+            (None, None) => match self.default_inst() {
+                Ok(ii) => (self.instances[ii].module, format!("instance #{ii}")),
+                Err(_) => {
+                    let m = self.default_module().unwrap_or(0);
+                    (m, format!("module [{m}]"))
+                }
+            },
+        };
+        let m = self
+            .modules
+            .get(mi)
+            .ok_or_else(|| anyhow!("No module {mi}."))?;
+        let mut out = format!("Functions of {what} ({}):\n", m.label);
         let mut shown = 0;
         for idx in 0..m.info.num_funcs() {
             let name = m.info.func_display_name(idx);
@@ -1742,7 +1839,11 @@ impl Session<'_> {
                 out.push_str("  ...\n");
                 break;
             }
-            let sig = m.info.func_sig(idx).map(|s| s.to_string()).unwrap_or_default();
+            let sig = m
+                .info
+                .func_sig(idx)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let kind = match m.info.body(idx) {
                 Some(b) => format!("@{:#x}, {} bytes", b.range.start, b.range.len()),
                 None => "import".to_string(),

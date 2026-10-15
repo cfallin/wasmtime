@@ -206,13 +206,18 @@ impl PrettyPrinter for RustStr {
         "rust-str"
     }
     fn matches(&self, _ctx: &Ctx<'_>, ty: &Type, name: &str) -> bool {
-        ty.lang == Lang::Rust
-            && matches!(name, "&str" | "&mut str" | "*const str" | "*mut str")
+        ty.lang == Lang::Rust && matches!(name, "&str" | "&mut str" | "*const str" | "*mut str")
             || name.starts_with("alloc::boxed::Box<str") && has_members(ty, &["data_ptr", "length"])
     }
     fn summarize(&self, ctx: &Ctx<'_>, v: &Value, opts: &FormatOptions) -> Result<Summary> {
         let (addr, len, _) = fat_ptr(ctx, v)?;
-        Ok(Summary::Text(read_str(ctx, addr, len, opts.max_string, true)?))
+        Ok(Summary::Text(read_str(
+            ctx,
+            addr,
+            len,
+            opts.max_string,
+            true,
+        )?))
     }
 }
 
@@ -268,7 +273,13 @@ impl PrettyPrinter for RustString {
     fn summarize(&self, ctx: &Ctx<'_>, v: &Value, opts: &FormatOptions) -> Result<Summary> {
         let vec = ctx.member(v, "vec")?;
         let (addr, len, _) = vec_parts(ctx, &vec)?;
-        Ok(Summary::Text(read_str(ctx, addr, len, opts.max_string, true)?))
+        Ok(Summary::Text(read_str(
+            ctx,
+            addr,
+            len,
+            opts.max_string,
+            true,
+        )?))
     }
 }
 
@@ -460,9 +471,7 @@ impl PrettyPrinter for CString {
                     match ctx.target.read_memory(0, cur, 1) {
                         Ok(c) => c,
                         Err(_) => {
-                            return Ok(Summary::Text(format!(
-                                "{addr:#x} <error reading string>"
-                            )));
+                            return Ok(Summary::Text(format!("{addr:#x} <error reading string>")));
                         }
                     }
                 }

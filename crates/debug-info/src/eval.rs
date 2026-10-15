@@ -87,7 +87,7 @@ pub fn evaluate(
         ($f:expr) => {{
             let b = pop!();
             let a = pop!();
-            #[allow(clippy::redundant_closure_call)]
+            #[allow(clippy::redundant_closure_call, reason = "macro-generated closure")]
             stack.push(($f)(a, b));
         }};
     }
@@ -354,7 +354,9 @@ mod tests {
         // DW_OP_WASM_location 0x3 0x1 (u32 global index), DW_OP_addr 0x10, DW_OP_plus
         assert_eq!(
             eval(
-                &[0xed, 0x03, 0x01, 0x00, 0x00, 0x00, 0x03, 0x10, 0, 0, 0, 0x22],
+                &[
+                    0xed, 0x03, 0x01, 0x00, 0x00, 0x00, 0x03, 0x10, 0, 0, 0, 0x22
+                ],
                 None
             ),
             Location::Memory(2001 + 0x10)

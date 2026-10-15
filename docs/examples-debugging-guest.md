@@ -62,3 +62,49 @@ is supported on all native-compilation ISAs and on Pulley, Wasmtime's
 bytecode platform that runs everywhere.
    
 [wasi-sdk]: https://github.com/WebAssembly/wasi-sdk/
+
+## Built-in interactive debugger (`--debug-tui`)
+
+*This is experimental.* Wasmtime also includes a self-contained,
+gdb-style debugger that does not require a special LLDB build. It
+understands DWARF directly (including C structs, Rust enums, and a few
+standard-library types such as Rust's `String`, `Vec`, `Box` and
+`HashMap`) and also offers a Wasm "virtual machine" view: the operand
+stack, Wasm locals, globals, memories, tables, and GC objects.
+
+1. Build Wasmtime with the `debug-tui` feature
+   (`cargo build --features debug-tui`).
+
+2. Run your program with the debugger listening on a TCP port:
+
+    ```console
+    wasmtime run --debug-tui 1234 foo.wasm
+    Debugger: Debugger listening on 127.0.0.1:1234
+    ```
+
+3. Connect with `nc` or `telnet` and type commands:
+
+    ```console
+    $ nc localhost 1234
+    (wasmtime-debug) b foo.c:42
+    Breakpoint 1 at pc 0x3c7 in main at foo.c:42
+    (wasmtime-debug) continue
+
+    Breakpoint 1, main () at foo.c:42
+    42	  int r = area(&shape);
+    (wasmtime-debug) print shape.points[1]
+    $1 = struct Point { .x = 4, .y = 0 }
+    (wasmtime-debug) print $1.x
+    $2 = 4
+    (wasmtime-debug) wasm-stack
+    Operand stack is empty.
+    ```
+
+   Type `help` for the full list of commands. Values are named with
+   simple "access paths" (`p->x`, `arr[2].y`, `*p`, `&x`, `t.0`) rooted at
+   variables, value-history entries (`$1`, `$`, `$$2`) or Wasm-level
+   entities (`$local3`, `$stack0`, `$global1`, `$table0[4]`).
+
+The debugger is itself a WebAssembly component running in Wasmtime's
+debugger world; it is given read-only access to the host filesystem so
+that it can display source files referenced by the debug info.

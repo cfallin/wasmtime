@@ -225,7 +225,9 @@ impl RunCommon {
             return Ok(None);
         };
         if self.common.debug.debugger.is_some() {
-            bail!("built-in debuggers (-g/--gdbstub, --debug-tui) cannot be combined with -Ddebugger=");
+            bail!(
+                "built-in debuggers (-g/--gdbstub, --debug-tui) cannot be combined with -Ddebugger="
+            );
         }
         // Accept either a bare port number or a full address:port.
         let addr = if addr.parse::<u16>().is_ok() {
