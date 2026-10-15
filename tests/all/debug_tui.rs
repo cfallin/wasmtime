@@ -353,7 +353,7 @@ fn debug_tui_rust_values() -> Result<()> {
     tui.script(
         r#"
         start
-        b debug_tui_rust.rs:66
+        b debug_tui_rust.rs:62
         c
         p name
         p nums
@@ -399,7 +399,7 @@ fn debug_tui_rust_values() -> Result<()> {
         &transcript,
         r#"
 check: Temporary breakpoint 1, debug_tui_rust::main () at debug_tui_rust.rs:39
-check: Breakpoint 2, debug_tui_rust::main () at debug_tui_rust.rs:66
+check: Breakpoint 2, debug_tui_rust::main () at debug_tui_rust.rs:62
 check: %1 = "wasmtime"
 check: %2 = vec![1, 2, 3, 4]
 check: %3 = vec!["a", "bc"]
@@ -440,7 +440,7 @@ check: Breakpoint 3, debug_tui_rust::describe (shape=&Shape::Rect { w: 3, h: 4 }
 check: #0
 sameln: debug_tui_rust::describe
 check: #1
-sameln: debug_tui_rust::main () at debug_tui_rust.rs:66
+sameln: debug_tui_rust::main () at debug_tui_rust.rs:62
 check: [inlined]
 check: shape = &Shape::Rect { w: 3, h: 4 }
 check: color = Color::Blue

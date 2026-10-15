@@ -39,11 +39,7 @@ fn main() {
     let name = String::from("wasmtime");
     let nums: Vec<i32> = vec![1, 2, 3, 4];
     let words = vec!["a".to_string(), "bc".to_string()];
-    let shapes = vec![
-        Shape::Circle(1.5),
-        Shape::Rect { w: 3, h: 4 },
-        Shape::Empty,
-    ];
+    let shapes = vec![Shape::Circle(1.5), Shape::Rect { w: 3, h: 4 }, Shape::Empty];
     let maybe: Option<i32> = Some(7);
     let nothing: Option<i32> = None;
     let res: Result<u32, String> = Err("bad".to_string());
