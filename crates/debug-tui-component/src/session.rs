@@ -99,7 +99,10 @@ pub enum Outcome {
 
 pub struct Session<'a> {
     pub d: &'a Debuggee,
-    pub conn: Conn,
+    /// Output produced by commands, not yet delivered to the user.
+    pub out: String,
+    /// The front-end connection.
+    pub front: Front,
     pub modules: Vec<ModEntry>,
     mod_by_id: HashMap<u64, usize>,
     pub instances: Vec<InstEntry>,
@@ -214,11 +217,40 @@ impl Target for FrameTarget<'_> {
     }
 }
 
+/// The front-end connection: the line-based text interface, or DAP.
+pub enum Front {
+    Tui(Conn),
+    Dap(crate::dap::Transport),
+}
+
 impl<'a> Session<'a> {
-    pub fn new(d: &'a Debuggee, conn: Conn) -> Self {
+    /// Queue output text.
+    pub fn print(&mut self, s: &str) {
+        self.out.push_str(s);
+    }
+
+    /// Queue output text followed by a newline.
+    pub fn println(&mut self, s: &str) {
+        self.out.push_str(s);
+        self.out.push('\n');
+    }
+
+    /// In the text interface, deliver queued output to the user now. (In
+    /// DAP mode, output is collected by the request that produced it.)
+    pub async fn flush_output(&mut self) -> Result<()> {
+        if let Front::Tui(conn) = &mut self.front {
+            let text = std::mem::take(&mut self.out);
+            conn.print(&text);
+            conn.flush().await?;
+        }
+        Ok(())
+    }
+
+    pub fn new(d: &'a Debuggee, front: Front) -> Self {
         Session {
             d,
-            conn,
+            out: String::new(),
+            front,
             modules: vec![],
             mod_by_id: HashMap::new(),
             instances: vec![],
@@ -467,33 +499,47 @@ impl<'a> Session<'a> {
         };
         if step {
             r.wait().await;
-        } else {
-            let mut announced = false;
-            loop {
-                select! {
-                    _ = r.wait().fuse() => break,
-                    input = self.conn.read_input().fuse() => {
-                        match input? {
-                            Input::Interrupt => self.d.interrupt(),
-                            Input::Line(l) if l.trim() == "interrupt" => self.d.interrupt(),
-                            Input::Eof => {
-                                // User went away: detach and let the
-                                // program run to completion.
-                                self.detached = true;
-                                self.remove_all_breakpoints();
-                            }
-                            Input::Line(_) => {
-                                if !announced {
-                                    self.conn.println(
-                                        "The program is running; type `interrupt` or press Ctrl-C to stop it.",
-                                    );
-                                    let _ = self.conn.flush().await;
-                                    announced = true;
-                                }
-                            }
+            return r.result(self.d).map_err(api_err);
+        }
+        enum Wake {
+            Done,
+            Tui(Input),
+            Dap(Option<serde_json::Value>),
+        }
+        let mut announced = false;
+        loop {
+            let wake = match &mut self.front {
+                Front::Tui(conn) => select! {
+                    _ = r.wait().fuse() => Wake::Done,
+                    input = conn.read_input().fuse() => Wake::Tui(input?),
+                },
+                Front::Dap(t) => select! {
+                    _ = r.wait().fuse() => Wake::Done,
+                    msg = t.read_message().fuse() => Wake::Dap(msg?),
+                },
+            };
+            match wake {
+                Wake::Done => break,
+                Wake::Tui(Input::Interrupt) => self.d.interrupt(),
+                Wake::Tui(Input::Line(l)) if l.trim() == "interrupt" => self.d.interrupt(),
+                Wake::Tui(Input::Eof) | Wake::Dap(None) => {
+                    // User went away: detach and let the program run to
+                    // completion.
+                    self.detached = true;
+                    self.remove_all_breakpoints();
+                }
+                Wake::Tui(Input::Line(_)) => {
+                    if !announced {
+                        if let Front::Tui(conn) = &mut self.front {
+                            conn.println(
+                                "The program is running; type `interrupt` or press Ctrl-C to stop it.",
+                            );
+                            let _ = conn.flush().await;
                         }
+                        announced = true;
                     }
                 }
+                Wake::Dap(Some(req)) => self.dap_request_while_running(req).await?,
             }
         }
         r.result(self.d).map_err(api_err)

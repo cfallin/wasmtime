@@ -1137,6 +1137,8 @@ mod test {
                 record: None,
                 #[cfg(feature = "debug-tui")]
                 debug_tui: None,
+                #[cfg(feature = "debug-tui")]
+                debug_dap: None,
                 readonly_dirs: Vec::new(),
             },
             percent: 100.0,
