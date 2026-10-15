@@ -1,7 +1,7 @@
 //! A simple blocking DAP client.
 
 use crate::{Decoder, encode, request};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
@@ -70,6 +70,10 @@ impl Client {
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                     return Ok(None);
                 }
+                // A signal (e.g. Ctrl-C, which a client may handle by
+                // pausing the debuggee) interrupted the read: report a
+                // timeout so that the caller can check for that.
+                Err(e) if e.kind() == ErrorKind::Interrupted => return Ok(None),
                 Err(e) => return Err(e.into()),
             }
         }
@@ -101,9 +105,10 @@ impl Client {
             if remaining.is_zero() {
                 bail!("timed out waiting for a DAP response");
             }
-            match self.read_message(Some(remaining))? {
-                Some(m) => self.dispatch(m),
-                None => bail!("timed out waiting for a DAP response"),
+            // `None` is a timeout or an interrupted read; the deadline is
+            // rechecked above.
+            if let Some(m) = self.read_message(Some(remaining))? {
+                self.dispatch(m);
             }
         }
     }
@@ -150,10 +155,16 @@ impl Client {
     /// Wait for an event named `name`, returning its body. Other events
     /// are passed to `other` (e.g. to print `output` events).
     pub fn wait_event(&mut self, name: &str, other: &mut dyn FnMut(&Value)) -> Result<Value> {
+        let deadline = Instant::now() + self.timeout;
         loop {
-            let e = self
-                .next_event(Some(self.timeout))?
-                .ok_or_else(|| anyhow!("timed out waiting for a `{name}` event"))?;
+            let Some(e) =
+                self.next_event(Some(deadline.saturating_duration_since(Instant::now())))?
+            else {
+                if Instant::now() >= deadline {
+                    bail!("timed out waiting for a `{name}` event");
+                }
+                continue;
+            };
             if e["event"].as_str() == Some(name) {
                 return Ok(e.get("body").cloned().unwrap_or(Value::Null));
             }
@@ -167,10 +178,16 @@ impl Client {
         names: &[&str],
         other: &mut dyn FnMut(&Value),
     ) -> Result<(String, Value)> {
+        let deadline = Instant::now() + self.timeout;
         loop {
-            let e = self
-                .next_event(Some(self.timeout))?
-                .ok_or_else(|| anyhow!("timed out waiting for one of {names:?}"))?;
+            let Some(e) =
+                self.next_event(Some(deadline.saturating_duration_since(Instant::now())))?
+            else {
+                if Instant::now() >= deadline {
+                    bail!("timed out waiting for one of {names:?}");
+                }
+                continue;
+            };
             let name = e["event"].as_str().unwrap_or("").to_string();
             if names.contains(&name.as_str()) {
                 return Ok((name, e.get("body").cloned().unwrap_or(Value::Null)));
