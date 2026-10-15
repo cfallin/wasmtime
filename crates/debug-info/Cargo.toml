@@ -1,0 +1,27 @@
+[package]
+name = "wasmtime-internal-debug-info"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Source-level (DWARF) and Wasm-level program understanding for Wasmtime debugger components"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+gimli = { workspace = true, features = ["read", "std", "endian-reader"] }
+wasmparser = { workspace = true, features = ["std", "simd"] }
+wasmprinter = { workspace = true, default-features = false }
+rustc-demangle = { version = "0.1.16" }
+cpp_demangle = { version = "0.5.1", default-features = false, features = ['alloc'] }
+
+[dev-dependencies]
+wat = { workspace = true }
+# For the `native-debug` example, which drives this library against a
+# debuggee running in-process under Wasmtime's debug API.
+wasmtime = { workspace = true, features = ["debug", "std", "async", "cranelift", "gc", "gc-drc"] }
+wasmtime-wasi = { workspace = true, features = ["p1"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true
