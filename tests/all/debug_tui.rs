@@ -230,8 +230,8 @@ fn debug_tui_c_values_and_stepping() -> Result<()> {
         p tri
         p tri.points[1].x
         p *tri.next
-        p $1.next->name
-        p $
+        p %1.next->name
+        p %
         p tri.tag
         p tri.flags
         p tri.color
@@ -275,27 +275,27 @@ check: 60	  int r = area(&tri);
 check: #0
 check: in main () at debug_tui_c.c:60
 check: in _start ()
-check: $1 = struct Shape { .name =
+check: %1 = struct Shape { .name =
 sameln: "triangle", .color = GREEN, .points = {{ .x = 0, .y = 0 }, { .x = 4, .y = 0 }, { .x = 0, .y = 3 }}, .next =
 sameln: .tag = "tri", .scale = 1.5, .flags = 5 }
-check: $2 = 4
-check: $3 = struct Shape { .name =
+check: %2 = 4
+check: %3 = struct Shape { .name =
 sameln: "other", .color = BLUE,
-check: $4 =
+check: %4 =
 sameln: "other"
-check: $5 =
+check: %5 =
 sameln: "other"
-check: $6 = "tri"
-check: $7 = 5
-check: $8 = GREEN
-check: $9 =
+check: %6 = "tri"
+check: %7 = 5
+check: %8 = GREEN
+check: %9 =
 sameln: "on the heap"
-check: $10 = union Num { .i = 1065353216, .f = 1.0 }
-check: $11 = {10, 20, 30, 40, 50}
-check: $12 = {0xa, 0x14, 0x1e, 0x28, 0x32}
-check: $13 = 43
-check: $14 = struct Point { .x = 0, .y = 0 }
-check: $15 = (struct Shape *)
+check: %10 = union Num { .i = 1065353216, .f = 1.0 }
+check: %11 = {10, 20, 30, 40, 50}
+check: %12 = {0xa, 0x14, 0x1e, 0x28, 0x32}
+check: %13 = 43
+check: %14 = struct Point { .x = 0, .y = 0 }
+check: %15 = (struct Shape *)
 check: type = struct Shape {
 check:     const char *name;
 check:     enum Color color;
@@ -322,7 +322,7 @@ check: #1  main () at debug_tui_c.c:60
 check: (wasmtime-debug) finish
 check: Run till exit from #0  area
 check: main () at debug_tui_c.c:60
-check: Value returned is $
+check: Value returned is %
 sameln: = 6
 check: (wasmtime-debug) n
 check: 61	  printf(
@@ -382,8 +382,8 @@ fn debug_tui_rust_values() -> Result<()> {
         p/r name
         ptype shapes[0]
         whatis maybe
-        p $3[1]
-        p $$1
+        p %3[1]
+        p %%1
         b describe
         c
         bt
@@ -400,41 +400,41 @@ fn debug_tui_rust_values() -> Result<()> {
         r#"
 check: Temporary breakpoint 1, debug_tui_rust::main () at debug_tui_rust.rs:39
 check: Breakpoint 2, debug_tui_rust::main () at debug_tui_rust.rs:66
-check: $1 = "wasmtime"
-check: $2 = vec![1, 2, 3, 4]
-check: $3 = vec!["a", "bc"]
-check: $4 = vec![Shape::Circle(1.5), Shape::Rect { w: 3, h: 4 }, Shape::Empty]
-check: $5 = Shape::Rect { w: 3, h: 4 }
-check: $6 = 3
-check: $7 = Some(7)
-check: $8 = None
-check: $9 = Err("bad")
-check: $10 = Box(Point { x: 5, y: -6 })
-check: $11 = -6
-check: $12 = Point { x: 5, y: -6 }
-check: $13 = Node { value: 1, next: Some(Box(Node { value: 2, next: None })) }
-check: $14 = 2
-check: $15 = Wrapper(99)
-check: $16 = 99
-check: $17 = (1, 'x', true)
-check: $18 = 'x'
-check: $19 = &[2, 3]
-check: $20 = 3
-check: $21 = HashMap(len=2) {
+check: %1 = "wasmtime"
+check: %2 = vec![1, 2, 3, 4]
+check: %3 = vec!["a", "bc"]
+check: %4 = vec![Shape::Circle(1.5), Shape::Rect { w: 3, h: 4 }, Shape::Empty]
+check: %5 = Shape::Rect { w: 3, h: 4 }
+check: %6 = 3
+check: %7 = Some(7)
+check: %8 = None
+check: %9 = Err("bad")
+check: %10 = Box(Point { x: 5, y: -6 })
+check: %11 = -6
+check: %12 = Point { x: 5, y: -6 }
+check: %13 = Node { value: 1, next: Some(Box(Node { value: 2, next: None })) }
+check: %14 = 2
+check: %15 = Wrapper(99)
+check: %16 = 99
+check: %17 = (1, 'x', true)
+check: %18 = 'x'
+check: %19 = &[2, 3]
+check: %20 = 3
+check: %21 = HashMap(len=2) {
 unordered: "one": 1
 unordered: "two": 2
-check: $22 = Color::Blue
-check: $23 = Point { x: 1, y: 2 }
-check: $24 = "hello, world"
-check: $25 = String { vec: Vec { buf: RawVec {
+check: %22 = Color::Blue
+check: %23 = Point { x: 1, y: 2 }
+check: %24 = "hello, world"
+check: %25 = String { vec: Vec { buf: RawVec {
 check: type = enum debug_tui_rust::Shape {
 check:     Circle(f64),
 check:     Rect { w: u32, h: u32 },
 check:     Empty,
 check: }
 check: type = core::option::Option<i32>
-check: $26 = "bc"
-check: $27 = "wasmtime"
+check: %26 = "bc"
+check: %27 = "wasmtime"
 check: Breakpoint 3 at
 check: Breakpoint 3, debug_tui_rust::describe (shape=&Shape::Rect { w: 3, h: 4 }, color=Color::Blue, point=&Point { x: 1, y: 2 }) at debug_tui_rust.rs:34
 check: #0
@@ -554,25 +554,25 @@ check: local 0 (p): struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 field
 check: local 1 (a): array (len 4) [i32 7, i32 7, i32 7, i32 7]
 check: local 2 (i): i31 -42
 check: local 3 (tmp): (ref.null any)
-check: $1 = struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 fields) { 0: i32 3, 1: f64 4.5, 2: (ref.null any) } }
-check: $2 = f64 4.5
-check: $3 = i32 7
-check: $4 = i31 -42
-check: $5 = f64 4.5
-check: $6 = i31 -42
+check: %1 = struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 fields) { 0: i32 3, 1: f64 4.5, 2: (ref.null any) } }
+check: %2 = f64 4.5
+check: %3 = i32 7
+check: %4 = i31 -42
+check: %5 = f64 4.5
+check: %6 = i31 -42
 check: (wasmtime-debug) wasm-stack
 check: stack[0]: i32 65
 check: stack[1]: i32 3  <- top
-check: $7 = i32 3
+check: %7 = i32 3
 check: local 3 (tmp): array (len 3) [i32 65, i32 65, i32 65]
 check: global 0 (g): struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 fields) }
 check: Table 0 of instance #0: 3 elements
 check: [0] (ref.null any)
 check: [1] array (len 4) [i32 7, i32 7, i32 7, i32 7]
-check: $8 = i32 7
-check: $9 = i32 1
-check: $10 = f64 2.5
-check: $11 = i32 7
+check: %8 = i32 7
+check: %9 = i32 1
+check: %10 = f64 2.5
+check: %11 = i32 7
 check: Memory 0 of instance #0: 65536 bytes (1 pages of 65536 bytes)
 check: 0x00000010: 68 65 6c 6c 6f 2c 20 6d 65 6d 6f 72 79 21 00 00  |hello, memory!..|
 check: 0x00000010: 0x68 0x65 0x6c 0x6c
@@ -903,7 +903,7 @@ fn debug_tui_named_wasm_entities() -> Result<()> {
         p $nope
         p %nope
         finish
-        p $
+        p %
         p $calls
         c
         "#,
@@ -913,23 +913,23 @@ fn debug_tui_named_wasm_entities() -> Result<()> {
         &transcript,
         r#"
 check: Breakpoint 1, fact (n=i32 5)
-check: $1 = i32 5
-check: $2 = i32 0
-check: $3 = i32 0
-check: $4 = i32 5
-check: $5 = i32 0
+check: %1 = i32 5
+check: %2 = i32 0
+check: %3 = i32 0
+check: %4 = i32 5
+check: %5 = i32 0
 check: : local.set $acc
-check: $6 = i32 99
-check: $7 = i32 1
-check: $8 = i32 0
-check: $9 = table (len 2)
-check: $10 = i32
+check: %6 = i32 99
+check: %7 = i32 1
+check: %8 = i32 0
+check: %9 = table (len 2)
+check: %10 = i32
 check: No Wasm local, global or table named `$nope`
 check: Unknown built-in `%nope`
 check: Wasm results: i32 120
-check: (wasmtime-debug) p $
-check: $11 = i32
-check: $12 = i32 5
+check: (wasmtime-debug) p %
+check: %11 = i32
+check: %12 = i32 5
 check: [Program exited]
 "#,
     )?;

@@ -35,7 +35,7 @@ Stack:
 Source and data:
   list (l) [LOC]           List source lines.
   print (p)[/x|/r] PATH    Print a value. PATH is an access path: `x`, `p->x`,
-                           `arr[2].y`, `*p`, `&x`, `t.0`, `$1->next`, `$`, `$$2`.
+                           `arr[2].y`, `*p`, `&x`, `t.0`, `%1->next`, `%`, `%%2`.
                            /x prints integers in hex; /r disables pretty-printers.
                            Wasm-level roots: $NAME (a Wasm local, global or
                            table named in the name section), and built-ins
@@ -402,7 +402,7 @@ impl Session<'_> {
                 let name = names
                     .get(i)
                     .and_then(|(n, _)| n.clone())
-                    .unwrap_or_else(|| format!("${i}"));
+                    .unwrap_or_else(|| format!("%local{i}"));
                 let val = truncate(wasmval::format(self.d, &WVal::from_api(l), false, 0), 40);
                 format!("{name}={val}")
             })
@@ -661,7 +661,7 @@ impl Session<'_> {
                 });
                 let n = self.history.len();
                 self.conn
-                    .println(&format!("Value returned is ${n} = {text}"));
+                    .println(&format!("Value returned is %{n} = {text}"));
             }
             None => {
                 let vals: Vec<String> = results
@@ -1074,7 +1074,7 @@ impl Session<'_> {
         let n = self.history.len();
         match *h {
             HistoryRef::Absolute(i) if i >= 1 && i <= n => Ok(i - 1),
-            HistoryRef::Absolute(i) => bail!("History has not yet reached ${i}."),
+            HistoryRef::Absolute(i) => bail!("History has not yet reached %{i}."),
             HistoryRef::Relative(k) if k < n => Ok(n - 1 - k),
             HistoryRef::Relative(_) => bail!("History is empty or too short."),
         }
@@ -1288,7 +1288,7 @@ impl Session<'_> {
         let text = self.format_entry(&e, &opts);
         self.history.push(e);
         let n = self.history.len();
-        self.conn.println(&format!("${n} = {text}"));
+        self.conn.println(&format!("%{n} = {text}"));
         Ok(())
     }
 

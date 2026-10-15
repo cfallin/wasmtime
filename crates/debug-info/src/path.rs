@@ -7,11 +7,11 @@
 //! path    := '*' path | '&' path | postfix
 //! postfix := primary ( '.' field | '->' field | '[' int ']' )*
 //! primary := ident ('::' ident)*     -- variable (local, then global)
-//!          | '$' int | '$' | '$$' int? -- value history
-//!          | '$' ident               -- a named Wasm entity (from the
-//!                                       name section), e.g. `$x`
+//!          | '%' int | '%' | '%%' int? -- value history
 //!          | '%' ident               -- a built-in debugger name, e.g.
 //!                                       `%local3`, `%pc`
+//!          | '$' ident               -- a named Wasm entity (from the
+//!                                       name section), e.g. `$x`
 //!          | int                     -- integer literal
 //!          | '(' path ')'
 //! field   := ident | int             -- `.0` selects a tuple field
@@ -23,9 +23,9 @@ use anyhow::{Result, bail};
 /// A reference into the value history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryRef {
-    /// `$N`: absolute history number.
+    /// `%N`: absolute history number.
     Absolute(usize),
-    /// `$` (0), `$$` (1), `$$N` (N): relative to the most recent value.
+    /// `%` (0), `%%` (1), `%%N` (N): relative to the most recent value.
     Relative(usize),
 }
 
@@ -72,10 +72,10 @@ impl std::fmt::Display for Path {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Path::Var(n) => write!(f, "{n}"),
-            Path::History(HistoryRef::Absolute(n)) => write!(f, "${n}"),
-            Path::History(HistoryRef::Relative(0)) => write!(f, "$"),
-            Path::History(HistoryRef::Relative(1)) => write!(f, "$$"),
-            Path::History(HistoryRef::Relative(n)) => write!(f, "$${n}"),
+            Path::History(HistoryRef::Absolute(n)) => write!(f, "%{n}"),
+            Path::History(HistoryRef::Relative(0)) => write!(f, "%"),
+            Path::History(HistoryRef::Relative(1)) => write!(f, "%%"),
+            Path::History(HistoryRef::Relative(n)) => write!(f, "%%{n}"),
             Path::WasmName(n) => write!(f, "${n}"),
             Path::Builtin(n) => write!(f, "%{n}"),
             Path::Int(i) => write!(f, "{i}"),
@@ -246,7 +246,16 @@ impl<'a> Parser<'a> {
             }
             Some(b'$') => {
                 self.pos += 1;
-                if self.s.get(self.pos) == Some(&b'$') {
+                match self.s.get(self.pos) {
+                    Some(c) if c.is_ascii_alphanumeric() || *c == b'_' => {
+                        Ok(Path::WasmName(self.field()?))
+                    }
+                    _ => bail!("expected a Wasm name after `$`"),
+                }
+            }
+            Some(b'%') => {
+                self.pos += 1;
+                if self.s.get(self.pos) == Some(&b'%') {
                     self.pos += 1;
                     if self.s.get(self.pos).is_some_and(|c| c.is_ascii_digit()) {
                         let n = self.int()?;
@@ -260,15 +269,10 @@ impl<'a> Parser<'a> {
                         Ok(Path::History(HistoryRef::Absolute(usize::try_from(n)?)))
                     }
                     Some(c) if c.is_ascii_alphabetic() || *c == b'_' => {
-                        let id = self.field()?;
-                        Ok(Path::WasmName(id))
+                        Ok(Path::Builtin(self.field()?))
                     }
                     _ => Ok(Path::History(HistoryRef::Relative(0))),
                 }
-            }
-            Some(b'%') => {
-                self.pos += 1;
-                Ok(Path::Builtin(self.field()?))
             }
             Some(c) if c.is_ascii_digit() => Ok(Path::Int(self.int()?)),
             Some(_) => match self.ident() {
@@ -324,16 +328,18 @@ mod tests {
             )
         );
         assert_eq!(p("*p"), Path::Deref(Box::new(Path::Var("p".into()))));
-        assert_eq!(p("$1->x").to_string(), "$1->x");
-        assert_eq!(p("$"), Path::History(HistoryRef::Relative(0)));
-        assert_eq!(p("$$"), Path::History(HistoryRef::Relative(1)));
-        assert_eq!(p("$$3"), Path::History(HistoryRef::Relative(3)));
+        assert_eq!(p("%1->x").to_string(), "%1->x");
+        assert_eq!(p("%1234"), Path::History(HistoryRef::Absolute(1234)));
+        assert_eq!(p("%"), Path::History(HistoryRef::Relative(0)));
+        assert_eq!(p("%%"), Path::History(HistoryRef::Relative(1)));
+        assert_eq!(p("%%3"), Path::History(HistoryRef::Relative(3)));
+        assert!(parse("$").is_err());
         assert_eq!(p("$x"), Path::WasmName("x".into()));
         assert_eq!(p("$local3"), Path::WasmName("local3".into()));
         assert_eq!(p("%local3"), Path::Builtin("local3".into()));
         assert_eq!(p("%pc").to_string(), "%pc");
         assert_eq!(p("$p.2[1]").to_string(), "$p.2[1]");
-        assert!(parse("%").is_err());
+
         assert_eq!(
             p("tuple.0"),
             Path::Field(Box::new(Path::Var("tuple".into())), "0".into())
