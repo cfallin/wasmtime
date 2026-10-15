@@ -156,6 +156,9 @@ pub struct DebugInfo {
     types: RefCell<TypeArena>,
     type_cache: RefCell<HashMap<DieRef, TypeId>>,
     synth_cache: RefCell<HashMap<String, TypeId>>,
+    /// Rust trait-object vtables: address -> the vtable variable's DIE
+    /// (built lazily).
+    vtables: RefCell<Option<HashMap<u64, DieRef>>>,
 }
 
 impl DebugInfo {
@@ -184,6 +187,7 @@ impl DebugInfo {
             types: RefCell::new(TypeArena::default()),
             type_cache: RefCell::new(HashMap::new()),
             synth_cache: RefCell::new(HashMap::new()),
+            vtables: RefCell::new(None),
         };
 
         let mut file_ids: HashMap<String, u32> = HashMap::new();
@@ -1564,6 +1568,70 @@ impl DebugInfo {
         id
     }
 
+    /// Get or synthesize a named array type, e.g. a `str` of `len`
+    /// bytes for the contents of an `Arc<str>`.
+    pub fn named_array_of(&self, elem: TypeId, len: u64, name: &str) -> TypeId {
+        let key = format!("narr:{name}:{}:{len}", elem.0);
+        if let Some(id) = self.synth_cache.borrow().get(&key) {
+            return *id;
+        }
+        let lang = self.ty(elem).lang;
+        let size = self.type_size(elem).map(|s| s * len);
+        let id = self.types.borrow_mut().alloc(Type {
+            name: Some(name.to_string()),
+            size,
+            kind: TypeKind::Array {
+                elem,
+                len: Some(len),
+            },
+            lang,
+        });
+        self.synth_cache.borrow_mut().insert(key, id);
+        id
+    }
+
+    /// For a Rust trait object, find the concrete type behind a vtable
+    /// at linear-memory address `addr`, using the `<T as Trait>::{vtable}`
+    /// variables (whose types name `T` via `DW_AT_containing_type`) that
+    /// rustc emits.
+    pub fn vtable_concrete_type(&self, addr: u64) -> Result<Option<TypeId>> {
+        if self.vtables.borrow().is_none() {
+            let mut map = HashMap::new();
+            for g in self
+                .globals
+                .iter()
+                .filter(|g| g.name.ends_with("::{vtable}"))
+            {
+                let Ok(loc) = self.global_loc(g) else {
+                    continue;
+                };
+                if let Ok(eval::Location::Memory(a)) =
+                    self.eval_loc(g.die.unit, &loc, 0, None, &crate::target::NoTarget)
+                {
+                    map.insert(a, g.die);
+                }
+            }
+            *self.vtables.borrow_mut() = Some(map);
+        }
+        let Some(die) = self.vtables.borrow().as_ref().unwrap().get(&addr).copied() else {
+            return Ok(None);
+        };
+        let Some((r, v)) = self.attr_follow(die, gimli::DW_AT_type) else {
+            return Ok(None);
+        };
+        let Some(vt) = self.resolve_ref(r.unit, &v) else {
+            return Ok(None);
+        };
+        let e = self.entry(vt)?;
+        match e
+            .attr_value(gimli::DW_AT_containing_type)
+            .and_then(|v| self.resolve_ref(vt.unit, &v))
+        {
+            Some(t) => Ok(Some(self.type_of(t)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Default address size across the module (from the first unit).
     pub fn default_address_size(&self) -> u64 {
         self.units
@@ -1669,9 +1737,18 @@ fn strip_generics(name: &str) -> String {
     // Note: `operator<`-style names are rare enough to ignore here.
     let mut out = String::new();
     let mut depth = 0;
+    let mut prev = ' ';
     for c in name.chars() {
+        let after_dash = prev == '-';
+        prev = c;
         match c {
             '<' => depth += 1,
+            // `->` (in `fn() -> T`) is not a closing bracket.
+            '>' if after_dash => {
+                if depth == 0 {
+                    out.push(c);
+                }
+            }
             '>' if depth > 0 => depth -= 1,
             _ if depth == 0 => out.push(c),
             _ => {}

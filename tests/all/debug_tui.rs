@@ -954,6 +954,12 @@ fn debug_tui_rust_std_containers() -> Result<()> {
         p mutex.label
         p nested[0]
         p/r cell
+        p GLOBAL_LAZY
+        p GLOBAL_LAZY_UNFORCED
+        p boxed_dyn.id
+        p mutex_guard[1]
+        p rc_slice[1]
+        p *s.ptr
         c
         "#,
     )?;
@@ -1001,6 +1007,20 @@ check: arc_mutex = Arc(Mutex(HashMap(len=1) { 1: 'a' })) [strong=1, weak=0]
 check: nested = vec![Some(Rc(RefCell(Token::Num(3))) [strong=1, weak=0]), None]
 check: array = [1, 2, 3]
 check: tuple = (1, "two", 3.0)
+check: once_lock = OnceLock("set once")
+check: once_lock_empty = OnceLock(<uninit>)
+check: lazy_cell = LazyCell(42)
+check: lazy_cell_unforced = LazyCell(<uninit>)
+check: mutex_guard = MutexGuard(vec![3, 4])
+check: read_guard = RwLockReadGuard(5)
+check: ref_guard = Ref(Token::Ident("cell"))
+check: arc_str = Arc("arc str") [strong=1, weak=0]
+check: rc_slice = Rc([11, 12]) [strong=1, weak=0]
+check: rc_str = Rc("rc str") [strong=1, weak=0]
+check: boxed_dyn = Box(Inner { id: 6, label: "dyn" })
+check: ref_dyn = &(1, "two", 3.0)
+check: custom = MyCustomPointer { _inner: Box(vec![1, 2, 3]) }
+check: s = S { ptr: &123, name: "s" }
 check: %1 = 3
 check: %2 = Inner { id: 3, label: "arc" }
 check: %3 = -1
@@ -1009,6 +1029,12 @@ check: %5 = 300
 check: %6 = "mutex"
 check: %7 = Some(Rc(RefCell(Token::Num(3))) [strong=1, weak=0])
 check: %8 = Cell { value: UnsafeCell { value: 42 } }
+check: %9 = LazyLock(vec![7, 8, 9])
+check: %10 = LazyLock(<uninit>)
+check: %11 = 6
+check: %12 = 4
+check: %13 = 12
+check: %14 = 123
 "#,
     )?;
     Ok(())
@@ -1032,6 +1058,8 @@ fn debug_tui_cpp_std() -> Result<()> {
         p sptr->x
         p sptr2.y
         p cstr
+        p weird
+        p weird.not_a_vector
         c
         "#,
     )?;
@@ -1066,6 +1094,8 @@ check: %6 = 7
 check: %7 = 8
 check: %8 =
 sameln: "a C string"
+check: %9 = std::vector<Weird, std::allocator<Weird> > { .not_a_vector = 7 }
+check: %10 = 7
 "#,
     )?;
     Ok(())

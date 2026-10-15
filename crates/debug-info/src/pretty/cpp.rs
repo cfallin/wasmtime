@@ -42,7 +42,7 @@ fn node_type(ctx: &Ctx<'_>, kind: &str, value: TypeId) -> Result<TypeId> {
 fn ptr_member(ctx: &Ctx<'_>, v: &Value, names: &[&str]) -> Result<u64> {
     let m = names
         .iter()
-        .find_map(|n| ctx.member(v, n).ok())
+        .find_map(|n| ctx.field(v, n).ok())
         .ok_or_else(|| anyhow!("no member {names:?} in `{}`", ctx.info.type_name(v.ty)))?;
     let p = first_pointer_leaf(ctx, &m)?.ok_or_else(|| anyhow!("{names:?} is not a pointer"))?;
     ctx.read_uint(&p)
@@ -52,7 +52,7 @@ fn ptr_member(ctx: &Ctx<'_>, v: &Value, names: &[&str]) -> Result<u64> {
 fn uint_member(ctx: &Ctx<'_>, v: &Value, names: &[&str]) -> Result<u64> {
     let m = names
         .iter()
-        .find_map(|n| ctx.member(v, n).ok())
+        .find_map(|n| ctx.field(v, n).ok())
         .ok_or_else(|| anyhow!("no member {names:?} in `{}`", ctx.info.type_name(v.ty)))?;
     first_uint_leaf(ctx, &m)
 }
@@ -60,8 +60,8 @@ fn uint_member(ctx: &Ctx<'_>, v: &Value, names: &[&str]) -> Result<u64> {
 /// Split a map's value (`__value_type<K, V>` / `pair<const K, V>`) into
 /// key and value.
 fn key_value(ctx: &Ctx<'_>, v: &Value) -> Result<(Value, Value)> {
-    let pair = ctx.member(v, "__cc_").unwrap_or_else(|_| v.clone());
-    Ok((ctx.member(&pair, "first")?, ctx.member(&pair, "second")?))
+    let pair = ctx.field(v, "__cc_").unwrap_or_else(|_| v.clone());
+    Ok((ctx.field(&pair, "first")?, ctx.field(&pair, "second")?))
 }
 
 fn pluralize(n: u64) -> &'static str {
@@ -76,20 +76,20 @@ struct String;
 impl String {
     /// (data address, size, char type).
     fn parts(ctx: &Ctx<'_>, v: &Value) -> Result<(u64, u64, TypeId)> {
-        let rep = ctx.member(v, "__rep_")?;
-        let s = ctx.member(&rep, "__s")?;
-        let l = ctx.member(&rep, "__l")?;
-        let is_long = match ctx.member(&s, "__is_long_") {
+        let rep = ctx.field(v, "__rep_")?;
+        let s = ctx.field(&rep, "__s")?;
+        let l = ctx.field(&rep, "__l")?;
+        let is_long = match ctx.field(&s, "__is_long_") {
             Ok(b) => ctx.read_uint(&b)? != 0,
-            Err(_) => ctx.read_uint(&ctx.member(&l, "__is_long_")?)? != 0,
+            Err(_) => ctx.read_uint(&ctx.field(&l, "__is_long_")?)? != 0,
         };
         if is_long {
-            let data = ctx.member(&l, "__data_")?;
-            let size = ctx.read_uint(&ctx.member(&l, "__size_")?)?;
+            let data = ctx.field(&l, "__data_")?;
+            let size = ctx.read_uint(&ctx.field(&l, "__size_")?)?;
             Ok((ctx.read_uint(&data)?, size, pointee(ctx, &data)?))
         } else {
-            let data = ctx.member(&s, "__data_")?;
-            let size = ctx.read_uint(&ctx.member(&s, "__size_")?)?;
+            let data = ctx.field(&s, "__data_")?;
+            let size = ctx.read_uint(&ctx.field(&s, "__size_")?)?;
             let elem = match ctx.info.ty(ctx.info.strip(data.ty)).kind {
                 TypeKind::Array { elem, .. } => elem,
                 _ => bail!("unexpected std::string layout"),
@@ -138,7 +138,7 @@ struct Vector;
 impl Vector {
     /// (begin, len, capacity, element type).
     fn parts(ctx: &Ctx<'_>, v: &Value) -> Result<(u64, u64, u64, TypeId)> {
-        let begin_field = ctx.member(v, "__begin_")?;
+        let begin_field = ctx.field(v, "__begin_")?;
         let elem = pointee(ctx, &begin_field)?;
         let size = ctx.info.type_size(elem).unwrap_or(1).max(1);
         let begin = ctx.read_uint(&begin_field)?;
@@ -185,13 +185,13 @@ struct Tree;
 impl Tree {
     /// In-order traversal: up to `max` node values, and the size.
     fn values(ctx: &Ctx<'_>, v: &Value, max: usize) -> Result<(Vec<Value>, u64)> {
-        let tree = ctx.member(v, "__tree_")?;
+        let tree = ctx.field(v, "__tree_")?;
         let size = uint_member(ctx, &tree, &["__size_", "__pair3_"])?;
         let value_ty = template_param(ctx, tree.ty, "_Tp")?;
         let end = ctx
             .member(&tree, "__end_node_")
-            .or_else(|_| ctx.member(&ctx.member(&tree, "__pair1_")?, "__value_"))?;
-        let root = ctx.read_uint(&ctx.member(&end, "__left_")?)?;
+            .or_else(|_| ctx.field(&ctx.field(&tree, "__pair1_")?, "__value_"))?;
+        let root = ctx.read_uint(&ctx.field(&end, "__left_")?)?;
         let mut out = vec![];
         if size == 0 || root == 0 {
             return Ok((out, size));
@@ -209,12 +209,12 @@ impl Tree {
                 return Ok(());
             }
             let node = Value::in_memory(node_ty, addr);
-            let left = ctx.read_uint(&ctx.member(&node, "__left_")?)?;
+            let left = ctx.read_uint(&ctx.field(&node, "__left_")?)?;
             walk(ctx, node_ty, left, depth + 1, max, out)?;
             if out.len() < max {
-                out.push(ctx.member(&node, "__value_")?);
+                out.push(ctx.field(&node, "__value_")?);
             }
-            let right = ctx.read_uint(&ctx.member(&node, "__right_")?)?;
+            let right = ctx.read_uint(&ctx.field(&node, "__right_")?)?;
             walk(ctx, node_ty, right, depth + 1, max, out)
         }
         walk(ctx, node_ty, root, 0, max, &mut out)?;
@@ -265,13 +265,13 @@ impl PrettyPrinter for Tree {
 struct HashTable;
 impl HashTable {
     fn values(ctx: &Ctx<'_>, v: &Value, max: usize) -> Result<(Vec<Value>, u64)> {
-        let table = ctx.member(v, "__table_")?;
+        let table = ctx.field(v, "__table_")?;
         let size = uint_member(ctx, &table, &["__size_", "__p2_"])?;
         let value_ty = template_param(ctx, table.ty, "_Tp")?;
         let first = ctx
             .member(&table, "__first_node_")
-            .or_else(|_| ctx.member(&ctx.member(&table, "__p1_")?, "__value_"))?;
-        let mut addr = ctx.read_uint(&ctx.member(&first, "__next_")?)?;
+            .or_else(|_| ctx.field(&ctx.field(&table, "__p1_")?, "__value_"))?;
+        let mut addr = ctx.read_uint(&ctx.field(&first, "__next_")?)?;
         let mut out = vec![];
         if size == 0 || addr == 0 {
             return Ok((out, size));
@@ -279,8 +279,8 @@ impl HashTable {
         let node_ty = node_type(ctx, "hash", value_ty)?;
         while addr != 0 && out.len() < max.min(usize::try_from(size)?) {
             let node = Value::in_memory(node_ty, addr);
-            out.push(ctx.member(&node, "__value_")?);
-            addr = ctx.read_uint(&ctx.member(&node, "__next_")?)?;
+            out.push(ctx.field(&node, "__value_")?);
+            addr = ctx.read_uint(&ctx.field(&node, "__next_")?)?;
         }
         Ok((out, size))
     }
@@ -331,7 +331,7 @@ impl PrettyPrinter for HashTable {
 
 /// The pointee of a smart pointer, if non-null.
 fn smart_ptr_target(ctx: &Ctx<'_>, v: &Value) -> Result<Option<Value>> {
-    let m = ctx.member(v, "__ptr_")?;
+    let m = ctx.field(v, "__ptr_")?;
     let p = first_pointer_leaf(ctx, &m)?.ok_or_else(|| anyhow!("__ptr_ is not a pointer"))?;
     let addr = ctx.read_uint(&p)?;
     if addr == 0 {
@@ -368,15 +368,15 @@ struct SharedPtr;
 impl SharedPtr {
     /// (use count, weak count) from the control block, if any.
     fn counts(ctx: &Ctx<'_>, v: &Value) -> Result<Option<(u64, u64)>> {
-        let cntrl = ctx.member(v, "__cntrl_")?;
+        let cntrl = ctx.field(v, "__cntrl_")?;
         if ctx.read_uint(&cntrl)? == 0 {
             return Ok(None);
         }
         let block = ctx.deref(&cntrl)?;
         // libc++ stores both counts minus one, and the owners
         // collectively hold one implicit weak reference.
-        let uses = ctx.read_int(&ctx.member(&block, "__shared_owners_")?)? + 1;
-        let weak = ctx.read_int(&ctx.member(&block, "__shared_weak_owners_")?)? + 1;
+        let uses = ctx.read_int(&ctx.field(&block, "__shared_owners_")?)? + 1;
+        let weak = ctx.read_int(&ctx.field(&block, "__shared_weak_owners_")?)? + 1;
         let weak = if uses > 0 { weak - 1 } else { weak };
         Ok(Some((uses.max(0) as u64, weak.max(0) as u64)))
     }

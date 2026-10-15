@@ -112,8 +112,16 @@ impl Formatter<'_, '_> {
         let info = self.ctx.info;
         if !self.opts.raw {
             if let Some(p) = pretty::find(self.ctx, v.ty) {
-                let s = p.summarize(self.ctx, v, self.opts)?;
-                return self.summary(s, depth, out);
+                // If the pretty-printer fails (e.g. an unexpected layout
+                // or a type that merely looks like a known one), fall
+                // back to the raw, structural view below.
+                if let Ok(s) = p.summarize(self.ctx, v, self.opts) {
+                    let mut text = String::new();
+                    if self.summary(s, depth, &mut text).is_ok() {
+                        out.push_str(&text);
+                        return Ok(());
+                    }
+                }
             }
         }
         let sty = info.strip(v.ty);
@@ -513,6 +521,10 @@ impl Formatter<'_, '_> {
                         let _ = write!(out, " [{note}]");
                     }
                 }
+            }
+            Summary::Prefixed { prefix, inner } => {
+                out.push_str(&prefix);
+                self.value(&inner, depth + 1, out);
             }
             Summary::Labeled { label, inner } => {
                 out.push_str(&label);
