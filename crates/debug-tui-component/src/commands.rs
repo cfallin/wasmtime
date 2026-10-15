@@ -37,8 +37,10 @@ Source and data:
   print (p)[/x|/r] PATH    Print a value. PATH is an access path: `x`, `p->x`,
                            `arr[2].y`, `*p`, `&x`, `t.0`, `$1->next`, `$`, `$$2`.
                            /x prints integers in hex; /r disables pretty-printers.
-                           Wasm-level roots: $localN, $stackN, $globalN,
-                           $tableN[I], $pc. GC refs: `.N` (field), `[I]`.
+                           Wasm-level roots: $NAME (a Wasm local, global or
+                           table named in the name section), and built-ins
+                           %localN, %stackN, %globalN, %tableN[I], %pc.
+                           GC refs: `.N` (field), `[I]`.
   ptype PATH, whatis PATH  Show the type of a value.
   info locals|args         Show variables of the selected frame.
   info frame               Describe the selected frame.
@@ -1044,8 +1046,17 @@ impl Session<'_> {
                     }
                 }
             }
-            Path::Special(name) => {
-                let root = self.wasm_root(name, &p)?;
+            Path::WasmName(name) => {
+                let root = self.named_wasm_entity(name)?.ok_or_else(|| {
+                    anyhow!(
+                        "No Wasm local, global or table named `${name}` in the current context \
+                         (indexed entities are `%localN`, `%globalN`, etc.)."
+                    )
+                })?;
+                self.eval_wasm_path(&p, root)
+            }
+            Path::Builtin(name) => {
+                let root = self.builtin_root(name)?;
                 self.eval_wasm_path(&p, root)
             }
             _ => self.eval_source(&p),
@@ -1069,7 +1080,8 @@ impl Session<'_> {
         }
     }
 
-    fn wasm_root(&self, name: &str, p: &Path) -> Result<WVal> {
+    /// Resolve a `%name` built-in: indexed Wasm entities and the PC.
+    fn builtin_root(&self, name: &str) -> Result<WVal> {
         let num = |prefix: &str| -> Option<u32> { name.strip_prefix(prefix)?.parse().ok() };
         if name == "pc" {
             self.require_stopped()?;
@@ -1109,10 +1121,61 @@ impl Session<'_> {
                 .map_err(|_| anyhow!("No table {i}."))?;
             return Ok(WVal::Table(t));
         }
-        let _ = p;
-        bail!(
-            "Unknown convenience variable `${name}` (try $localN, $stackN, $globalN, $tableN, $pc)."
-        )
+        bail!("Unknown built-in `%{name}` (try %localN, %stackN, %globalN, %tableN, %pc).")
+    }
+
+    /// Look up a Wasm entity by its name-section name: a local of the
+    /// selected frame's function, else a global or table of the selected
+    /// frame's instance (or the default instance).
+    fn named_wasm_entity(&self, name: &str) -> Result<Option<WVal>> {
+        if let Some(v) = self.vframes.get(self.selected) {
+            let p = &self.phys[v.phys];
+            let info = &self.modules[p.module].info;
+            if let Some(func) = p.func {
+                let index = info
+                    .local_names
+                    .iter()
+                    .find(|((f, _), n)| *f == func && n.as_str() == name)
+                    .map(|((_, l), _)| *l);
+                if let Some(i) = index {
+                    let locals = p.frame.get_locals(self.d).map_err(|e| anyhow!("{e:?}"))?;
+                    let v = locals
+                        .get(usize::try_from(i)?)
+                        .ok_or_else(|| anyhow!("No local {i} (frame has {}).", locals.len()))?;
+                    return Ok(Some(WVal::from_api(v)));
+                }
+            }
+        }
+        let Ok(ii) = self.default_inst() else {
+            return Ok(None);
+        };
+        let info = &self.modules[self.instances[ii].module].info;
+        if let Some(t) = info
+            .table_names
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(t, _)| *t)
+        {
+            let table = self.instances[ii]
+                .handle
+                .get_table(self.d, t)
+                .map_err(|_| anyhow!("No table {t}."))?;
+            return Ok(Some(WVal::Table(table)));
+        }
+        let Some(g) = info
+            .global_names
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(g, _)| *g)
+        else {
+            return Ok(None);
+        };
+        let global = self.instances[ii]
+            .handle
+            .get_global(self.d, g)
+            .map_err(|_| anyhow!("No global {g}."))?;
+        let v = global.get(self.d).map_err(|e| anyhow!("{e:?}"))?;
+        Ok(Some(WVal::from_api(&v)))
     }
 
     fn eval_wasm_path(&self, p: &Path, root: WVal) -> Result<HistEntry> {

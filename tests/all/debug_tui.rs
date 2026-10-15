@@ -503,14 +503,16 @@ fn debug_tui_wasm_level_and_gc() -> Result<()> {
         wasm-instances
         bt
         wasm-locals
-        p $local0
-        p $local0.2.1
-        p $local1[2]
-        p $local2
+        p %local0
+        p %local0.2.1
+        p %local1[2]
+        p %local2
+        p $p.2.1
+        p $i
         stepi
         stepi
         wasm-stack
-        p $stack1
+        p %stack1
         nexti
         nexti
         nexti
@@ -521,8 +523,10 @@ fn debug_tui_wasm_level_and_gc() -> Result<()> {
         wasm-locals
         wasm-globals
         wasm-table
-        p $table0[1][3]
-        p $global0.0
+        p %table0[1][3]
+        p %global0.0
+        p $g.1
+        p $t[1][0]
         wasm-memory
         wasm-memory 16 16
         x/4xb 16
@@ -554,17 +558,21 @@ check: $1 = struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 fields) { 0: 
 check: $2 = f64 4.5
 check: $3 = i32 7
 check: $4 = i31 -42
+check: $5 = f64 4.5
+check: $6 = i31 -42
 check: (wasmtime-debug) wasm-stack
 check: stack[0]: i32 65
 check: stack[1]: i32 3  <- top
-check: $5 = i32 3
+check: $7 = i32 3
 check: local 3 (tmp): array (len 3) [i32 65, i32 65, i32 65]
 check: global 0 (g): struct (3 fields) { 0: i32 1, 1: f64 2.5, 2: struct (3 fields) }
 check: Table 0 of instance #0: 3 elements
 check: [0] (ref.null any)
 check: [1] array (len 4) [i32 7, i32 7, i32 7, i32 7]
-check: $6 = i32 7
-check: $7 = i32 1
+check: $8 = i32 7
+check: $9 = i32 1
+check: $10 = f64 2.5
+check: $11 = i32 7
 check: Memory 0 of instance #0: 65536 bytes (1 pages of 65536 bytes)
 check: 0x00000010: 68 65 6c 6c 6f 2c 20 6d 65 6d 6f 72 79 21 00 00  |hello, memory!..|
 check: 0x00000010: 0x68 0x65 0x6c 0x6c
@@ -840,6 +848,88 @@ check: #0
 sameln: in area
 check: #1
 sameln: in main () at debug_tui_c.c:60
+check: [Program exited]
+"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_named_wasm_entities() -> Result<()> {
+    // `$name` refers to entities named in the name section; `%localN`
+    // etc. refer to entities by index. A local deliberately named
+    // `$local0` (which is local 2) checks that the two don't collide.
+    let wat = wat_file(
+        r#"
+        (module $fact
+          (global $calls (mut i32) (i32.const 0))
+          (table $tab 2 funcref)
+          (func $fact (param $n i32) (result i32)
+            (local $acc i32)
+            (local $local0 i32)
+            (local.set $local0 (i32.const 99))
+            (local.set $acc (i32.const 1))
+            (block $done
+              (loop $top
+                (br_if $done (i32.eqz (local.get $n)))
+                (local.set $acc (i32.mul (local.get $acc) (local.get $n)))
+                (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                (global.set $calls (i32.add (global.get $calls) (i32.const 1)))
+                (br $top)))
+            (local.get $acc))
+          (func (export "_start") (drop (call $fact (i32.const 5)))))
+        "#,
+    )?;
+    let mut tui = Tui::spawn(wat.path().to_str().unwrap(), &[])?;
+    tui.script(
+        r#"
+        b fact
+        c
+        p $n
+        p $acc
+        p $local0
+        p %local0
+        p %local2
+        stepi
+        stepi
+        stepi
+        stepi
+        p $local0
+        p $acc
+        p $calls
+        p $tab
+        p %pc
+        p $nope
+        p %nope
+        finish
+        p $
+        p $calls
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, fact (n=i32 5)
+check: $1 = i32 5
+check: $2 = i32 0
+check: $3 = i32 0
+check: $4 = i32 5
+check: $5 = i32 0
+check: : local.set $acc
+check: $6 = i32 99
+check: $7 = i32 1
+check: $8 = i32 0
+check: $9 = table (len 2)
+check: $10 = i32
+check: No Wasm local, global or table named `$nope`
+check: Unknown built-in `%nope`
+check: Wasm results: i32 120
+check: (wasmtime-debug) p $
+check: $11 = i32
+check: $12 = i32 5
 check: [Program exited]
 "#,
     )?;

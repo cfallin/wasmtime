@@ -130,6 +130,8 @@ pub struct ModuleInfo {
     pub local_names: HashMap<(u32, u32), String>,
     /// Global names from the name section.
     pub global_names: HashMap<u32, String>,
+    /// Table names from the name section.
+    pub table_names: HashMap<u32, String>,
     /// Number of defined globals, memories, tables.
     pub num_defined_globals: u32,
     pub num_defined_memories: u32,
@@ -161,6 +163,7 @@ impl ModuleInfo {
             func_names: HashMap::new(),
             local_names: HashMap::new(),
             global_names: HashMap::new(),
+            table_names: HashMap::new(),
             num_defined_globals: 0,
             num_defined_memories: 0,
             num_defined_tables: 0,
@@ -311,6 +314,13 @@ impl ModuleInfo {
                     for naming in map {
                         let naming = naming?;
                         self.global_names
+                            .insert(naming.index, naming.name.to_string());
+                    }
+                }
+                Name::Table(map) => {
+                    for naming in map {
+                        let naming = naming?;
+                        self.table_names
                             .insert(naming.index, naming.name.to_string());
                     }
                 }

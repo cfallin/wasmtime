@@ -8,7 +8,10 @@
 //! postfix := primary ( '.' field | '->' field | '[' int ']' )*
 //! primary := ident ('::' ident)*     -- variable (local, then global)
 //!          | '$' int | '$' | '$$' int? -- value history
-//!          | '$' ident               -- debugger "convenience" names
+//!          | '$' ident               -- a named Wasm entity (from the
+//!                                       name section), e.g. `$x`
+//!          | '%' ident               -- a built-in debugger name, e.g.
+//!                                       `%local3`, `%pc`
 //!          | int                     -- integer literal
 //!          | '(' path ')'
 //! field   := ident | int             -- `.0` selects a tuple field
@@ -33,9 +36,13 @@ pub enum Path {
     Var(String),
     /// A value-history reference.
     History(HistoryRef),
-    /// A `$name` convenience variable (e.g., `$local3`), interpreted by
-    /// the debugger front-end.
-    Special(String),
+    /// A `$name` reference to a Wasm entity by its name-section name
+    /// (e.g., a local declared as `(local $x i32)`), interpreted by the
+    /// debugger front-end.
+    WasmName(String),
+    /// A `%name` built-in debugger name (e.g., `%local3`, `%pc`),
+    /// interpreted by the debugger front-end.
+    Builtin(String),
     /// An integer literal.
     Int(u64),
     Deref(Box<Path>),
@@ -69,7 +76,8 @@ impl std::fmt::Display for Path {
             Path::History(HistoryRef::Relative(0)) => write!(f, "$"),
             Path::History(HistoryRef::Relative(1)) => write!(f, "$$"),
             Path::History(HistoryRef::Relative(n)) => write!(f, "$${n}"),
-            Path::Special(n) => write!(f, "${n}"),
+            Path::WasmName(n) => write!(f, "${n}"),
+            Path::Builtin(n) => write!(f, "%{n}"),
             Path::Int(i) => write!(f, "{i}"),
             Path::Deref(p) => write!(f, "*{p}"),
             Path::AddrOf(p) => write!(f, "&{p}"),
@@ -253,10 +261,14 @@ impl<'a> Parser<'a> {
                     }
                     Some(c) if c.is_ascii_alphabetic() || *c == b'_' => {
                         let id = self.field()?;
-                        Ok(Path::Special(id))
+                        Ok(Path::WasmName(id))
                     }
                     _ => Ok(Path::History(HistoryRef::Relative(0))),
                 }
+            }
+            Some(b'%') => {
+                self.pos += 1;
+                Ok(Path::Builtin(self.field()?))
             }
             Some(c) if c.is_ascii_digit() => Ok(Path::Int(self.int()?)),
             Some(_) => match self.ident() {
@@ -316,7 +328,12 @@ mod tests {
         assert_eq!(p("$"), Path::History(HistoryRef::Relative(0)));
         assert_eq!(p("$$"), Path::History(HistoryRef::Relative(1)));
         assert_eq!(p("$$3"), Path::History(HistoryRef::Relative(3)));
-        assert_eq!(p("$local3"), Path::Special("local3".into()));
+        assert_eq!(p("$x"), Path::WasmName("x".into()));
+        assert_eq!(p("$local3"), Path::WasmName("local3".into()));
+        assert_eq!(p("%local3"), Path::Builtin("local3".into()));
+        assert_eq!(p("%pc").to_string(), "%pc");
+        assert_eq!(p("$p.2[1]").to_string(), "$p.2[1]");
+        assert!(parse("%").is_err());
         assert_eq!(
             p("tuple.0"),
             Path::Field(Box::new(Path::Var("tuple".into())), "0".into())
