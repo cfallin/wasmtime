@@ -68,6 +68,9 @@ pub struct Function {
     pub die: DieRef,
     pub decl_file: Option<u32>,
     pub decl_line: Option<u32>,
+    /// Whether this is the program's main subprogram
+    /// (`DW_AT_main_subprogram`, emitted e.g. for Rust's user `main`).
+    pub main_subprogram: bool,
 }
 
 /// A global (static) variable.
@@ -236,14 +239,14 @@ impl DebugInfo {
                 .attr_string(unit, file.path_name())?
                 .to_string_lossy()?
                 .into_owned();
-            let path = if name.starts_with('/') {
+            let path = if name.starts_with('/') || name.contains("://") {
                 name
             } else {
                 let dir = match file.directory(&header) {
                     Some(d) => self.dwarf.attr_string(unit, d)?.to_string_lossy()?.into_owned(),
                     None => String::new(),
                 };
-                let dir = if dir.starts_with('/') || comp_dir.is_empty() {
+                let dir = if dir.starts_with('/') || dir.contains("://") || comp_dir.is_empty() {
                     dir
                 } else if dir.is_empty() {
                     comp_dir.clone()
@@ -441,7 +444,7 @@ impl DebugInfo {
                 .attr_follow(die, gimli::DW_AT_decl_line)
                 .and_then(|(_, v)| v.udata_value())
                 .map(|l| l as u32);
-            let _ = e;
+            let main_subprogram = e.attr_value(gimli::DW_AT_main_subprogram).is_some();
             self.functions.push(Function {
                 name,
                 ranges,
@@ -449,6 +452,7 @@ impl DebugInfo {
                 die,
                 decl_file,
                 decl_line,
+                main_subprogram,
             });
         }
         Ok(())
@@ -728,6 +732,12 @@ impl DebugInfo {
     /// Find functions matching `query`: exact qualified name, or a
     /// `::`-suffix match, or a match ignoring generic arguments.
     pub fn find_functions(&self, query: &str) -> Vec<&Function> {
+        if query == "main" {
+            let mains: Vec<_> = self.functions.iter().filter(|f| f.main_subprogram).collect();
+            if !mains.is_empty() {
+                return mains;
+            }
+        }
         let exact: Vec<_> = self.functions.iter().filter(|f| f.name == query).collect();
         if !exact.is_empty() {
             return exact;
@@ -873,6 +883,18 @@ impl DebugInfo {
             return Ok(VarLoc::Const(bytes));
         }
         Ok(VarLoc::None)
+    }
+
+    /// The declared return type of a function, if any (`None` for
+    /// `void`).
+    pub fn return_type(&self, f: &Function) -> Result<Option<TypeId>> {
+        match self.attr_follow(f.die, gimli::DW_AT_type) {
+            Some((tr, v)) => match self.resolve_ref(tr.unit, &v) {
+                Some(t) => Ok(Some(self.type_of(t)?)),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        }
     }
 
     /// Find a global variable by (qualified or simple) name.

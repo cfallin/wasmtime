@@ -453,6 +453,12 @@ interface debuggee {
     unwrap-v128: func() -> list<u8>;
     unwrap-func: func() -> option<wasm-func>;
     unwrap-exception: func() -> option<wasm-exception>;
+    /// Unwrap an `anyref` (or any subtype: `eqref`, `i31ref`,
+    /// `structref`, `arrayref`, concrete struct/array references).
+    unwrap-anyref: func() -> option<wasm-anyref>;
+    /// For a reference-typed value, whether it is null. Returns
+    /// `false` for non-reference values.
+    is-null: func() -> bool;
 
     make-i32: static func(value: u32) -> wasm-value;
     make-i64: static func(value: u64) -> wasm-value;
@@ -471,6 +477,40 @@ interface debuggee {
     wasm-v128,
     wasm-funcref,
     wasm-exnref,
-    // TODO: GC structs and arrays
+    /// `anyref` or any of its subtypes (GC structs, arrays, `i31`).
+    wasm-anyref,
+    /// `externref` (host-provided references).
+    wasm-externref,
+  }
+
+  /// What a non-null `anyref` refers to.
+  variant anyref-kind {
+    /// An unboxed 31-bit integer (`i31ref`), sign-extended.
+    i31(s32),
+    /// A GC struct with the given number of fields.
+    struct-ref(u32),
+    /// A GC array with the given length.
+    array-ref(u32),
+    /// Some other kind of reference (e.g., an externalized host
+    /// reference converted with `any.convert_extern`).
+    other,
+  }
+
+  /// A reference to a GC object (or an `i31`), from the `any`
+  /// hierarchy.
+  resource wasm-anyref {
+    /// Determine what this reference refers to.
+    kind: func(d: borrow<debuggee>) -> result<anyref-kind, error>;
+
+    /// Get all field values of a struct. Packed (`i8`/`i16`)
+    /// fields are returned zero-extended as `i32`s.
+    struct-fields: func(d: borrow<debuggee>) -> result<list<wasm-value>, error>;
+
+    /// Get up to `count` elements of an array starting at `start`.
+    /// Packed elements are returned zero-extended as `i32`s.
+    array-elements: func(d: borrow<debuggee>, start: u32, count: u32) -> result<list<wasm-value>, error>;
+
+    /// Clone this handle.
+    clone: func() -> wasm-anyref;
   }
 }

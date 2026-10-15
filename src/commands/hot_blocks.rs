@@ -1135,6 +1135,9 @@ mod test {
                 gdbstub: None,
                 #[cfg(feature = "rr")]
                 record: None,
+                #[cfg(feature = "debug-tui")]
+                debug_tui: None,
+                readonly_dirs: Vec::new(),
             },
             percent: 100.0,
             event: Event::CpuCycles,

@@ -118,28 +118,7 @@ impl RunCommand {
 
         // When -g is specified, set up the debugger path and args from
         // the built-in gdbstub component.
-        #[cfg(feature = "gdbstub")]
-        let override_bytes = if let Some(addr) = self.run.gdbstub.as_deref() {
-            if self.run.common.debug.debugger.is_some() {
-                bail!("-g/--gdb cannot be combined with -Ddebugger=");
-            }
-            // Accept either a bare port number or a full address:port.
-            let addr = if addr.parse::<u16>().is_ok() {
-                format!("127.0.0.1:{addr}")
-            } else {
-                use std::net::SocketAddr;
-                addr.parse::<SocketAddr>()
-                    .with_context(|| format!("invalid gdbstub address: `{addr}`"))?;
-                addr.to_string()
-            };
-            self.run.common.debug.debugger = Some("<built-in gdbstub>".into());
-            self.run.common.debug.arg.push(addr);
-            Some(gdbstub_component_artifact::gdbstub()?)
-        } else {
-            None
-        };
-        #[cfg(not(feature = "gdbstub"))]
-        let override_bytes = None;
+        let builtin = self.run.builtin_debugger()?;
 
         if let Some(debugger_component_path) = self.run.common.debug.debugger.as_ref() {
             set_implicit_option(
@@ -160,7 +139,15 @@ impl RunCommand {
                     .into_iter()
                     .chain(self.run.common.debug.arg.iter().map(OsString::from)),
             )?;
-            debugger_run.module_bytes = override_bytes;
+            if let Some(builtin) = &builtin {
+                debugger_run.module_bytes = Some(builtin.bytes);
+                if builtin.readonly_root {
+                    debugger_run
+                        .run
+                        .readonly_dirs
+                        .push(("/".to_string(), "/".to_string()));
+                }
+            }
 
             // Explicitly permit TCP sockets for the debugger-main
             // environment, if not already set.

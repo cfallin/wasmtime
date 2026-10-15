@@ -137,7 +137,7 @@ impl Formatter<'_, '_> {
                         self.value(&Value::in_memory(*p, addr), depth + 1, out);
                     }
                     _ => {
-                        if depth == 0 && !rust {
+                        if depth == 0 {
                             let _ = write!(out, "({}) ", info.type_name(v.ty));
                         }
                         let _ = write!(out, "{addr:#x}");

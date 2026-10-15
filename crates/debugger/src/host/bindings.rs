@@ -1,6 +1,6 @@
 //! wit-bindgen-generated host binding types.
 
-use wasmtime::{Result, ValType};
+use wasmtime::{HeapTopType, Result, ValType};
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -28,6 +28,7 @@ wasmtime::component::bindgen!({
         "bytecodealliance:wasmtime/debuggee.wasm-func": wasmtime::Func,
         "bytecodealliance:wasmtime/debuggee.wasm-exception": super::api::WasmException,
         "bytecodealliance:wasmtime/debuggee.wasm-value": super::api::WasmValue,
+        "bytecodealliance:wasmtime/debuggee.wasm-anyref": super::api::WasmAnyRef,
 
         "wasi": wasmtime_wasi::p2::bindings,
     },
@@ -46,9 +47,13 @@ pub(crate) fn val_type_to_wasm_type(vt: &ValType) -> Result<wit::WasmType> {
         ValType::F32 => Ok(wit::WasmType::WasmF32),
         ValType::F64 => Ok(wit::WasmType::WasmF64),
         ValType::V128 => Ok(wit::WasmType::WasmV128),
-        ValType::Ref(rt) if rt.heap_type().is_exn() => Ok(wit::WasmType::WasmExnref),
-        ValType::Ref(rt) if rt.heap_type().is_func() => Ok(wit::WasmType::WasmFuncref),
-        ValType::Ref(_) => Err(wit::Error::UnsupportedType.into()),
+        ValType::Ref(rt) => match rt.heap_type().top() {
+            HeapTopType::Exn => Ok(wit::WasmType::WasmExnref),
+            HeapTopType::Func => Ok(wit::WasmType::WasmFuncref),
+            HeapTopType::Any => Ok(wit::WasmType::WasmAnyref),
+            HeapTopType::Extern => Ok(wit::WasmType::WasmExternref),
+            HeapTopType::Cont => Err(wit::Error::UnsupportedType.into()),
+        },
     }
 }
 
@@ -61,5 +66,7 @@ pub(crate) fn wasm_type_to_val_type(wt: wit::WasmType) -> ValType {
         wit::WasmType::WasmV128 => ValType::V128,
         wit::WasmType::WasmFuncref => ValType::FUNCREF,
         wit::WasmType::WasmExnref => ValType::EXNREF,
+        wit::WasmType::WasmAnyref => ValType::ANYREF,
+        wit::WasmType::WasmExternref => ValType::EXTERNREF,
     }
 }

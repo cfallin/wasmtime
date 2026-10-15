@@ -118,6 +118,24 @@ pub struct RunCommon {
     #[cfg(feature = "rr")]
     #[arg(long = "record", value_name = "PATH")]
     pub record: Option<std::path::PathBuf>,
+
+    /// Attach the built-in interactive (gdb-style, text-mode) debugger,
+    /// listening on the given TCP address. Accepts a port number (e.g.
+    /// `1234`) or a full `address:port`. A bare port number will bind
+    /// on localhost only (`127.0.0.1`). Connect with e.g. `nc localhost
+    /// 1234` or `telnet localhost 1234`.
+    ///
+    /// The debugger is given read-only access to the host filesystem
+    /// so that it can display source files referenced by debug info.
+    #[cfg(feature = "debug-tui")]
+    #[arg(long = "debug-tui", value_name = "[ADDR:]PORT")]
+    pub debug_tui: Option<String>,
+
+    /// Host directories to preopen read-only, as `(host, guest)` pairs.
+    /// Not exposed on the command line; used to configure built-in
+    /// debugger components.
+    #[arg(skip)]
+    pub readonly_dirs: Vec<(String, String)>,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, Option<String>)> {
@@ -160,7 +178,69 @@ impl std::fmt::Display for RunCommon {
     }
 }
 
+/// A built-in debugger component selected on the command line.
+#[cfg(feature = "debug")]
+pub struct BuiltinDebugger {
+    /// The component bytes.
+    pub bytes: &'static [u8],
+    /// Whether the debugger should get read-only access to the host
+    /// filesystem (to display source files).
+    pub readonly_root: bool,
+}
+
 impl RunCommon {
+    /// If a built-in debugger was requested (`-g`/`--gdbstub` or
+    /// `--debug-tui`), configure `-Ddebugger`/`-Darg` accordingly and
+    /// return the component to use.
+    #[cfg(feature = "debug")]
+    pub fn builtin_debugger(&mut self) -> Result<Option<BuiltinDebugger>> {
+        #[allow(unused_mut, reason = "depends on features")]
+        let mut requests: Vec<(&str, String, BuiltinDebugger)> = vec![];
+        #[cfg(feature = "gdbstub")]
+        if let Some(addr) = self.gdbstub.clone() {
+            requests.push((
+                "gdbstub",
+                addr,
+                BuiltinDebugger {
+                    bytes: gdbstub_component_artifact::gdbstub()?,
+                    readonly_root: false,
+                },
+            ));
+        }
+        #[cfg(feature = "debug-tui")]
+        if let Some(addr) = self.debug_tui.clone() {
+            requests.push((
+                "debug-tui",
+                addr,
+                BuiltinDebugger {
+                    bytes: debug_tui_component_artifact::debug_tui()?,
+                    readonly_root: true,
+                },
+            ));
+        }
+        if requests.len() > 1 {
+            bail!("-g/--gdbstub and --debug-tui cannot be combined");
+        }
+        let Some((name, addr, debugger)) = requests.pop() else {
+            return Ok(None);
+        };
+        if self.common.debug.debugger.is_some() {
+            bail!("built-in debuggers (-g/--gdbstub, --debug-tui) cannot be combined with -Ddebugger=");
+        }
+        // Accept either a bare port number or a full address:port.
+        let addr = if addr.parse::<u16>().is_ok() {
+            format!("127.0.0.1:{addr}")
+        } else {
+            use std::net::SocketAddr;
+            addr.parse::<SocketAddr>()
+                .with_context(|| format!("invalid {name} address: `{addr}`"))?;
+            addr.to_string()
+        };
+        self.common.debug.debugger = Some(format!("<built-in {name}>").into());
+        self.common.debug.arg.push(addr);
+        Ok(Some(debugger))
+    }
+
     pub fn store_limits(&self) -> StoreLimits {
         let mut limits = StoreLimitsBuilder::new();
         if let Some(max) = self.common.wasm.max_memory_size {
@@ -363,6 +443,9 @@ impl RunCommon {
 
         for (host, guest) in self.dirs.iter() {
             builder.preopened_dir(host, guest, wasmtime_wasi::FsPerms::ReadWrite)?;
+        }
+        for (host, guest) in self.readonly_dirs.iter() {
+            builder.preopened_dir(host, guest, wasmtime_wasi::FsPerms::ReadOnly)?;
         }
         if let Some(cwd) = &self.common.wasi.cwd {
             builder.initial_cwd(cwd);
