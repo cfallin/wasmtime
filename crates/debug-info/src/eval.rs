@@ -74,6 +74,11 @@ pub fn evaluate(
     let mut reg_loc: Option<Location> = None;
     let mut stack_value = false;
     let mut implicit: Option<Vec<u8>> = None;
+    // The Wasm slot whose value was pushed by the most recent operation,
+    // if any: `DW_OP_WASM_location <slot>; DW_OP_stack_value` (as LLVM
+    // emits for values held in Wasm locals) means the object lives in
+    // that slot.
+    let mut pushed_slot: Option<Location> = None;
 
     macro_rules! pop {
         () => {
@@ -98,12 +103,14 @@ pub fn evaluate(
         let next_is_end_or_piece =
             i + 1 == ops.len() || matches!(ops[i + 1].2, Operation::Piece { .. });
         i += 1;
+        let prev_slot = pushed_slot.take();
         match *op {
             Operation::WasmLocal { index } => {
                 if next_is_end_or_piece {
                     reg_loc = Some(Location::WasmLocal(index));
                 } else {
                     stack.push(target.local(index)?.as_u64());
+                    pushed_slot = Some(Location::WasmLocal(index));
                 }
             }
             Operation::WasmGlobal { index } => {
@@ -111,6 +118,7 @@ pub fn evaluate(
                     reg_loc = Some(Location::WasmGlobal(index));
                 } else {
                     stack.push(target.global(index)?.as_u64());
+                    pushed_slot = Some(Location::WasmGlobal(index));
                 }
             }
             Operation::WasmStack { index } => {
@@ -118,6 +126,7 @@ pub fn evaluate(
                     reg_loc = Some(Location::WasmStack(index));
                 } else {
                     stack.push(target.operand(index)?.as_u64());
+                    pushed_slot = Some(Location::WasmStack(index));
                 }
             }
             Operation::Address { address } => stack.push(address),
@@ -220,7 +229,13 @@ pub fn evaluate(
                 }
             }
             Operation::Nop => {}
-            Operation::StackValue => stack_value = true,
+            Operation::StackValue => match prev_slot {
+                Some(slot) if stack.len() == 1 && next_is_end_or_piece => {
+                    stack.pop();
+                    reg_loc = Some(slot);
+                }
+                _ => stack_value = true,
+            },
             Operation::ImplicitValue { ref data } => {
                 implicit = Some(data.to_slice()?.into_owned());
             }
@@ -342,10 +357,17 @@ mod tests {
 
     #[test]
     fn wasm_local_stack_value() {
-        // DW_OP_WASM_location 0x0 0x3, DW_OP_stack_value
+        // DW_OP_WASM_location 0x0 0x3, DW_OP_stack_value: the value of
+        // local 3, i.e., the object lives in local 3.
         assert_eq!(
             eval(&[0xed, 0x00, 0x03, 0x9f], None),
-            Location::Value(1003u64.to_le_bytes().to_vec())
+            Location::WasmLocal(3)
+        );
+        // DW_OP_WASM_location 0x0 0x3, DW_OP_plus_uconst 1,
+        // DW_OP_stack_value: a computed value.
+        assert_eq!(
+            eval(&[0xed, 0x00, 0x03, 0x23, 0x01, 0x9f], None),
+            Location::Value(1004u64.to_le_bytes().to_vec())
         );
     }
 
