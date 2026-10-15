@@ -11,13 +11,15 @@ pub enum WVal {
     Func(Option<api::WasmFunc>),
     Exn(Option<api::WasmException>),
     Any(Option<api::WasmAnyref>),
-    Extern { null: bool },
+    Extern {
+        null: bool,
+    },
     /// A table, which can be indexed (`$table0[3]`).
     Table(api::Table),
 }
 
 impl WVal {
-    pub fn from_api(d: &Debuggee, v: &api::WasmValue) -> WVal {
+    pub fn from_api(v: &api::WasmValue) -> WVal {
         match v.get_type() {
             WasmType::WasmI32 => WVal::Num(WasmVal::I32(v.unwrap_i32())),
             WasmType::WasmI64 => WVal::Num(WasmVal::I64(v.unwrap_i64())),
@@ -32,11 +34,6 @@ impl WVal {
             WasmType::WasmAnyref => WVal::Any(v.unwrap_anyref()),
             WasmType::WasmExternref => WVal::Extern { null: v.is_null() },
         }
-        .with_debuggee(d)
-    }
-
-    fn with_debuggee(self, _d: &Debuggee) -> WVal {
-        self
     }
 
     /// Clone (resources are cloned via their `clone` methods).
@@ -61,9 +58,9 @@ impl WVal {
 
     /// Select a field (struct field index, for GC structs).
     pub fn field(&self, d: &Debuggee, name: &str) -> Result<WVal> {
-        let idx: u32 = name
-            .parse()
-            .map_err(|_| anyhow!("Wasm GC struct fields are selected by index (`.0`, `.1`, ...)"))?;
+        let idx: u32 = name.parse().map_err(|_| {
+            anyhow!("Wasm GC struct fields are selected by index (`.0`, `.1`, ...)")
+        })?;
         match self {
             WVal::Any(Some(a)) => match a.kind(d)? {
                 AnyrefKind::StructRef(n) => {
@@ -71,7 +68,7 @@ impl WVal {
                         bail!("struct has only {n} fields");
                     }
                     let fields = a.struct_fields(d)?;
-                    Ok(WVal::from_api(d, &fields[usize::try_from(idx)?]))
+                    Ok(WVal::from_api(&fields[usize::try_from(idx)?]))
                 }
                 _ => bail!("not a GC struct"),
             },
@@ -80,7 +77,7 @@ impl WVal {
                 let v = vals
                     .get(usize::try_from(idx)?)
                     .ok_or_else(|| anyhow!("exception has only {} values", vals.len()))?;
-                Ok(WVal::from_api(d, v))
+                Ok(WVal::from_api(v))
             }
             WVal::Any(None) | WVal::Exn(None) => bail!("null reference"),
             _ => bail!("cannot select a field of this Wasm value"),
@@ -97,7 +94,7 @@ impl WVal {
                         bail!("index {i} out of bounds (array length {n})");
                     }
                     let elems = a.array_elements(d, i, 1)?;
-                    Ok(WVal::from_api(d, &elems[0]))
+                    Ok(WVal::from_api(&elems[0]))
                 }
                 _ => bail!("not a GC array"),
             },
@@ -106,7 +103,7 @@ impl WVal {
                 if i >= len {
                     bail!("index {i} out of bounds (table length {len})");
                 }
-                Ok(WVal::from_api(d, &t.get_element(d, i)?))
+                Ok(WVal::from_api(&t.get_element(d, i)?))
             }
             WVal::Any(None) => bail!("null reference"),
             _ => bail!("cannot index this Wasm value"),
@@ -178,7 +175,7 @@ fn format_into(d: &Debuggee, v: &WVal, hex: bool, depth: usize, out: &mut String
                             if i > 0 {
                                 out.push_str(", ");
                             }
-                            format_into(d, &WVal::from_api(d, x), hex, depth - 1, out);
+                            format_into(d, &WVal::from_api(x), hex, depth - 1, out);
                         }
                         out.push(')');
                     }
@@ -209,7 +206,7 @@ fn format_into(d: &Debuggee, v: &WVal, hex: bool, depth: usize, out: &mut String
                         out.push_str(" {");
                         for (i, f) in fields.iter().enumerate() {
                             let _ = write!(out, "{}{i}: ", if i > 0 { ", " } else { " " });
-                            format_into(d, &WVal::from_api(d, f), hex, depth - 1, out);
+                            format_into(d, &WVal::from_api(f), hex, depth - 1, out);
                         }
                         out.push_str(if fields.is_empty() { "}" } else { " }" });
                     }
@@ -230,7 +227,7 @@ fn format_into(d: &Debuggee, v: &WVal, hex: bool, depth: usize, out: &mut String
                             if i > 0 {
                                 out.push_str(", ");
                             }
-                            format_into(d, &WVal::from_api(d, e), hex, depth - 1, out);
+                            format_into(d, &WVal::from_api(e), hex, depth - 1, out);
                         }
                         if n > MAX_GC_ELEMS {
                             out.push_str(", ...");

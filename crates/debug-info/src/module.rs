@@ -11,6 +11,43 @@ use wasmparser::{
     CompositeInnerType, KnownCustom, Name, Operator, Parser, Payload, TypeRef, ValType,
 };
 
+/// Render a value type in WAT syntax, e.g. `i32`, `funcref`,
+/// `(ref null $3)`.
+pub fn valtype_str(t: &ValType) -> String {
+    use wasmparser::{HeapType, UnpackedIndex};
+    match t {
+        ValType::Ref(rt) => {
+            #[allow(unreachable_patterns, reason = "`Id` exists only with some features")]
+            let idx = |i: &UnpackedIndex| match i {
+                UnpackedIndex::Module(i) => format!("${i}"),
+                UnpackedIndex::RecGroup(i) => format!("$rec{i}"),
+                other => format!("{other:?}"),
+            };
+            let (heap, abstract_) = match rt.heap_type() {
+                HeapType::Abstract { shared, ty } => {
+                    let name = format!("{ty:?}").to_lowercase();
+                    let name = if shared {
+                        format!("shared {name}")
+                    } else {
+                        name
+                    };
+                    (name, true)
+                }
+                HeapType::Concrete(i) => (idx(&i), false),
+                HeapType::Exact(i) => (format!("(exact {})", idx(&i)), false),
+            };
+            if abstract_ && rt.is_nullable() && !heap.contains(' ') {
+                format!("{heap}ref")
+            } else if rt.is_nullable() {
+                format!("(ref null {heap})")
+            } else {
+                format!("(ref {heap})")
+            }
+        }
+        t => t.to_string(),
+    }
+}
+
 /// A function signature, rendered for display.
 #[derive(Clone, Debug, Default)]
 pub struct FuncSig {
@@ -140,12 +177,8 @@ impl ModuleInfo {
                         for sub in group?.into_types() {
                             info.sigs.push(match &sub.composite_type.inner {
                                 CompositeInnerType::Func(ft) => Some(FuncSig {
-                                    params: ft.params().iter().map(|t| t.to_string()).collect(),
-                                    results: ft
-                                        .results()
-                                        .iter()
-                                        .map(|t| t.to_string())
-                                        .collect(),
+                                    params: ft.params().iter().map(valtype_str).collect(),
+                                    results: ft.results().iter().map(valtype_str).collect(),
                                 }),
                                 _ => None,
                             });
@@ -381,7 +414,7 @@ impl ModuleInfo {
         }
         if let Some(body) = self.body(index) {
             for l in &body.locals {
-                out.push((self.local_names.get(&(index, i)).cloned(), l.to_string()));
+                out.push((self.local_names.get(&(index, i)).cloned(), valtype_str(l)));
                 i += 1;
             }
         }
@@ -435,7 +468,10 @@ impl ModuleInfo {
 
     /// Get the full-module disassembly (computed lazily and cached).
     pub fn disassembly(&self) -> Result<&[DisasmLine]> {
-        match self.disasm.get_or_init(|| self.compute_disassembly().map_err(|e| format!("{e:#}"))) {
+        match self
+            .disasm
+            .get_or_init(|| self.compute_disassembly().map_err(|e| format!("{e:#}")))
+        {
             Ok(v) => Ok(&v[..]),
             Err(e) => bail!("disassembly failed: {e}"),
         }
@@ -591,7 +627,13 @@ mod tests {
         let texts: Vec<_> = dis.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["local.get $a", "local.get $b", "i32.add", "call $helper", "end"]
+            [
+                "local.get $a",
+                "local.get $b",
+                "i32.add",
+                "call $helper",
+                "end"
+            ]
         );
         assert_eq!(dis[0].offset, instrs[0].0);
         assert_eq!(m.func_at_pc(instrs[2].0).unwrap().index, 1);

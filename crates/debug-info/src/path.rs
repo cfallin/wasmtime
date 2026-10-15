@@ -107,10 +107,7 @@ pub fn parse(input: &str) -> Result<Path> {
     let path = p.path()?;
     p.ws();
     if p.pos != p.s.len() {
-        bail!(
-            "unexpected `{}` in path expression",
-            &input[p.pos..]
-        );
+        bail!("unexpected `{}` in path expression", &input[p.pos..]);
     }
     Ok(path)
 }
@@ -211,13 +208,12 @@ impl<'a> Parser<'a> {
     fn int(&mut self) -> Result<u64> {
         self.ws();
         let start = self.pos;
-        let (radix, digits_start) = if self.s[self.pos..].starts_with(b"0x")
-            || self.s[self.pos..].starts_with(b"0X")
-        {
-            (16, self.pos + 2)
-        } else {
-            (10, self.pos)
-        };
+        let (radix, digits_start) =
+            if self.s[self.pos..].starts_with(b"0x") || self.s[self.pos..].starts_with(b"0X") {
+                (16, self.pos + 2)
+            } else {
+                (10, self.pos)
+            };
         self.pos = digits_start;
         while self.pos < self.s.len() && (self.s[self.pos] as char).is_digit(radix) {
             self.pos += 1;
@@ -274,7 +270,11 @@ impl<'a> Parser<'a> {
 
 /// Apply the non-root parts of `path` to a root value. `root` resolves
 /// the path's root primary into a value.
-pub fn eval(ctx: &Ctx<'_>, path: &Path, root: &mut dyn FnMut(&Path) -> Result<Value>) -> Result<Value> {
+pub fn eval(
+    ctx: &Ctx<'_>,
+    path: &Path,
+    root: &mut dyn FnMut(&Path) -> Result<Value>,
+) -> Result<Value> {
     match path {
         Path::Deref(p) => ctx.deref(&eval(ctx, p, root)?),
         Path::AddrOf(p) => ctx.address_of(&eval(ctx, p, root)?),
@@ -311,16 +311,16 @@ mod tests {
                 "x".into()
             )
         );
-        assert_eq!(
-            p("*p"),
-            Path::Deref(Box::new(Path::Var("p".into())))
-        );
+        assert_eq!(p("*p"), Path::Deref(Box::new(Path::Var("p".into()))));
         assert_eq!(p("$1->x").to_string(), "$1->x");
         assert_eq!(p("$"), Path::History(HistoryRef::Relative(0)));
         assert_eq!(p("$$"), Path::History(HistoryRef::Relative(1)));
         assert_eq!(p("$$3"), Path::History(HistoryRef::Relative(3)));
         assert_eq!(p("$local3"), Path::Special("local3".into()));
-        assert_eq!(p("tuple.0"), Path::Field(Box::new(Path::Var("tuple".into())), "0".into()));
+        assert_eq!(
+            p("tuple.0"),
+            Path::Field(Box::new(Path::Var("tuple".into())), "0".into())
+        );
         assert_eq!(p("a::b::C"), Path::Var("a::b::C".into()));
         assert_eq!(p("arr[0x10]").to_string(), "arr[16]");
         assert_eq!(p("(*p).x").to_string(), "(*p).x");

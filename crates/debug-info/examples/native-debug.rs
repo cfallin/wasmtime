@@ -14,8 +14,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wasmtime::{
-    AsContextMut, Config, DebugEvent, DebugHandler, Engine, FrameHandle, Linker, Module,
-    ModulePC, Store, StoreContextMut, Val,
+    AsContextMut, Config, DebugEvent, DebugHandler, Engine, FrameHandle, Linker, Module, ModulePC,
+    Store, StoreContextMut, Val,
 };
 use wasmtime_internal_debug_info::{
     ModuleInfo, Target, WasmVal,
@@ -44,7 +44,10 @@ fn val(v: Val) -> anyhow::Result<WasmVal> {
 impl Target for FrameTarget<'_, '_> {
     fn read_memory(&self, memory: u32, addr: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         let mut store = self.store.borrow_mut();
-        let inst = self.frame.instance(&mut *store).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let inst = self
+            .frame
+            .instance(&mut *store)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let mem = inst
             .debug_memory(&mut *store, memory)
             .ok_or_else(|| anyhow::anyhow!("no memory {memory}"))?;
@@ -57,11 +60,17 @@ impl Target for FrameTarget<'_, '_> {
     }
     fn local(&self, index: u32) -> anyhow::Result<WasmVal> {
         let mut store = self.store.borrow_mut();
-        val(self.frame.local(&mut *store, index).map_err(|e| anyhow::anyhow!("{e}"))?)
+        val(self
+            .frame
+            .local(&mut *store, index)
+            .map_err(|e| anyhow::anyhow!("{e}"))?)
     }
     fn global(&self, index: u32) -> anyhow::Result<WasmVal> {
         let mut store = self.store.borrow_mut();
-        let inst = self.frame.instance(&mut *store).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let inst = self
+            .frame
+            .instance(&mut *store)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let g = inst
             .debug_global(&mut *store, index)
             .ok_or_else(|| anyhow::anyhow!("no global {index}"))?;
@@ -69,7 +78,10 @@ impl Target for FrameTarget<'_, '_> {
     }
     fn operand(&self, index: u32) -> anyhow::Result<WasmVal> {
         let mut store = self.store.borrow_mut();
-        val(self.frame.stack(&mut *store, index).map_err(|e| anyhow::anyhow!("{e}"))?)
+        val(self
+            .frame
+            .stack(&mut *store, index)
+            .map_err(|e| anyhow::anyhow!("{e}"))?)
     }
 }
 
@@ -205,8 +217,11 @@ async fn main() -> anyhow::Result<()> {
     let engine = Engine::new(&config).map_err(|e| anyhow::anyhow!("{e}"))?;
     let module = Module::new(&engine, &wasm).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::p1::add_to_linker_async(&mut linker, |t| t).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ctx = wasmtime_wasi::WasiCtxBuilder::new().inherit_stdout().build_p1();
+    wasmtime_wasi::p1::add_to_linker_async(&mut linker, |t| t)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ctx = wasmtime_wasi::WasiCtxBuilder::new()
+        .inherit_stdout()
+        .build_p1();
     let mut store = Store::new(&engine, ctx);
     store.set_debug_handler(Handler {
         bytes: Arc::new(wasm.clone()),

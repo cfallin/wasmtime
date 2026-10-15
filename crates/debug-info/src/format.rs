@@ -521,12 +521,24 @@ pub fn describe_type(info: &crate::DebugInfo, ty: TypeId) -> String {
                 }
             }
             if let Some(part) = &st.variant_part {
-                let _ = writeln!(out, "    <variant part with {} variants>", part.variants.len());
+                let _ = writeln!(
+                    out,
+                    "    <variant part with {} variants>",
+                    part.variants.len()
+                );
             }
             out.push('}');
         }
         TypeKind::Enum { enumerators, .. } => {
-            let _ = writeln!(out, "{} {{", if rust { format!("enum {}", info.type_name(sty)) } else { info.type_name(sty) });
+            let _ = writeln!(
+                out,
+                "{} {{",
+                if rust {
+                    format!("enum {}", info.type_name(sty))
+                } else {
+                    info.type_name(sty)
+                }
+            );
             for (n, v) in enumerators {
                 let _ = writeln!(out, "    {n} = {v},");
             }

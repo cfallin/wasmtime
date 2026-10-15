@@ -194,7 +194,8 @@ impl DebugInfo {
             {
                 let mut cursor = unit.entries();
                 if let Some(root) = cursor.next_dfs()? {
-                    if let Some(AttributeValue::Language(l)) = root.attr_value(gimli::DW_AT_language)
+                    if let Some(AttributeValue::Language(l)) =
+                        root.attr_value(gimli::DW_AT_language)
                     {
                         lang = Lang::from_dwarf(l);
                     }
@@ -243,7 +244,11 @@ impl DebugInfo {
                 name
             } else {
                 let dir = match file.directory(&header) {
-                    Some(d) => self.dwarf.attr_string(unit, d)?.to_string_lossy()?.into_owned(),
+                    Some(d) => self
+                        .dwarf
+                        .attr_string(unit, d)?
+                        .to_string_lossy()?
+                        .into_owned(),
                     None => String::new(),
                 };
                 let dir = if dir.starts_with('/') || dir.contains("://") || comp_dir.is_empty() {
@@ -371,7 +376,8 @@ impl DebugInfo {
                                     name: qualified,
                                     die,
                                 });
-                            } else if let Some(spec) = entry.attr_value(gimli::DW_AT_specification) {
+                            } else if let Some(spec) = entry.attr_value(gimli::DW_AT_specification)
+                            {
                                 // C++ out-of-line static member
                                 // definitions: name via specification.
                                 let _ = spec;
@@ -493,7 +499,10 @@ impl DebugInfo {
             AttributeValue::DebugInfoRef(o) => {
                 for (i, u) in self.units.iter().enumerate() {
                     if let Some(off) = o.to_unit_offset(&u.unit.header) {
-                        return Some(DieRef { unit: i, offset: off });
+                        return Some(DieRef {
+                            unit: i,
+                            offset: off,
+                        });
                     }
                 }
                 None
@@ -733,7 +742,11 @@ impl DebugInfo {
     /// `::`-suffix match, or a match ignoring generic arguments.
     pub fn find_functions(&self, query: &str) -> Vec<&Function> {
         if query == "main" {
-            let mains: Vec<_> = self.functions.iter().filter(|f| f.main_subprogram).collect();
+            let mains: Vec<_> = self
+                .functions
+                .iter()
+                .filter(|f| f.main_subprogram)
+                .collect();
             if !mains.is_empty() {
                 return mains;
             }
@@ -1057,7 +1070,9 @@ impl DebugInfo {
     fn build_type(&self, r: DieRef, e: &DebuggingInformationEntry<R>) -> Result<Type> {
         let lang = self.lang(r);
         let name = self.qualified_name(r, e);
-        let size = e.attr_value(gimli::DW_AT_byte_size).and_then(|v| v.udata_value());
+        let size = e
+            .attr_value(gimli::DW_AT_byte_size)
+            .and_then(|v| v.udata_value());
         let addr_size = u64::from(self.address_size(r.unit));
         let kind = match e.tag() {
             gimli::DW_TAG_base_type => {
@@ -1120,10 +1135,7 @@ impl DebugInfo {
                         }
                         gimli::DW_TAG_inheritance => {
                             if let Some(mut m) = self.make_member(cr, &ce)? {
-                                m.name = Some(format!(
-                                    "<{}>",
-                                    self.type_name(m.ty)
-                                ));
+                                m.name = Some(format!("<{}>", self.type_name(m.ty)));
                                 st.members.push(m);
                             }
                         }
@@ -1156,7 +1168,9 @@ impl DebugInfo {
                     if ce.tag() != gimli::DW_TAG_enumerator {
                         continue;
                     }
-                    let n = self.die_string_follow(cr, gimli::DW_AT_name).unwrap_or_default();
+                    let n = self
+                        .die_string_follow(cr, gimli::DW_AT_name)
+                        .unwrap_or_default();
                     let v = ce
                         .attr_value(gimli::DW_AT_const_value)
                         .map(|v| const_to_i128(&v, signed, size))
@@ -1270,7 +1284,9 @@ impl DebugInfo {
             return Ok(None);
         };
         let name = self.die_string_follow(r, gimli::DW_AT_name);
-        let bit_size = e.attr_value(gimli::DW_AT_bit_size).and_then(|v| v.udata_value());
+        let bit_size = e
+            .attr_value(gimli::DW_AT_bit_size)
+            .and_then(|v| v.udata_value());
         let mut bit_offset = match e.attr_value(gimli::DW_AT_data_member_location) {
             Some(AttributeValue::Exprloc(expr)) => {
                 // Typically `DW_OP_plus_uconst N`.
@@ -1291,7 +1307,8 @@ impl DebugInfo {
         {
             bit_offset = dbo;
         } else if let (Some(bo), Some(bs)) = (
-            e.attr_value(gimli::DW_AT_bit_offset).and_then(|v| v.udata_value()),
+            e.attr_value(gimli::DW_AT_bit_offset)
+                .and_then(|v| v.udata_value()),
             bit_size,
         ) {
             // DWARF 2/3 big-endian-style bit offset within a storage unit
@@ -1312,7 +1329,11 @@ impl DebugInfo {
         }))
     }
 
-    fn make_variant_part(&self, r: DieRef, e: &DebuggingInformationEntry<R>) -> Result<VariantPart> {
+    fn make_variant_part(
+        &self,
+        r: DieRef,
+        e: &DebuggingInformationEntry<R>,
+    ) -> Result<VariantPart> {
         let discr_ref = e
             .attr_value(gimli::DW_AT_discr)
             .and_then(|v| self.resolve_ref(r.unit, &v));
@@ -1328,9 +1349,9 @@ impl DebugInfo {
                     }
                 }
                 gimli::DW_TAG_variant => {
-                    let discr_value = ce.attr_value(gimli::DW_AT_discr_value).map(|v| {
-                        const_to_i128(&v, false, None) as u64
-                    });
+                    let discr_value = ce
+                        .attr_value(gimli::DW_AT_discr_value)
+                        .map(|v| const_to_i128(&v, false, None) as u64);
                     let mut members = vec![];
                     for (mr, me) in self.children(cr)? {
                         if me.tag() == gimli::DW_TAG_member {
@@ -1355,7 +1376,8 @@ impl DebugInfo {
         for _ in 0..64 {
             let t = self.ty(id);
             match t.kind {
-                TypeKind::Typedef(Some(next)) | TypeKind::Qualified {
+                TypeKind::Typedef(Some(next))
+                | TypeKind::Qualified {
                     target: Some(next), ..
                 } => id = next,
                 _ => return id,

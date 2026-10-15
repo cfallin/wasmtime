@@ -75,11 +75,7 @@ impl Value {
                 }
             }
         };
-        Value {
-            ty,
-            data,
-            bitfield,
-        }
+        Value { ty, data, bitfield }
     }
 }
 
@@ -129,7 +125,11 @@ impl<'a> Ctx<'a> {
             for (i, b) in bytes.iter().enumerate() {
                 raw |= u128::from(*b) << (8 * i);
             }
-            let mask = if size >= 64 { u64::MAX } else { (1u64 << size) - 1 };
+            let mask = if size >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << size) - 1
+            };
             return Ok(((raw >> off) as u64) & mask);
         }
         let size = self.info.type_size(v.ty).unwrap_or(self.ptr_size()).min(8);
@@ -187,12 +187,8 @@ impl<'a> Ctx<'a> {
                 Ok(Value::from_bytes(ty, bytes))
             }
             Location::WasmLocal(i) => Ok(Value::from_bytes(ty, self.target.local(i)?.to_bytes())),
-            Location::WasmGlobal(i) => {
-                Ok(Value::from_bytes(ty, self.target.global(i)?.to_bytes()))
-            }
-            Location::WasmStack(i) => {
-                Ok(Value::from_bytes(ty, self.target.operand(i)?.to_bytes()))
-            }
+            Location::WasmGlobal(i) => Ok(Value::from_bytes(ty, self.target.global(i)?.to_bytes())),
+            Location::WasmStack(i) => Ok(Value::from_bytes(ty, self.target.operand(i)?.to_bytes())),
             Location::Pieces(pieces) => {
                 let mut bytes = vec![];
                 for p in pieces {
@@ -282,7 +278,11 @@ impl<'a> Ctx<'a> {
         };
         let discr = match &part.discr {
             Some(m) => {
-                let dv = v.sub(m.ty, m.byte_offset(), m.bit_size.map(|s| (m.bit_offset % 8, s)));
+                let dv = v.sub(
+                    m.ty,
+                    m.byte_offset(),
+                    m.bit_size.map(|s| (m.bit_offset % 8, s)),
+                );
                 Some(self.read_uint(&dv)?)
             }
             None => None,
@@ -294,7 +294,11 @@ impl<'a> Ctx<'a> {
                 .as_ref()
                 .and_then(|m| self.info.type_size(m.ty))
                 .unwrap_or(8);
-            let mask = if dsize >= 8 { u64::MAX } else { (1u64 << (dsize * 8)) - 1 };
+            let mask = if dsize >= 8 {
+                u64::MAX
+            } else {
+                (1u64 << (dsize * 8)) - 1
+            };
             chosen = part
                 .variants
                 .iter()
@@ -420,8 +424,7 @@ impl<'a> Ctx<'a> {
                 Ok(v.sub(*elem, i * esize, None))
             }
             TypeKind::Pointer { pointee, .. } => {
-                let pointee =
-                    pointee.ok_or_else(|| anyhow!("cannot index a `void *` pointer"))?;
+                let pointee = pointee.ok_or_else(|| anyhow!("cannot index a `void *` pointer"))?;
                 let esize = self
                     .info
                     .type_size(pointee)
@@ -429,7 +432,10 @@ impl<'a> Ctx<'a> {
                 let addr = self.read_uint(v)?;
                 Ok(Value::in_memory(pointee, addr + i * esize))
             }
-            _ => bail!("cannot index a value of type `{}`", self.info.type_name(v.ty)),
+            _ => bail!(
+                "cannot index a value of type `{}`",
+                self.info.type_name(v.ty)
+            ),
         }
     }
 }

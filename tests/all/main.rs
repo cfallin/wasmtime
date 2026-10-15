@@ -15,6 +15,8 @@ mod cross_engine;
 mod custom_code_memory;
 mod debug;
 mod debug_component;
+#[cfg(feature = "debug-tui")]
+mod debug_tui;
 mod defaults;
 mod engine;
 mod epoch_interruption;

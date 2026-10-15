@@ -413,7 +413,12 @@ impl<'a> Session<'a> {
     }
 
     /// Add a user breakpoint at the given locations.
-    pub fn add_breakpoint(&mut self, spec: String, locs: Vec<(usize, u32)>, temporary: bool) -> Result<u32> {
+    pub fn add_breakpoint(
+        &mut self,
+        spec: String,
+        locs: Vec<(usize, u32)>,
+        temporary: bool,
+    ) -> Result<u32> {
         for &(m, pc) in &locs {
             self.install(m, pc)?;
         }
@@ -643,7 +648,8 @@ impl<'a> Session<'a> {
         let Some(dbg) = &m.info.debug else {
             return false;
         };
-        dbg.line_row(addr).is_some_and(|r| r.addr == addr && r.is_stmt)
+        dbg.line_row(addr)
+            .is_some_and(|r| r.addr == addr && r.is_stmt)
     }
 
     /// Source-level step. If `over` is true, calls (including inlined
