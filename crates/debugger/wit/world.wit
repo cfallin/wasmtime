@@ -109,6 +109,13 @@ interface debuggee {
     /// `continue`.
     reverse-continue: func() -> result<event-future, error>;
 
+    /// Whether this debuggee can run backward (with `reverse-step`
+    /// and `reverse-continue`): whether it is a replay of a recorded
+    /// execution.
+    ///
+    /// Usable in paused or running states.
+    is-reversible: func() -> bool;
+
     /// Get the current exit frames for each activation.
     ///
     /// If invoked while already running, causes a trap.

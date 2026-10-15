@@ -51,6 +51,9 @@ pub struct Debuggee {
     /// Shared flag: set to `true` by `interrupt()` so the inner
     /// handler treats the next epoch yield as an `Interrupted` event.
     pub(crate) interrupt_pending: Arc<AtomicBool>,
+
+    /// Whether the debuggee can run backward (whether it is a replay).
+    pub(crate) reversible: bool,
 }
 
 impl Debuggee {
@@ -286,6 +289,10 @@ impl wit::HostDebuggee for ResourceTable {
     ) -> Result<Resource<EventFuture>> {
         let d = self.get_mut(&debuggee).unwrap().inner.take().unwrap();
         Ok(self.push_child(EventFuture::new_continue(d, resumption), &debuggee)?)
+    }
+
+    async fn is_reversible(&mut self, debuggee: Resource<Debuggee>) -> Result<bool> {
+        Ok(self.get(&debuggee)?.reversible)
     }
 
     async fn reverse_step(

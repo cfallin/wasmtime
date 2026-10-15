@@ -21,11 +21,13 @@ pub fn add_debuggee<T: Send + 'static>(
 ) -> Result<Resource<Debuggee>> {
     let engine = debuggee.engine().clone();
     let interrupt_pending = debuggee.interrupt_pending().clone();
+    let reversible = debuggee.is_reversible();
     let inner: Option<Box<dyn OpaqueDebugger + Send + 'static>> = Some(Box::new(debuggee));
     Ok(table.push(Debuggee {
         inner,
         engine,
         interrupt_pending,
+        reversible,
     })?)
 }
 

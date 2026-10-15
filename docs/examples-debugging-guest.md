@@ -118,6 +118,46 @@ repeated):
 wasmtime run --debug-tui 1234 -Ddebug-fs=$HOME/src/myproject foo.wasm
 ```
 
+### Watchpoints
+
+`watch PATH` stops execution when the guest writes the linear memory
+holding a value, and shows its old and new values; `watch -m ADDR LEN`
+watches a range of memory directly. Only writes to linear memory can be
+watched (not Wasm locals or globals).
+
+```console
+(wasmtime-debug) watch acc->total
+Watchpoint 2: acc->total (memory 0xfff0 length 0x4)
+(wasmtime-debug) continue
+
+Watchpoint 2: acc->total
+
+Old value = 0
+New value = 1
+add (acc=(struct Acc *) 0xfff0, v=1) at foo.c:22
+22	  acc->count++;
+```
+
+### Reverse execution
+
+A recorded execution can be replayed under the debugger, and a replay
+can run backward. Record with `--record`, then debug the replay with
+`wasmtime replay`:
+
+```console
+wasmtime run --record=foo.trace foo.wasm
+wasmtime replay --debug-tui 1234 -Ddebug-fs=$HOME/src/myproject foo.trace
+```
+
+In addition to the usual commands, `reverse-continue` (`rc`),
+`reverse-step` (`rs`), `reverse-next` (`rn`), `reverse-finish`,
+`reverse-stepi` (`rsi`) and `reverse-nexti` (`rni`) run backward, as in
+gdb: back to the previous breakpoint or watchpoint stop, or to the
+beginning of the previous source line or instruction. Running backward
+stops at a watched write *before* it happens. The replay pauses at the end
+of the recording (from where it can still run backward); continuing from
+there completes it.
+
 ### Debug Adapter Protocol (`--debug-dap`)
 
 The same built-in debugger can serve the [Debug Adapter Protocol]
@@ -139,6 +179,10 @@ configuration with `"debugServer": 1234`). The server presents:
   payloads, Wasm GC objects);
 - source, function, and instruction breakpoints; stepping by line or by
   Wasm instruction (`granularity: "instruction"`);
+- data breakpoints (watchpoints) on values in linear memory, which stop
+  on writes;
+- when debugging a replay (`wasmtime replay --debug-dap ...`), stepping
+  back (`stepBack`) and reverse continuing (`reverseContinue`);
 - watch/hover evaluation of access paths, `readMemory` on linear memory,
   and `disassemble`.
 

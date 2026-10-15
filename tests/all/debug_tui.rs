@@ -65,9 +65,19 @@ impl Tui {
     }
 
     fn spawn_raw(wasm: &str, extra_args: &[String]) -> Result<Tui> {
+        Tui::spawn_subcommand("run", wasm, extra_args)
+    }
+
+    /// Spawn a debugger on a replay of the recorded execution `trace`.
+    fn spawn_replay(trace: &str) -> Result<Tui> {
+        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/crates/test-programs/src/bin");
+        Tui::spawn_subcommand("replay", trace, &[format!("-Ddebug-fs={src}")])
+    }
+
+    fn spawn_subcommand(subcommand: &str, wasm: &str, extra_args: &[String]) -> Result<Tui> {
         let port = free_port();
         let mut cmd = Command::new(wasmtime_binary());
-        cmd.arg("run")
+        cmd.arg(subcommand)
             .arg("-Ccache=n")
             .arg(format!("--debug-tui={port}"))
             .args(extra_args)
@@ -210,6 +220,24 @@ pub(crate) fn check_output(output: &str, directives: &str) -> Result<()> {
         check.1
     );
     Ok(())
+}
+
+/// Record an execution of `wasm` with `wasmtime run --record`, returning
+/// the directory holding the trace (to keep it alive) and the trace's
+/// path.
+pub(crate) fn record(wasm: &str) -> Result<(tempfile::TempDir, String)> {
+    let dir = tempfile::tempdir()?;
+    let trace = dir.path().join("trace").to_str().unwrap().to_string();
+    let output = Command::new(wasmtime_binary())
+        .args(["run", "-Ccache=n", &format!("--record={trace}"), wasm])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "recording failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok((dir, trace))
 }
 
 pub(crate) fn wat_file(text: &str) -> Result<tempfile::NamedTempFile> {
@@ -673,6 +701,287 @@ check: The program is not being run.
     // The trap is still reported, and reflected in the exit status,
     // once the debugger detaches.
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_watchpoints() -> Result<()> {
+    let mut tui = Tui::spawn(DEBUG_TUI_C_HISTORY, &[])?;
+    tui.script(
+        r#"
+        b add
+        c
+        watch counter
+        watch acc->total
+        watch %local0
+        watch -m &acc->count 4
+        info breakpoints
+        c
+        c
+        c
+        delete 2 3
+        c
+        c
+        p acc->count
+        delete
+        info breakpoints
+        "#,
+    )?;
+    let (transcript, stdout) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, add (acc=
+sameln: v=1)
+check: (wasmtime-debug) watch counter
+check: Watchpoint 2: counter (memory
+sameln: length 0x4)
+check: (wasmtime-debug) watch acc->total
+check: Watchpoint 3: acc->total (memory
+check: (wasmtime-debug) watch %local0
+check: Only values in linear memory can be watched; `%local0` is in local 0.
+check: (wasmtime-debug) watch -m &acc->count 4
+check: Watchpoint 4: memory
+sameln: length 0x4
+check: (wasmtime-debug) info breakpoints
+check: 1    breakpoint    1     add
+check: 2    watchpoint    0     counter
+check: 3    watchpoint    0     acc->total
+check: 4    watchpoint    0     -m
+check: (wasmtime-debug) c
+check: Watchpoint 3: acc->total
+check: Old value = 0
+check: New value = 1
+check: add (acc=
+check: 22	  acc->count++;
+check: (wasmtime-debug) c
+check: Watchpoint 4: -m
+check: Old value = 0 (0x0)
+check: New value = 1 (0x1)
+check: 23	  counter++;
+check: (wasmtime-debug) c
+check: Watchpoint 2: counter
+check: Old value = 0
+check: New value = 1
+check: 24	}
+check: (wasmtime-debug) delete 2 3
+check: (wasmtime-debug) c
+check: Breakpoint 1, add (acc=
+sameln: v=4)
+check: (wasmtime-debug) c
+check: Watchpoint 4:
+check: Old value = 1 (0x1)
+check: New value = 2 (0x2)
+check: (wasmtime-debug) p acc->count
+check: = 2
+check: (wasmtime-debug) info breakpoints
+check: No breakpoints or watchpoints.
+"#,
+    )?;
+    assert!(stdout.contains("total = 30 count = 4 counter = 4"));
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_reverse_requires_replay() -> Result<()> {
+    let mut tui = Tui::spawn(DEBUG_TUI_C_HISTORY, &[])?;
+    tui.script(
+        r#"
+        start
+        reverse-continue
+        rn
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: (wasmtime-debug) reverse-continue
+check: Reverse execution requires a recorded execution
+check: (wasmtime-debug) rn
+check: Reverse execution requires a recorded execution
+"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_reverse_execution() -> Result<()> {
+    let (_dir, trace) = record(DEBUG_TUI_C_HISTORY)?;
+    let mut tui = Tui::spawn_replay(&trace)?;
+    tui.script(
+        r#"
+        rc
+        b debug_tui_c_history.c:29
+        c
+        c
+        p i
+        rs
+        rs
+        bt
+        rs
+        rs
+        rs
+        rs
+        rs
+        rs
+        rs
+        rn
+        rn
+        p i
+        c
+        n
+        n
+        rn
+        rn
+        rni
+        rsi
+        rsi
+        b square
+        c
+        c
+        bt
+        reverse-finish
+        bt
+        delete
+        watch acc.total
+        c
+        rc
+        rc
+        rc
+        delete
+        c
+        rc
+        start
+        p acc
+        c
+        c
+        "#,
+    )?;
+    let (transcript, stdout) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: (wasmtime-debug) rc
+check: No more reverse-execution history: at the beginning of the recording.
+check: Breakpoint 1, main () at debug_tui_c_history.c:29
+check: Breakpoint 1, main () at debug_tui_c_history.c:29
+check: (wasmtime-debug) p i
+check: = 2
+
+From line 29 of the second iteration, back through the `for` and into
+the call of `add` made by the first iteration's line 30.
+check: (wasmtime-debug) rs
+check: 28	  for (int i = 1; i <= 4; i++) {
+check: (wasmtime-debug) rs
+check: add (acc=
+sameln: v=1) at debug_tui_c_history.c:24
+check: 24	}
+check: (wasmtime-debug) bt
+check: #0
+sameln: in add
+check: #1
+sameln: in main () at debug_tui_c_history.c:30
+check: (wasmtime-debug) rs
+check: 23	  counter++;
+check: (wasmtime-debug) rs
+check: 22	  acc->count++;
+check: (wasmtime-debug) rs
+check: 21	  acc->total += v;
+
+Back out of `add` (past its prologue) to its call, at the call
+instruction; then to the beginning of that line, into `square`, and
+back out of it.
+check: (wasmtime-debug) rs
+check: main () at debug_tui_c_history.c:30
+check: 30	    add(&acc, sq);
+check: (wasmtime-debug) rs
+check: 30	    add(&acc, sq);
+check: (wasmtime-debug) rs
+check: square (x=1) at debug_tui_c_history.c:17
+check: 17	  return r;
+check: (wasmtime-debug) rs
+check: 16	  int r = x * x;
+check: (wasmtime-debug) rn
+check: main () at debug_tui_c_history.c:29
+check: (wasmtime-debug) rn
+check: 29	    int sq = square(i);
+check: (wasmtime-debug) p i
+check: = 1
+
+Forward again, then back over calls.
+check: (wasmtime-debug) c
+check: Breakpoint 1, main () at debug_tui_c_history.c:29
+check: (wasmtime-debug) n
+check: 30	    add(&acc, sq);
+check: (wasmtime-debug) n
+check: 28	  for (int i = 1; i <= 4; i++) {
+check: (wasmtime-debug) rn
+check: 30	    add(&acc, sq);
+check: (wasmtime-debug) rn
+check: 29	    int sq = square(i);
+check: (wasmtime-debug) rni
+check: => 
+check: (wasmtime-debug) rsi
+check: => 
+check: (wasmtime-debug) rsi
+check: => 
+
+Back to the call of `square`.
+check: (wasmtime-debug) b square
+check: Breakpoint 2 at
+check: Breakpoint 1, main ()
+check: Breakpoint 2, square (x=2)
+check: (wasmtime-debug) reverse-finish
+check: Run back to call of #0  square (x=
+check: main () at debug_tui_c_history.c:29
+check: 29	    int sq = square(i);
+check: (wasmtime-debug) bt
+check: #0
+sameln: in main ()
+check: #1
+sameln: in _start
+
+Watchpoints, forward and backward.
+check: (wasmtime-debug) watch acc.total
+check: Watchpoint 3: acc.total
+check: (wasmtime-debug) c
+check: Watchpoint 3: acc.total
+check: Old value = 1
+check: New value = 5
+check: (wasmtime-debug) rc
+check: Watchpoint 3: acc.total (running backward: stopped before the write)
+check: Value before = 1
+check: Value after = 5
+check: 21	  acc->total += v;
+check: (wasmtime-debug) rc
+check: Watchpoint 3: acc.total (running backward: stopped before the write)
+check: Value before = 0
+check: Value after = 1
+check: (wasmtime-debug) rc
+check: Watchpoint 3: acc.total (running backward: stopped before the write)
+check: Value before = 0
+check: Value after = 0
+check: 27	  struct Acc acc = {0, 0};
+
+To the end of the recording, back to the beginning, and through again.
+check: (wasmtime-debug) c
+check: No more execution history: at the end of the recording; continuing will complete it.
+check: (wasmtime-debug) rc
+check: No more reverse-execution history: at the beginning of the recording.
+check: (wasmtime-debug) start
+check: Temporary breakpoint 4, main ()
+check: (wasmtime-debug) p acc
+check: (wasmtime-debug) c
+check: No more execution history
+check: (wasmtime-debug) c
+check: [Program exited]
+"#,
+    )?;
+    assert!(stdout.contains("total = 30 count = 4 counter = 4"));
     Ok(())
 }
 
@@ -1228,3 +1537,8 @@ fn debug_tui_cpp() {}
     reason = "test-program names checked by `assert_test_exists`"
 )]
 fn debug_tui_c_opt() {}
+#[expect(
+    dead_code,
+    reason = "test-program names checked by `assert_test_exists`"
+)]
+fn debug_tui_c_history() {}

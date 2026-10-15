@@ -11,7 +11,7 @@
 //! them with
 //! `cargo test --features debug-dap-tui --test all -- --ignored debug_dap::`.
 
-use super::debug_tui::{GC_WAT, check_output, free_port, wasmtime_binary, wat_file};
+use super::debug_tui::{GC_WAT, check_output, free_port, record, wasmtime_binary, wat_file};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
@@ -34,14 +34,25 @@ struct Dap {
     client: Client,
     /// Console `output` events received so far.
     console: String,
+    /// The server's capabilities.
+    caps: Value,
 }
 
 impl Dap {
     fn spawn(wasm: &str, extra_args: &[&str]) -> Result<Dap> {
+        Dap::spawn_subcommand("run", wasm, extra_args)
+    }
+
+    /// Debug a replay of the recorded execution `trace`.
+    fn spawn_replay(trace: &str) -> Result<Dap> {
+        Dap::spawn_subcommand("replay", trace, &[])
+    }
+
+    fn spawn_subcommand(subcommand: &str, wasm: &str, extra_args: &[&str]) -> Result<Dap> {
         let src = concat!(env!("CARGO_MANIFEST_DIR"), "/crates/test-programs/src/bin");
         let port = free_port();
         let mut cmd = Command::new(wasmtime_binary());
-        cmd.arg("run")
+        cmd.arg(subcommand)
             .arg("-Ccache=n")
             .arg(format!("--debug-dap={port}"))
             .arg(format!("-Ddebug-fs={src}"))
@@ -86,6 +97,7 @@ impl Dap {
             child,
             client,
             console: String::new(),
+            caps,
         };
         let stopped = dap.wait_stop()?;
         assert_eq!(stopped.0, "stopped");
@@ -795,5 +807,214 @@ fn debug_dap_source_request() -> DapResult<()> {
     let modules = dap.req("modules", json!({}))?;
     assert_eq!(modules["modules"][0]["symbolStatus"], "Symbols loaded");
     dap.finish()?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_dap_data_breakpoints() -> DapResult<()> {
+    let mut dap = Dap::spawn(DEBUG_TUI_C_HISTORY, &[])?;
+    assert_eq!(dap.caps["supportsDataBreakpoints"], true);
+    assert_eq!(dap.caps["supportsStepBack"], false);
+    dap.req(
+        "setFunctionBreakpoints",
+        json!({ "breakpoints": [{ "name": "add" }] }),
+    )?;
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["reason"], "breakpoint");
+
+    // A member of a variable, by its parent's `variablesReference`.
+    let args = dap.scope_vars(1, "Arguments")?;
+    let acc = var(&args, "acc").variables_reference;
+    let fields = dap.vars(acc)?;
+    assert_eq!(names(&fields), ["total", "count"]);
+    let total = dap.req(
+        "dataBreakpointInfo",
+        json!({ "variablesReference": acc, "name": "total" }),
+    )?;
+    assert_eq!(total["description"], "acc->total");
+    assert_eq!(total["accessTypes"], json!(["write"]));
+    // An expression.
+    let counter = dap.req(
+        "dataBreakpointInfo",
+        json!({ "name": "counter", "frameId": 1 }),
+    )?;
+    assert_eq!(counter["description"], "counter");
+    // An address range.
+    let count_addr = var(&fields, "count").memory_reference.clone().unwrap();
+    let count = dap.req(
+        "dataBreakpointInfo",
+        json!({ "name": count_addr, "asAddress": true, "bytes": 4 }),
+    )?;
+    assert!(count["dataId"].is_string());
+    // Values outside linear memory cannot be watched.
+    let scopes = dap.scopes(1)?;
+    let wasm_locals = scopes
+        .iter()
+        .find(|s| s.name == "Wasm Locals")
+        .unwrap()
+        .variables_reference;
+    let local = dap.req(
+        "dataBreakpointInfo",
+        json!({ "variablesReference": wasm_locals, "name": "local 0" }),
+    )?;
+    assert!(local["dataId"].is_null());
+    assert!(
+        local["description"]
+            .as_str()
+            .unwrap()
+            .contains("Only values in linear memory can be watched")
+    );
+
+    // Watch `acc->total` and `counter`.
+    let body = dap.req(
+        "setDataBreakpoints",
+        json!({ "breakpoints": [
+            { "dataId": total["dataId"], "accessType": "write" },
+            { "dataId": counter["dataId"] },
+            { "dataId": count["dataId"], "accessType": "read" },
+        ] }),
+    )?;
+    let bps = breakpoints(&body);
+    assert!(bps[0].verified && bps[1].verified && !bps[2].verified);
+    let (total_id, counter_id) = (bps[0].id.unwrap(), bps[1].id.unwrap());
+    dap.req("setFunctionBreakpoints", json!({ "breakpoints": [] }))?;
+
+    dap.console.clear();
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["reason"], "data breakpoint");
+    assert_eq!(body["hitBreakpointIds"], json!([total_id]));
+    check_output(
+        &dap.console,
+        r#"
+check: Watchpoint
+sameln: acc->total
+check: Old value = 0
+check: New value = 1
+"#,
+    )?;
+    // Stopped after the write.
+    assert_eq!(dap.frames()?[0].line, 22);
+    assert_eq!(dap.eval("acc->total", 1)?["result"], "1");
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["hitBreakpointIds"], json!([counter_id]));
+    assert_eq!(dap.eval("counter", 1)?["result"], "1");
+
+    // Replacing the data breakpoints removes the old ones.
+    dap.req(
+        "setDataBreakpoints",
+        json!({ "breakpoints": [{ "dataId": total["dataId"] }] }),
+    )?;
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["reason"], "data breakpoint");
+    assert_eq!(dap.eval("acc->total", 1)?["result"], "5");
+    // `watch` also works in the debug console.
+    let out = dap.repl("info breakpoints", 1)?;
+    assert!(out.contains("watchpoint"), "{out}");
+
+    // This is not a replay, so it cannot run backward.
+    assert!(
+        dap.req("stepBack", json!({ "threadId": 1 }))
+            .unwrap_err()
+            .to_string()
+            .contains("requires a recorded execution")
+    );
+    dap.req("setDataBreakpoints", json!({ "breakpoints": [] }))?;
+    let (ev, _) = dap.resume("continue", None)?;
+    assert_eq!(ev, "terminated");
+    let stdout = dap.finish()?;
+    assert!(stdout.contains("total = 30 count = 4 counter = 4"));
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_dap_reverse_execution() -> DapResult<()> {
+    let (_dir, trace) = record(DEBUG_TUI_C_HISTORY)?;
+    let mut dap = Dap::spawn_replay(&trace)?;
+    assert_eq!(dap.caps["supportsStepBack"], true);
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/crates/test-programs/src/bin/debug_tui_c_history.c"
+    );
+    let bps = breakpoints(&dap.req(
+        "setBreakpoints",
+        json!({ "source": { "path": path }, "breakpoints": [{ "line": 29 }] }),
+    )?);
+    let bp = bps[0].id.unwrap();
+    dap.resume("continue", None)?;
+    dap.resume("continue", None)?;
+    assert_eq!(dap.eval("i", 1)?["result"], "2");
+
+    // Step back over lines and instructions.
+    let (_, body) = dap.resume("stepBack", None)?;
+    assert_eq!(body["reason"], "step");
+    assert_eq!(dap.frames()?[0].line, 28);
+    let (_, body) = dap.resume("stepBack", None)?;
+    assert_eq!(body["reason"], "step");
+    let frames = dap.frames()?;
+    assert_eq!(frames[0].line, 30);
+    assert!(frames[0].name.starts_with("main"));
+    let before = dap.frames()?[0].instruction_pointer_reference.clone();
+    dap.resume("stepBack", Some("instruction"))?;
+    assert_ne!(dap.frames()?[0].instruction_pointer_reference, before);
+
+    // Back to the previous breakpoint hit.
+    let (_, body) = dap.resume("reverseContinue", None)?;
+    assert_eq!(body["reason"], "breakpoint");
+    assert_eq!(body["hitBreakpointIds"], json!([bp]));
+    assert_eq!(dap.eval("i", 1)?["result"], "1");
+
+    // Reverse commands in the debug console.
+    dap.req(
+        "evaluate",
+        json!({ "expression": "reverse-step", "frameId": 1, "context": "repl" }),
+    )?;
+    dap.wait_stop()?;
+    assert_eq!(dap.frames()?[0].line, 28);
+
+    // Data breakpoints, forward and backward.
+    let total = dap.req(
+        "dataBreakpointInfo",
+        json!({ "name": "acc.total", "frameId": 1 }),
+    )?;
+    let body = dap.req(
+        "setDataBreakpoints",
+        json!({ "breakpoints": [{ "dataId": total["dataId"] }] }),
+    )?;
+    let watch = breakpoints(&body)[0].id.unwrap();
+    dap.req(
+        "setBreakpoints",
+        json!({ "source": { "path": path }, "breakpoints": [] }),
+    )?;
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["reason"], "data breakpoint");
+    assert!(dap.frames()?[0].name.starts_with("add ("));
+    dap.console.clear();
+    let (_, body) = dap.resume("reverseContinue", None)?;
+    assert_eq!(body["reason"], "data breakpoint");
+    assert_eq!(body["hitBreakpointIds"], json!([watch]));
+    check_output(
+        &dap.console,
+        r#"
+check: acc.total (running backward: stopped before the write)
+check: Value before = 0
+check: Value after = 1
+"#,
+    )?;
+    assert_eq!(dap.frames()?[0].line, 21);
+
+    // To the beginning of the recording.
+    dap.req("setDataBreakpoints", json!({ "breakpoints": [] }))?;
+    let (_, body) = dap.resume("reverseContinue", None)?;
+    assert_eq!(body["reason"], "beginning of recording");
+    assert!(dap.frames()?.is_empty());
+    // And to its end, after which the program completes.
+    let (_, body) = dap.resume("continue", None)?;
+    assert_eq!(body["reason"], "end of recording");
+    let (ev, _) = dap.resume("continue", None)?;
+    assert_eq!(ev, "terminated");
+    let stdout = dap.finish()?;
+    assert!(stdout.contains("total = 30 count = 4 counter = 4"));
     Ok(())
 }

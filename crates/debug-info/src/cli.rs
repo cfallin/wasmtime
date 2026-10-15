@@ -19,13 +19,29 @@ Execution:
   stepi (si)               Step one Wasm instruction.
   nexti (ni)               Step one Wasm instruction, stepping over calls.
   interrupt, Ctrl-C        Stop a running program.
+Reverse execution (when debugging a replay: `wasmtime replay`):
+  reverse-continue (rc)    Run backward to the previous breakpoint or
+                           watchpoint stop.
+  reverse-step (rs)        Run backward to the beginning of the previous line,
+                           entering calls.
+  reverse-next (rn)        Run backward to the beginning of the previous line,
+                           stepping over calls.
+  reverse-finish           Run backward to the call of the selected frame.
+  reverse-stepi (rsi)      Step backward one Wasm instruction.
+  reverse-nexti (rni)      Step backward one Wasm instruction, over calls.
 Breakpoints:
   break (b) LOC            Set a breakpoint. LOC is FILE:LINE, LINE, FUNCTION,
                            *PC (module offset in the current module), or
                            *MODULE:PC.
   tbreak LOC               Set a temporary (one-shot) breakpoint.
-  delete (d) [N...]        Delete breakpoints (all if none given).
-  info breakpoints         List breakpoints.
+  watch PATH               Set a watchpoint: stop when the guest writes the
+                           memory holding PATH's value (e.g. `watch p->x`).
+                           The memory is fixed when the watchpoint is set (as
+                           with gdb's `watch -location`).
+  watch -m ADDR LEN        Watch LEN bytes of linear memory at ADDR.
+  delete (d) [N...]        Delete breakpoints and watchpoints (all if none
+                           given).
+  info breakpoints         List breakpoints and watchpoints.
 Stack:
   backtrace (bt)           Show the call stack (including inlined frames).
   frame (f) [N]            Select / show a frame.
@@ -69,6 +85,23 @@ Other:
   help                     Show this help.
   quit (q), detach         Detach (the program runs to completion).
 ";
+
+/// Format the raw contents of a watched memory range: as an integer
+/// for 1, 2, 4 or 8 bytes, otherwise as bytes.
+pub fn format_watched_bytes(bytes: &[u8]) -> String {
+    match bytes.len() {
+        1 | 2 | 4 | 8 => {
+            let mut b = [0u8; 8];
+            b[..bytes.len()].copy_from_slice(bytes);
+            let v = u64::from_le_bytes(b);
+            format!("{v} ({v:#x})")
+        }
+        _ => {
+            let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            format!("[{}]", hex.join(" "))
+        }
+    }
+}
 
 /// The final path component of a file path.
 pub fn basename(p: &str) -> &str {

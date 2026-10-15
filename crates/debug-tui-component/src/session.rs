@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use wasmtime_debug_info::dwarf::{ScopeFrame, SourceLoc};
 use wasmtime_debug_info::module::InstrKind;
+use wasmtime_debug_info::types::TypeId;
 use wasmtime_debug_info::value::Value;
 use wasmtime_debug_info::{ModuleInfo, Target, WasmVal};
 
@@ -61,6 +62,35 @@ pub struct UserBp {
     pub hits: u32,
 }
 
+/// A user watchpoint: guest writes to `len` bytes at `addr` in memory 0
+/// of instance `inst` stop execution.
+pub struct UserWatch {
+    pub id: u32,
+    /// What the user asked to watch (an expression, or an address
+    /// range).
+    pub spec: String,
+    pub inst: usize,
+    /// The watched memory's `unique-id`.
+    pub memory_id: u64,
+    pub addr: u64,
+    pub len: u64,
+    /// The watched value's type (with the module whose debug info
+    /// defines it), for showing old and new values.
+    pub ty: Option<(usize, TypeId)>,
+    pub hits: u32,
+}
+
+/// A watchpoint stop: which watchpoints a write hit, with their
+/// contents before and after the write.
+pub struct WatchReport {
+    pub ids: Vec<u32>,
+    pub old: Vec<Option<Vec<u8>>>,
+    pub new: Vec<Option<Vec<u8>>>,
+    /// Whether the stop was reached running backward, in which case
+    /// execution is stopped *before* the write.
+    pub reverse: bool,
+}
+
 /// An entry in the value history.
 pub enum HistEntry {
     /// A source-level value (snapshot), with the module whose debug info
@@ -89,6 +119,20 @@ pub enum StopReason {
     Trap,
     Exception,
     Finished,
+    Watchpoint(WatchReport),
+    /// Reverse execution reached the beginning of a replay.
+    ReplayBegin,
+    /// Forward execution reached the end of a replay.
+    ReplayEnd,
+}
+
+/// How to resume execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Motion {
+    Continue,
+    Step,
+    ReverseContinue,
+    ReverseStep,
 }
 
 /// The outcome of a resumption.
@@ -108,6 +152,7 @@ pub struct Session<'a> {
     pub instances: Vec<InstEntry>,
     inst_by_id: HashMap<u64, usize>,
     pub breakpoints: Vec<UserBp>,
+    pub watchpoints: Vec<UserWatch>,
     next_bp: u32,
     installed: HashMap<(usize, u32), u32>,
     pub phys: Vec<PhysFrame>,
@@ -120,7 +165,16 @@ pub struct Session<'a> {
     pub source_cache: HashMap<String, Option<Vec<String>>>,
     /// Set when the user disconnects mid-run.
     pub detached: bool,
+    /// Whether the debuggee can run backward (it is a replay).
+    pub reversible: bool,
+    /// The watchpoint stop being reported by the current event.
+    pending_watch: Option<WatchReport>,
 }
+
+/// The error for reverse execution of a debuggee that is not a replay.
+pub const NOT_REVERSIBLE: &str = "Reverse execution requires a recorded execution: record one with \
+     `wasmtime run --record=TRACE ...`, then debug its replay with \
+     `wasmtime replay --debug-tui=PORT TRACE` (or `--debug-dap`).";
 
 /// Convert a Wasm value resource into a scalar.
 pub fn to_wasm_val(v: &api::WasmValue) -> Result<WasmVal> {
@@ -256,6 +310,7 @@ impl<'a> Session<'a> {
             instances: vec![],
             inst_by_id: HashMap::new(),
             breakpoints: vec![],
+            watchpoints: vec![],
             next_bp: 1,
             installed: HashMap::new(),
             phys: vec![],
@@ -266,6 +321,8 @@ impl<'a> Session<'a> {
             list_pos: None,
             source_cache: HashMap::new(),
             detached: false,
+            reversible: d.is_reversible(),
+            pending_watch: None,
         }
     }
 
@@ -467,6 +524,10 @@ impl<'a> Session<'a> {
     }
 
     pub fn delete_breakpoint(&mut self, id: u32) -> bool {
+        if let Some(i) = self.watchpoints.iter().position(|w| w.id == id) {
+            self.remove_watch(i);
+            return true;
+        }
         let Some(i) = self.breakpoints.iter().position(|b| b.id == id) else {
             return false;
         };
@@ -475,6 +536,67 @@ impl<'a> Session<'a> {
             self.uninstall(m, pc);
         }
         true
+    }
+
+    /// Add a watchpoint on `len` bytes at `addr` in memory 0 of instance
+    /// `inst`.
+    pub fn add_watchpoint(
+        &mut self,
+        spec: String,
+        inst: usize,
+        addr: u64,
+        len: u64,
+        ty: Option<(usize, TypeId)>,
+    ) -> Result<u32> {
+        if len == 0 {
+            bail!("Cannot watch zero bytes.");
+        }
+        let mem = self.instances[inst]
+            .handle
+            .get_memory(self.d, 0)
+            .map_err(|_| anyhow!("The instance has no linear memory."))?;
+        mem.add_watchpoint(self.d, addr, len).map_err(|e| match e {
+            api::Error::OutOfBounds => {
+                anyhow!("Cannot watch {len} bytes at {addr:#x}: beyond the end of linear memory.")
+            }
+            api::Error::UnsupportedType => anyhow!("Shared memories cannot be watched."),
+            e => anyhow!("Cannot watch {addr:#x}: {e:?}"),
+        })?;
+        let id = self.next_bp;
+        self.next_bp += 1;
+        self.watchpoints.push(UserWatch {
+            id,
+            spec,
+            inst,
+            memory_id: mem.unique_id(),
+            addr,
+            len,
+            ty,
+            hits: 0,
+        });
+        Ok(id)
+    }
+
+    /// Remove watchpoint `i`. The debuggee watches bytes, not ranges, so
+    /// re-watch the bytes of any remaining overlapping watchpoints.
+    fn remove_watch(&mut self, i: usize) {
+        let w = self.watchpoints.remove(i);
+        let Ok(mem) = self.instances[w.inst].handle.get_memory(self.d, 0) else {
+            return;
+        };
+        let _ = mem.remove_watchpoint(self.d, w.addr, w.len);
+        for o in &self.watchpoints {
+            if o.memory_id == w.memory_id && o.addr < w.addr + w.len && w.addr < o.addr + o.len {
+                let _ = mem.add_watchpoint(self.d, o.addr, o.len);
+            }
+        }
+    }
+
+    /// The current contents of watchpoint `i`'s bytes.
+    fn watch_contents(&self, i: usize) -> Option<Vec<u8>> {
+        let w = &self.watchpoints[i];
+        let mem = self.instances[w.inst].handle.get_memory(self.d, 0).ok()?;
+        mem.get_bytes(self.d, w.addr, w.len).ok()
     }
 
     /// The user breakpoint at the current top-of-stack location, if any.
@@ -489,15 +611,75 @@ impl<'a> Session<'a> {
     // -----------------------------------------------------------------
     // Execution control.
 
-    /// Resume (continue or single-step) and wait for the next event.
-    /// While continuing, user input is watched for interrupt requests.
-    async fn resume(&mut self, step: bool) -> Result<api::Event> {
-        let mut r = if step {
-            api::Resumption::single_step(self.d)
-        } else {
-            api::Resumption::continue_(self.d)
+    /// Resume and wait for the next event. A watchpoint event is recorded
+    /// in `pending_watch` with the watched values before and after the
+    /// write; running forward, the write is first stepped over, so that
+    /// the stop is after it (as in gdb).
+    async fn resume(&mut self, m: Motion) -> Result<api::Event> {
+        let ev = self.resume_raw(m).await?;
+        let api::Event::Watchpoint(hit) = &ev else {
+            return Ok(ev);
         };
-        if step {
+        let mem_id = hit.memory.unique_id();
+        let (start, end) = (hit.address, hit.address.saturating_add(hit.len));
+        let hits: Vec<usize> = (0..self.watchpoints.len())
+            .filter(|&i| {
+                let w = &self.watchpoints[i];
+                w.memory_id == mem_id && w.addr < end && start < w.addr + w.len
+            })
+            .collect();
+        let old: Vec<_> = hits.iter().map(|&i| self.watch_contents(i)).collect();
+        let reverse = matches!(m, Motion::ReverseContinue | Motion::ReverseStep);
+        let new = if reverse {
+            // Stopped before the write: apply the bytes being stored.
+            hits.iter()
+                .zip(&old)
+                .map(|(&i, old)| {
+                    let w = &self.watchpoints[i];
+                    let mut bytes = old.clone()?;
+                    let value = hit.value.as_ref()?;
+                    for (k, b) in value.iter().enumerate() {
+                        let a = hit.address + k as u64;
+                        if a >= w.addr && a < w.addr + w.len {
+                            bytes[(a - w.addr) as usize] = *b;
+                        }
+                    }
+                    Some(bytes)
+                })
+                .collect()
+        } else {
+            let after = self.resume_raw(Motion::Step).await?;
+            if !matches!(after, api::Event::Breakpoint) {
+                return Ok(after);
+            }
+            hits.iter().map(|&i| self.watch_contents(i)).collect()
+        };
+        for &i in &hits {
+            self.watchpoints[i].hits += 1;
+        }
+        self.pending_watch = Some(WatchReport {
+            ids: hits.iter().map(|&i| self.watchpoints[i].id).collect(),
+            old,
+            new,
+            reverse,
+        });
+        Ok(ev)
+    }
+
+    /// Resume and wait for the next event. While continuing, user input
+    /// is watched for interrupt requests.
+    async fn resume_raw(&mut self, m: Motion) -> Result<api::Event> {
+        let mut r = match m {
+            Motion::Continue => api::Resumption::continue_(self.d),
+            Motion::Step => api::Resumption::single_step(self.d),
+            Motion::ReverseContinue | Motion::ReverseStep => {
+                api::Resumption::reverse(self.d, m == Motion::ReverseStep).map_err(|e| match e {
+                    api::Error::NotReversible => anyhow!("{NOT_REVERSIBLE}"),
+                    e => anyhow!("Cannot run backward: {e:?}"),
+                })?
+            }
+        };
+        if m == Motion::Step || m == Motion::ReverseStep {
             r.wait().await;
             return r.result(self.d).map_err(api_err);
         }
@@ -552,6 +734,9 @@ impl<'a> Session<'a> {
         }
         self.installed.clear();
         self.breakpoints.clear();
+        while !self.watchpoints.is_empty() {
+            self.remove_watch(0);
+        }
     }
 
     /// Classify an event and update state.
@@ -579,10 +764,32 @@ impl<'a> Session<'a> {
                 Some(Outcome::Stopped(StopReason::Exception))
             }
             api::Event::InjectedCallReturn(_) => None,
-            api::Event::Watchpoint(_) | api::Event::ReplayBegin | api::Event::ReplayEnd => {
+            api::Event::Watchpoint(_) => {
                 self.state = RunState::Stopped;
                 self.refresh_stack();
-                Some(Outcome::Stopped(StopReason::Interrupted))
+                let report = self.pending_watch.take().unwrap_or(WatchReport {
+                    ids: vec![],
+                    old: vec![],
+                    new: vec![],
+                    reverse: false,
+                });
+                Some(Outcome::Stopped(StopReason::Watchpoint(report)))
+            }
+            api::Event::ReplayBegin => {
+                self.refresh_stack();
+                // Before any Wasm has run, as if the program had not
+                // started.
+                self.state = if self.phys.is_empty() {
+                    RunState::NotStarted
+                } else {
+                    RunState::Stopped
+                };
+                Some(Outcome::Stopped(StopReason::ReplayBegin))
+            }
+            api::Event::ReplayEnd => {
+                self.state = RunState::Stopped;
+                self.refresh_stack();
+                Some(Outcome::Stopped(StopReason::ReplayEnd))
             }
             api::Event::Breakpoint => {
                 self.state = RunState::Stopped;
@@ -603,7 +810,7 @@ impl<'a> Session<'a> {
     pub async fn cont(&mut self) -> Result<Outcome> {
         self.require_running()?;
         loop {
-            let ev = self.resume(false).await?;
+            let ev = self.resume(Motion::Continue).await?;
             if let Some(o) = self.on_event(&ev) {
                 return Ok(o);
             }
@@ -621,7 +828,7 @@ impl<'a> Session<'a> {
     /// Single-step one Wasm instruction.
     pub async fn stepi(&mut self) -> Result<Outcome> {
         self.require_running()?;
-        let ev = self.resume(true).await?;
+        let ev = self.resume(Motion::Step).await?;
         if let Some(o) = self.on_event(&ev) {
             return Ok(o);
         }
@@ -634,7 +841,7 @@ impl<'a> Session<'a> {
     async fn run_to(&mut self, module: usize, pc: u32, depth: usize) -> Result<Option<Outcome>> {
         self.install(module, pc)?;
         let result = loop {
-            let ev = match self.resume(false).await {
+            let ev = match self.resume(Motion::Continue).await {
                 Ok(ev) => ev,
                 Err(e) => break Err(e),
             };
@@ -720,7 +927,7 @@ impl<'a> Session<'a> {
             if steps > 1_000_000 {
                 return Ok(Outcome::Stopped(StopReason::Step));
             }
-            let ev = self.resume(true).await?;
+            let ev = self.resume(Motion::Step).await?;
             if let Some(o) = self.on_event(&ev) {
                 return Ok(o);
             }
@@ -805,7 +1012,7 @@ impl<'a> Session<'a> {
         }
 
         let result = loop {
-            let ev = match self.resume(false).await {
+            let ev = match self.resume(Motion::Continue).await {
                 Ok(ev) => ev,
                 Err(e) => break Err(e),
             };
@@ -900,7 +1107,7 @@ impl<'a> Session<'a> {
             let target_logical = self.vframes.len() - self.selected - 1;
             let start_phys = self.phys.len();
             loop {
-                let ev = self.resume(true).await?;
+                let ev = self.resume(Motion::Step).await?;
                 if let Some(o) = self.on_event(&ev) {
                     return Ok(o);
                 }
@@ -920,6 +1127,301 @@ impl<'a> Session<'a> {
             bail!("\"finish\" not meaningful in the outermost frame.");
         };
         match self.run_to(m, pc, depth).await? {
+            Some(o) => Ok(o),
+            None => Ok(Outcome::Stopped(StopReason::Finished)),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Reverse execution.
+
+    fn require_reversible(&self) -> Result<()> {
+        self.require_running()?;
+        if !self.reversible {
+            bail!("{NOT_REVERSIBLE}");
+        }
+        Ok(())
+    }
+
+    /// Run backward to the previous breakpoint or watchpoint stop.
+    pub async fn reverse_cont(&mut self) -> Result<Outcome> {
+        self.require_reversible()?;
+        let ev = self.resume(Motion::ReverseContinue).await?;
+        if let Some(o) = self.on_event(&ev) {
+            return Ok(o);
+        }
+        Ok(Outcome::Stopped(StopReason::Breakpoint(
+            self.user_bp_here(),
+        )))
+    }
+
+    /// Step backward one Wasm instruction.
+    pub async fn reverse_stepi(&mut self) -> Result<Outcome> {
+        self.require_reversible()?;
+        let ev = self.resume(Motion::ReverseStep).await?;
+        if let Some(o) = self.on_event(&ev) {
+            return Ok(o);
+        }
+        Ok(Outcome::Stopped(StopReason::Step))
+    }
+
+    /// Step backward one Wasm instruction, stepping back over calls.
+    pub async fn reverse_nexti(&mut self) -> Result<Outcome> {
+        self.require_reversible()?;
+        let depth = self.phys.len();
+        if let Some(o) = self.reverse_step_over_calls(depth, true).await? {
+            return Ok(o);
+        }
+        Ok(Outcome::Stopped(StopReason::Step))
+    }
+
+    /// Step backward one instruction; if that enters a callee (which
+    /// returned there), and `over` is set or the callee has no line
+    /// information, run back to its call. Returns `Some` for stops other
+    /// than completing the step.
+    async fn reverse_step_over_calls(
+        &mut self,
+        depth: usize,
+        over: bool,
+    ) -> Result<Option<Outcome>> {
+        let ev = self.resume(Motion::ReverseStep).await?;
+        if let Some(o) = self.on_event(&ev) {
+            return Ok(Some(o));
+        }
+        if self.phys.len() > depth && (over || self.top_line().is_none()) {
+            return self.reverse_out_phys(0).await;
+        }
+        Ok(None)
+    }
+
+    /// Run backward to the call that created physical frame `phys`,
+    /// stopping at the call instruction in its caller. Stops early
+    /// (returning `Some`) for user breakpoints or other events.
+    async fn reverse_out_phys(&mut self, phys: usize) -> Result<Option<Outcome>> {
+        let Some(caller) = self.phys.get(phys + 1) else {
+            // No Wasm caller: back to the beginning (or a breakpoint).
+            return Ok(Some(self.reverse_cont().await?));
+        };
+        let module = caller.module;
+        let Some(call) = self.modules[module].info.prev_instruction(caller.pc) else {
+            bail!("Cannot find the call instruction before {:#x}.", caller.pc);
+        };
+        let depth = self.phys.len() - phys - 1;
+        self.install(module, call)?;
+        let result = loop {
+            let ev = match self.resume(Motion::ReverseContinue).await {
+                Ok(ev) => ev,
+                Err(e) => break Err(e),
+            };
+            if let Some(o) = self.on_event(&ev) {
+                break Ok(Some(o));
+            }
+            let at_target = self
+                .phys
+                .first()
+                .is_some_and(|p| p.module == module && p.pc == call);
+            if at_target && self.phys.len() <= depth {
+                break Ok(None);
+            }
+            if let Some(bp) = self.user_bp_here() {
+                break Ok(Some(Outcome::Stopped(StopReason::Breakpoint(Some(bp)))));
+            }
+        };
+        if self.state != RunState::Exited {
+            self.uninstall(module, call);
+        }
+        result
+    }
+
+    /// Source-level reverse step: run backward to the beginning of the
+    /// previous line executed (or, from the middle of a line, to the
+    /// beginning of that line). With `over` (`reverse-next`), calls are
+    /// stepped back over; otherwise (`reverse-step`), stepping back into a
+    /// call made by that line, if it has line information, stops at the
+    /// beginning of the last line executed in it.
+    pub async fn reverse_step_line(&mut self, over: bool) -> Result<Outcome> {
+        self.require_reversible()?;
+        if self.state == RunState::NotStarted {
+            bail!("The program has not been started.");
+        }
+        let mut phys = self.phys.len();
+        let mut logical = self.vframes.len();
+        let mut steps = 0u64;
+        let mut target = match self.top_line() {
+            Some(l) if !self.at_stmt_start() => l,
+            _ => {
+                // Phase 1: step back until in a different line.
+                let start_line = self.top_line();
+                let target = loop {
+                    steps += 1;
+                    if steps > 1_000_000 {
+                        return Ok(Outcome::Stopped(StopReason::Step));
+                    }
+                    if let Some(o) = self.reverse_step_over_calls(phys, over).await? {
+                        return Ok(o);
+                    }
+                    if self.phys.len() < phys {
+                        // Stepped back out of the function's beginning, to
+                        // its call.
+                        return Ok(Outcome::Stopped(StopReason::Step));
+                    }
+                    if self.phys.len() > phys {
+                        // Stepped back into a callee with line information:
+                        // find the beginning of its last line.
+                        phys = self.phys.len();
+                        logical = self.vframes.len();
+                        match self.top_line() {
+                            Some(l) => break l,
+                            None => continue,
+                        }
+                    }
+                    if over && self.vframes.len() > logical {
+                        // Inside code inlined into this frame.
+                        continue;
+                    }
+                    let Some(line) = self.top_line() else {
+                        continue;
+                    };
+                    if self.vframes.len() != logical || Some(line) != start_line {
+                        logical = self.vframes.len();
+                        break line;
+                    }
+                };
+                if self.in_prologue() {
+                    // Back in the function's prologue: as for stepping
+                    // forward, it has no line of its own, so leave the
+                    // function, back to its call.
+                    if let Some(o) = self.reverse_out_phys(0).await? {
+                        return Ok(o);
+                    }
+                    return Ok(Outcome::Stopped(StopReason::Step));
+                }
+                target
+            }
+        };
+        // Phase 2: step back to just before the beginning of the target
+        // line, then forward again to it.
+        loop {
+            steps += 1;
+            if steps > 1_000_000 {
+                return Ok(Outcome::Stopped(StopReason::Step));
+            }
+            let ev = self.resume(Motion::ReverseStep).await?;
+            if matches!(ev, api::Event::ReplayBegin) {
+                // The line is the first executed.
+                self.on_event(&ev);
+                self.state = RunState::Stopped;
+                return self.forward_to_line(phys, logical, target).await;
+            }
+            if let Some(o) = self.on_event(&ev) {
+                return Ok(o);
+            }
+            if self.phys.len() > phys {
+                // Stepped back into a callee. If the target line made the
+                // call, the line continues before it.
+                let call_line = self
+                    .vframes
+                    .iter()
+                    .find(|v| v.phys == 1)
+                    .and_then(|v| v.loc.as_ref())
+                    .map(|l| (l.file, l.line));
+                if call_line != Some(target) {
+                    return self.forward_to_line(phys, logical, target).await;
+                }
+                if !over && self.top_line().is_some() {
+                    // Stepping into the call: continue in its last line.
+                    phys = self.phys.len();
+                    logical = self.vframes.len();
+                    target = self.top_line().unwrap();
+                    continue;
+                }
+                if let Some(o) = self.reverse_out_phys(0).await? {
+                    return Ok(o);
+                }
+                // Now at the call instruction, in the target line.
+                continue;
+            }
+            if self.phys.len() < phys {
+                return self.forward_to_line(phys, logical, target).await;
+            }
+            if over && self.vframes.len() > logical {
+                continue;
+            }
+            let line = self.top_line();
+            if line.is_none() && self.vframes.len() == logical {
+                continue;
+            }
+            if self.vframes.len() != logical || line != Some(target) {
+                return self.forward_to_line(phys, logical, target).await;
+            }
+        }
+    }
+
+    /// Step forward (over calls) until in `line` at physical depth `phys`
+    /// and logical depth `logical`.
+    async fn forward_to_line(
+        &mut self,
+        phys: usize,
+        logical: usize,
+        line: (u32, u32),
+    ) -> Result<Outcome> {
+        for _ in 0..1_000_000 {
+            let o = if self.phys.is_empty() || self.phys.len() > phys {
+                self.stepi().await?
+            } else {
+                self.nexti().await?
+            };
+            if !matches!(o, Outcome::Stopped(StopReason::Step)) {
+                return Ok(o);
+            }
+            if self.phys.len() == phys
+                && self.vframes.len() == logical
+                && self.top_line() == Some(line)
+            {
+                break;
+            }
+        }
+        Ok(Outcome::Stopped(StopReason::Step))
+    }
+
+    /// Whether the top frame is in its function's prologue.
+    fn in_prologue(&self) -> bool {
+        let Some(addr) = self.dwarf_addr(0) else {
+            return false;
+        };
+        let dbg = self.modules[self.phys[0].module]
+            .info
+            .debug
+            .as_ref()
+            .unwrap();
+        dbg.function_at(addr)
+            .is_some_and(|f| addr < dbg.prologue_end(f))
+    }
+
+    /// Run backward to the call of the selected frame.
+    pub async fn reverse_finish(&mut self) -> Result<Outcome> {
+        self.require_reversible()?;
+        if self.vframes.is_empty() {
+            bail!("No stack.");
+        }
+        let sel = &self.vframes[self.selected];
+        if sel.inlined {
+            let target_logical = self.vframes.len() - self.selected - 1;
+            let start_phys = self.phys.len();
+            loop {
+                if let Some(o) = self.reverse_step_over_calls(start_phys, true).await? {
+                    return Ok(o);
+                }
+                if self.vframes.len() <= target_logical {
+                    return Ok(Outcome::Stopped(StopReason::Finished));
+                }
+            }
+        }
+        let phys = sel.phys;
+        if phys + 1 >= self.phys.len() {
+            bail!("\"reverse-finish\" not meaningful in the outermost frame.");
+        }
+        match self.reverse_out_phys(phys).await? {
             Some(o) => Ok(o),
             None => Ok(Outcome::Stopped(StopReason::Finished)),
         }
