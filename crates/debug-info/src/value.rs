@@ -329,12 +329,22 @@ impl<'a> Ctx<'a> {
     /// up in the active variant. Numeric names (`0`, `1`) select tuple
     /// fields.
     pub fn member(&self, v: &Value, name: &str) -> Result<Value> {
+        self.member_impl(v, name, true)
+    }
+
+    /// Like [`Ctx::member`], but never looks through pretty-printed
+    /// wrappers. Pretty-printers use this to access library internals.
+    pub fn field(&self, v: &Value, name: &str) -> Result<Value> {
+        self.member_impl(v, name, false)
+    }
+
+    fn member_impl(&self, v: &Value, name: &str, look_through: bool) -> Result<Value> {
         let sty = self.info.strip(v.ty);
         let t = self.info.ty(sty);
         match &t.kind {
             TypeKind::Pointer { .. } => {
                 let d = self.deref(v)?;
-                self.member(&d, name)
+                self.member_impl(&d, name, look_through)
             }
             TypeKind::Struct(st) => {
                 if st.is_enum_like() {
@@ -342,19 +352,19 @@ impl<'a> Ctx<'a> {
                         if vname == name {
                             return Ok(payload);
                         }
-                        if let Ok(v) = self.member(&payload, name) {
+                        if let Ok(v) = self.member_impl(&payload, name, look_through) {
                             return Ok(v);
                         }
                         // As a convenience, look through single-field
                         // tuple variants (e.g. `opt.field` for
                         // `Some(Box<T>)`), as if auto-dereferencing.
-                        if let Ok(inner) = self.member(&payload, "__0") {
+                        if let Ok(inner) = self.member_impl(&payload, "__0", look_through) {
                             let single = match &self.info.ty(self.info.strip(payload.ty)).kind {
                                 TypeKind::Struct(pst) => pst.members.len() == 1,
                                 _ => false,
                             };
                             if single {
-                                if let Ok(v) = self.member(&inner, name) {
+                                if let Ok(v) = self.member_impl(&inner, name, look_through) {
                                     return Ok(v);
                                 }
                             }
@@ -372,8 +382,10 @@ impl<'a> Ctx<'a> {
                 }
                 // Look through "transparent" pretty-printed wrappers
                 // (e.g. `Arc<T>`, `RefCell<T>`, `std::unique_ptr<T>`).
-                if let Some(r) = self.look_through(v, |inner| self.member(inner, name)) {
-                    return r;
+                if look_through {
+                    if let Some(r) = self.look_through(v, |inner| self.member(inner, name)) {
+                        return r;
+                    }
                 }
                 bail!(
                     "type `{}` has no member `{name}`",
@@ -426,11 +438,13 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let p = pretty::find(self, v.ty)?;
-        let inner = p.deref(self, v)?.ok()?;
         self.look_through.set(depth + 1);
-        let r = f(&inner);
+        let r = match p.deref(self, v) {
+            Some(Ok(inner)) => Some(f(&inner)),
+            _ => None,
+        };
         self.look_through.set(depth);
-        Some(r)
+        r
     }
 
     /// Index into an array, pointer, or indexable pretty-printed type.

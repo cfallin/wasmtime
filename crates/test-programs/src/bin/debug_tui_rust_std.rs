@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedL
 use std::mem::ManuallyDrop;
 use std::num::{NonZeroU32, Wrapping};
 use std::ops::Range;
+use std::cell::LazyCell;
+use std::fmt::Debug;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Token {
@@ -24,8 +26,20 @@ pub struct Inner {
     pub label: &'static str,
 }
 
+pub struct MyCustomPointer {
+    pub _inner: Box<Vec<i32>>,
+}
+
+pub struct S<'a> {
+    pub ptr: &'a i32,
+    pub name: &'a str,
+}
+
+static GLOBAL_LAZY: LazyLock<Vec<u32>> = LazyLock::new(|| vec![7, 8, 9]);
+static GLOBAL_LAZY_UNFORCED: LazyLock<u32> = LazyLock::new(|| 1);
+
 #[inline(never)]
-fn consume<T>(_t: &T) {}
+fn consume<T: ?Sized>(_t: &T) {}
 
 fn main() {
     let vec: Vec<u32> = vec![10, 20, 30];
@@ -85,6 +99,29 @@ fn main() {
         vec![Some(Rc::new(RefCell::new(Token::Num(3)))), None];
     let array = [1u8, 2, 3];
     let tuple = (1u8, "two", 3.0f32);
+    let once_lock: OnceLock<String> = OnceLock::new();
+    once_lock.set("set once".to_string()).unwrap();
+    let once_lock_empty: OnceLock<u8> = OnceLock::new();
+    let lazy_cell: LazyCell<u32> = LazyCell::new(|| 40 + 2);
+    let lazy_cell_unforced: LazyCell<u32> = LazyCell::new(|| 0);
+    LazyCell::force(&lazy_cell);
+    LazyLock::force(&GLOBAL_LAZY);
+    let guard_mutex = Mutex::new(vec![3u8, 4]);
+    let mutex_guard = guard_mutex.lock().unwrap();
+    let guard_rwlock = RwLock::new(5u16);
+    let read_guard = guard_rwlock.read().unwrap();
+    let guard_refcell = RefCell::new(Token::Ident("cell".to_string()));
+    let ref_guard = guard_refcell.borrow();
+    let arc_str: Arc<str> = Arc::from("arc str");
+    let rc_slice: Rc<[u32]> = Rc::from(vec![11u32, 12]);
+    let rc_str: Rc<str> = Rc::from("rc str");
+    let boxed_dyn: Box<dyn Debug> = Box::new(Inner { id: 6, label: "dyn" });
+    let ref_dyn: &dyn Debug = &tuple;
+    let custom = MyCustomPointer {
+        _inner: Box::new(vec![1, 2, 3]),
+    };
+    let x = 123;
+    let s = S { ptr: &x, name: "s" };
 
     consume(&vec); // break here
     consume(&deque);
@@ -120,5 +157,20 @@ fn main() {
     consume(&nested);
     consume(&array);
     consume(&tuple);
+    consume(&once_lock);
+    consume(&once_lock_empty);
+    consume(&lazy_cell);
+    consume(&lazy_cell_unforced);
+    consume(&*mutex_guard);
+    consume(&*read_guard);
+    consume(&*ref_guard);
+    consume(&arc_str);
+    consume(&rc_slice);
+    consume(&rc_str);
+    consume(&boxed_dyn);
+    consume(ref_dyn);
+    consume(&custom);
+    consume(&s);
+    consume(&GLOBAL_LAZY_UNFORCED);
     println!("{vec:?} {deque:?} {} {}", btree_map.len(), linked_list.len());
 }

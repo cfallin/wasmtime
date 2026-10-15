@@ -67,6 +67,9 @@ pub enum Summary {
     },
     /// A label, optionally followed by ` = inner` (C++ smart pointers).
     Labeled { label: String, inner: Option<Value> },
+    /// A prefix immediately followed by the inner value (e.g. `&` for a
+    /// reference to a trait object).
+    Prefixed { prefix: String, inner: Value },
 }
 
 /// A pretty-printer for a family of types.
@@ -190,11 +193,14 @@ fn template_base(name: &str) -> Option<&str> {
     let Some(open) = name.find('<') else {
         return Some(name);
     };
+    let bytes = name.as_bytes();
     let mut depth = 0;
-    for (i, c) in name.char_indices().skip(open) {
-        match c {
-            '<' => depth += 1,
-            '>' => {
+    for i in open..bytes.len() {
+        match bytes[i] {
+            b'<' => depth += 1,
+            // `->` (in `fn() -> T`) is not a closing bracket.
+            b'>' if bytes[i - 1] == b'-' => {}
+            b'>' => {
                 depth -= 1;
                 if depth == 0 {
                     return (i == name.len() - 1).then(|| &name[..open]);
@@ -248,7 +254,7 @@ fn member_chain(ctx: &Ctx<'_>, v: &Value, steps: &[&[&str]]) -> Value {
     let mut cur = v.clone();
     for step in steps {
         for name in *step {
-            if let Ok(next) = ctx.member(&cur, name) {
+            if let Ok(next) = ctx.field(&cur, name) {
                 cur = next;
                 break;
             }
@@ -300,5 +306,9 @@ mod tests {
             &["std::vector"]
         ));
         assert!(!is_one_of("std::vectorish<int>", &["std::vector"]));
+        assert_eq!(
+            template_base("std::sync::LazyLock<u32, fn() -> u32>"),
+            Some("std::sync::LazyLock")
+        );
     }
 }

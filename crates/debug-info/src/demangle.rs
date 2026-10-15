@@ -57,6 +57,8 @@ pub fn simple_name(name: &str) -> &str {
                 }
                 depth += 1;
             }
+            // `->` (in `fn() -> T`) is not a closing bracket.
+            b'>' if i > 0 && bytes[i - 1] == b'-' => {}
             b'>' => depth -= 1,
             b':' if depth == 0 && bytes.get(i + 1) == Some(&b':') => {
                 start = i + 2;
@@ -111,5 +113,9 @@ mod tests {
         assert_eq!(simple_name("core::option::Option<i32>"), "Option");
         assert_eq!(simple_name("<T as core::fmt::Debug>::fmt"), "fmt");
         assert_eq!(simple_name("Vec<a::b::C>"), "Vec");
+        assert_eq!(
+            simple_name("std::sync::LazyLock<u32, fn() -> u32>"),
+            "LazyLock"
+        );
     }
 }

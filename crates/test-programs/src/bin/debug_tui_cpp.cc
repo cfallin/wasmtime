@@ -17,6 +17,16 @@ struct Point {
   int y;
 };
 
+// A type named like a container that the pretty-printers know, but with
+// a different layout: printing must fall back to the raw view.
+struct Weird {};
+namespace std {
+template <> class vector<Weird, allocator<Weird>> {
+public:
+  int not_a_vector = 7;
+};
+} // namespace std
+
 template <typename T> __attribute__((noinline)) void consume(const T &) {}
 
 int main() {
@@ -33,6 +43,7 @@ int main() {
   std::shared_ptr<Point> sptr = std::make_shared<Point>(Point{7, 8});
   std::shared_ptr<Point> sptr2 = sptr;
   const char *cstr = "a C string";
+  std::vector<Weird> weird;
 
   consume(vec); // break here
   consume(points);
@@ -45,6 +56,7 @@ int main() {
   consume(uptr);
   consume(null_uptr);
   consume(sptr2);
+  consume(weird);
   printf("%zu %s %zu\n", vec.size(), long_str.c_str(), map.size());
   return 0;
 }
