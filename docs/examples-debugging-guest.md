@@ -93,16 +93,16 @@ stack, Wasm locals, globals, memories, tables, and GC objects.
     Breakpoint 1, main () at foo.c:42
     42	  int r = area(&shape);
     (wasmtime-debug) print shape.points[1]
-    $1 = struct Point { .x = 4, .y = 0 }
-    (wasmtime-debug) print $1.x
-    $2 = 4
+    %1 = struct Point { .x = 4, .y = 0 }
+    (wasmtime-debug) print %1.x
+    %2 = 4
     (wasmtime-debug) wasm-stack
     Operand stack is empty.
     ```
 
    Type `help` for the full list of commands. Values are named with
    simple "access paths" (`p->x`, `arr[2].y`, `*p`, `&x`, `t.0`) rooted at
-   variables, value-history entries (`$1`, `$`, `$$2`), Wasm-level
+   variables, value-history entries (`%1`, `%`, `%%2`), Wasm-level
    entities named in the module's name section (`$x` for a local
    declared as `(local $x i32)`, or a named global or table), or
    built-in indexed entities (`%local3`, `%stack0`, `%global1`,
