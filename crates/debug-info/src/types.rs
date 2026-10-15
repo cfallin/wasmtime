@@ -235,3 +235,10 @@ pub fn simplify_rust_type_name(name: &str) -> String {
     name.replace(", alloc::alloc::Global", "")
         .replace(", std::hash::random::RandomState", "")
 }
+
+/// Make a C++ type name more readable by hiding libc++'s inline ABI
+/// namespace (`std::__2::vector` becomes `std::vector`).
+pub fn simplify_cpp_type_name(name: &str) -> String {
+    name.replace("std::__2::", "std::")
+        .replace("std::__1::", "std::")
+}

@@ -427,6 +427,28 @@ impl Formatter<'_, '_> {
                 prefix,
                 entries,
                 total,
+                cpp: true,
+            } => {
+                let _ = write!(out, "{prefix} {{");
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push('[');
+                    self.value(k, depth + 1, out);
+                    out.push_str("] = ");
+                    self.value(v, depth + 1, out);
+                }
+                if (entries.len() as u64) < total {
+                    out.push_str(", ...");
+                }
+                out.push('}');
+            }
+            Summary::Map {
+                prefix,
+                entries,
+                total,
+                cpp: false,
             } => {
                 let _ = write!(out, "{prefix}(len={total}) {{");
                 for (i, (k, v)) in entries.iter().enumerate() {
@@ -455,10 +477,49 @@ impl Formatter<'_, '_> {
                 }
                 out.push_str(if elems.is_empty() { "}" } else { " }" });
             }
-            Summary::Wrap { prefix, inner } => {
-                let _ = write!(out, "{prefix}(");
-                self.value(&inner, depth + 1, out);
-                out.push(')');
+            Summary::List {
+                prefix,
+                open,
+                close,
+                elems,
+                total,
+            } => {
+                out.push_str(&prefix);
+                out.push_str(open);
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    self.value(e, depth + 1, out);
+                }
+                if (elems.len() as u64) < total {
+                    let _ = write!(out, ", ...({} more)", total - elems.len() as u64);
+                }
+                out.push_str(close);
+            }
+            Summary::Wrap {
+                prefix,
+                inner,
+                note,
+            } => {
+                if prefix.is_empty() && note.is_none() {
+                    // A transparent wrapper: show just the contents.
+                    self.value(&inner, depth, out);
+                } else {
+                    let _ = write!(out, "{prefix}(");
+                    self.value(&inner, depth + 1, out);
+                    out.push(')');
+                    if let Some(note) = note {
+                        let _ = write!(out, " [{note}]");
+                    }
+                }
+            }
+            Summary::Labeled { label, inner } => {
+                out.push_str(&label);
+                if let Some(inner) = inner {
+                    out.push_str(" = ");
+                    self.value(&inner, depth + 1, out);
+                }
             }
         }
         Ok(())

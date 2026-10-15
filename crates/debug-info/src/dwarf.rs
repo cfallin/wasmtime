@@ -1434,7 +1434,7 @@ impl DebugInfo {
                 };
                 match &t.name {
                     Some(n) if t.lang == Lang::C => format!("{kw} {n}"),
-                    Some(n) => n.clone(),
+                    Some(n) => simplify_cpp_type_name(n),
                     None => format!("{kw} <anonymous>"),
                 }
             }
@@ -1445,10 +1445,10 @@ impl DebugInfo {
             },
             _ if t.name.is_some() => {
                 let n = t.name.clone().unwrap();
-                if t.lang == Lang::Rust {
-                    simplify_rust_type_name(&n)
-                } else {
-                    n
+                match t.lang {
+                    Lang::Rust => simplify_rust_type_name(&n),
+                    Lang::Cpp => simplify_cpp_type_name(&n),
+                    _ => n,
                 }
             }
             TypeKind::Void => "void".into(),
@@ -1572,6 +1572,26 @@ impl DebugInfo {
             .unwrap_or(4)
     }
 
+    /// Find a type definition whose qualified name starts with `prefix`
+    /// and which satisfies `pred`. Used by pretty-printers to locate
+    /// helper types (e.g. a container's node type) from DWARF.
+    pub fn find_type_where(&self, prefix: &str, pred: &dyn Fn(TypeId) -> bool) -> Option<TypeId> {
+        let mut names: Vec<&String> = self
+            .type_defs
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .collect();
+        names.sort();
+        for n in names {
+            if let Ok(id) = self.type_of(self.type_defs[n]) {
+                if pred(id) {
+                    return Some(id);
+                }
+            }
+        }
+        None
+    }
+
     /// Find a type definition by qualified name.
     pub fn find_type(&self, name: &str) -> Result<Option<TypeId>> {
         match self.type_defs.get(name) {
@@ -1634,7 +1654,9 @@ fn function_base_name(name: &str) -> String {
             }
         }
     }
+    // Strip generics, including Rust turbofish (`f::<T>`).
     let base = strip_generics(s);
+    let base = base.strip_suffix("::").unwrap_or(&base).to_string();
     // Drop a leading return type (C++ templates).
     match base.rsplit_once(' ') {
         Some((_, last)) if !last.is_empty() => last.to_string(),
@@ -1704,6 +1726,10 @@ mod tests {
             "geo::Vec2::dot"
         );
         assert_eq!(function_base_name("main"), "main");
+        assert_eq!(
+            function_base_name("krate::consume::<alloc::vec::Vec<u32>>"),
+            "krate::consume"
+        );
         assert_eq!(
             function_base_name("alloc::vec::Vec<T>::push"),
             "alloc::vec::Vec::push"
