@@ -125,8 +125,8 @@ pub struct RunCommon {
     /// on localhost only (`127.0.0.1`). Connect with e.g. `nc localhost
     /// 1234` or `telnet localhost 1234`.
     ///
-    /// The debugger is given read-only access to the host filesystem
-    /// so that it can display source files referenced by debug info.
+    /// To let the debugger display source files, give it read-only
+    /// access to the relevant directories with `-Ddebug-fs=<dir>`.
     #[cfg(feature = "debug-tui")]
     #[arg(long = "debug-tui", value_name = "[ADDR:]PORT")]
     pub debug_tui: Option<String>,
@@ -183,9 +183,6 @@ impl std::fmt::Display for RunCommon {
 pub struct BuiltinDebugger {
     /// The component bytes.
     pub bytes: &'static [u8],
-    /// Whether the debugger should get read-only access to the host
-    /// filesystem (to display source files).
-    pub readonly_root: bool,
 }
 
 impl RunCommon {
@@ -203,7 +200,6 @@ impl RunCommon {
                 addr,
                 BuiltinDebugger {
                     bytes: gdbstub_component_artifact::gdbstub()?,
-                    readonly_root: false,
                 },
             ));
         }
@@ -214,7 +210,6 @@ impl RunCommon {
                 addr,
                 BuiltinDebugger {
                     bytes: debug_tui_component_artifact::debug_tui()?,
-                    readonly_root: true,
                 },
             ));
         }

@@ -172,12 +172,13 @@ impl RunCommand {
             )?;
             if let Some(builtin) = &builtin {
                 debugger_run.module_bytes = Some(builtin.bytes);
-                if builtin.readonly_root {
-                    debugger_run
-                        .run
-                        .readonly_dirs
-                        .push(("/".to_string(), "/".to_string()));
-                }
+            }
+            // `-Ddebug-fs=<dir>`: read-only access for the debugger.
+            for dir in &self.run.common.debug.debug_fs {
+                debugger_run
+                    .run
+                    .readonly_dirs
+                    .push((dir.clone(), dir.clone()));
             }
 
             // Explicitly permit TCP sockets for the debugger-main
