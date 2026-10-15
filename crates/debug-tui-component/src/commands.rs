@@ -981,10 +981,12 @@ impl Session<'_> {
             .unwrap()
             .file_name(file)
             .to_string();
-        let lines = self
-            .source_lines(&path)
-            .cloned()
-            .ok_or_else(|| anyhow!("Cannot read source file {path}."))?;
+        let lines = self.source_lines(&path).cloned().ok_or_else(|| {
+            anyhow!(
+                "Cannot read source file {path}.\n\
+                     (Give the debugger read-only access with `-Ddebug-fs=<dir>`.)"
+            )
+        })?;
         let mut last = start;
         for n in start..start + 10 {
             let Some(text) = lines.get(usize::try_from(n)? - 1) else {

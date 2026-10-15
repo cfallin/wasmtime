@@ -368,6 +368,12 @@ wasmtime_option_group! {
         /// component. May be specified multiple times.
         #[serde(default)]
         pub arg: Vec<String>,
+        /// Give the debugger component read-only access to the given
+        /// host directory (preopened at the same path in the
+        /// debugger), e.g. so that it can display source files. May be
+        /// specified multiple times.
+        #[serde(default)]
+        pub debug_fs: Vec<String>,
         /// Allow the debugger component to inherit stdin.Off by
         /// default.
         pub inherit_stdin: Option<bool>,
@@ -1469,6 +1475,7 @@ impl CommonOptions {
                 // debugger configuration not part of engine config
                 debugger: None,
                 arg: Vec::new(),
+                debug_fs: Vec::new(),
                 inherit_stderr: None,
                 inherit_stdout: None,
                 inherit_stdin: None,

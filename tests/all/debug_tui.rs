@@ -5,6 +5,9 @@
 //! debugger over TCP, drive it with a script of commands, and check the
 //! transcript with FileCheck-style directives.
 //!
+//! The debugger is given read-only access to the test programs' sources
+//! with `-Ddebug-fs`.
+//!
 //! Requirements:
 //!   - Built with `--features debug-tui`.
 //!   - `WASI_SDK_PATH` set at build time (for the C test program).
@@ -52,7 +55,16 @@ struct Tui {
 }
 
 impl Tui {
+    /// Spawn with read-only access to the test programs' sources (so
+    /// that source lines are shown).
     fn spawn(wasm: &str, extra_args: &[&str]) -> Result<Tui> {
+        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/crates/test-programs/src/bin");
+        let mut args = vec![format!("-Ddebug-fs={src}")];
+        args.extend(extra_args.iter().map(|s| s.to_string()));
+        Tui::spawn_raw(wasm, &args)
+    }
+
+    fn spawn_raw(wasm: &str, extra_args: &[String]) -> Result<Tui> {
         let port = free_port();
         let mut cmd = Command::new(wasmtime_binary());
         cmd.arg("run")
@@ -653,6 +665,184 @@ check: The program is not being run.
     // The trap is still reported, and reflected in the exit status,
     // once the debugger detaches.
     assert!(!output.status.success());
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_source_requires_debug_fs() -> Result<()> {
+    // Without `-Ddebug-fs`, the debugger cannot read source files.
+    let mut tui = Tui::spawn_raw(DEBUG_TUI_C, &[])?;
+    tui.script(
+        r#"
+        b debug_tui_c.c:60
+        c
+        list
+        p tri.points[1].x
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, main () at debug_tui_c.c:60
+check: 60	in
+sameln: debug_tui_c.c (source unavailable)
+check: Cannot read source file
+check: -Ddebug-fs=<dir>
+check: = 4
+check: [Program exited]
+"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_instruction_stepping() -> Result<()> {
+    let wat = wat_file(
+        r#"
+        (module $steps
+          (func $add (param $a i32) (param $b i32) (result i32)
+            local.get $a
+            local.get $b
+            i32.add)
+          (func $main (export "_start")
+            i32.const 2
+            i32.const 3
+            call $add
+            i32.const 10
+            i32.mul
+            drop
+            i32.const 4
+            i32.const 5
+            call $add
+            drop))
+        "#,
+    )?;
+    let mut tui = Tui::spawn(wat.path().to_str().unwrap(), &[])?;
+    tui.script(
+        r#"
+        b main
+        c
+        stepi
+        wasm-stack
+        stepi
+        wasm-stack
+        stepi
+        bt
+        stepi
+        stepi
+        stepi
+        stepi
+        wasm-stack
+        stepi
+        stepi
+        wasm-stack
+        stepi
+        stepi
+        stepi
+        nexti
+        wasm-stack
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, main () in steps
+check: : i32.const 2
+check: (wasmtime-debug) stepi
+check: : i32.const 3
+check: stack[0]: i32 2  <- top
+check: (wasmtime-debug) stepi
+check: : call $add
+check: stack[0]: i32 2
+nextln: stack[1]: i32 3  <- top
+check: (wasmtime-debug) stepi
+check: add (a=i32 2, b=i32 3) in steps
+check: : local.get $a
+check: #0
+sameln: in add
+check: #1
+sameln: in main
+check: (wasmtime-debug) stepi
+check: : local.get $b
+check: (wasmtime-debug) stepi
+check: : i32.add
+check: (wasmtime-debug) stepi
+check: : end
+check: (wasmtime-debug) stepi
+check: main () in steps
+check: : i32.const 10
+check: stack[0]: i32 5  <- top
+check: (wasmtime-debug) stepi
+check: : i32.mul
+check: (wasmtime-debug) stepi
+check: : drop
+check: stack[0]: i32 50  <- top
+check: (wasmtime-debug) stepi
+check: : i32.const 4
+check: (wasmtime-debug) stepi
+check: : i32.const 5
+check: (wasmtime-debug) stepi
+check: : call $add
+check: (wasmtime-debug) nexti
+check: : drop
+check: stack[0]: i32 9  <- top
+check: [Program exited]
+"#,
+    )?;
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn debug_tui_c_instruction_stepping() -> Result<()> {
+    // Instruction-level stepping within source code: each step shows the
+    // current source line and instruction, and stepping into a call
+    // enters the callee.
+    let mut tui = Tui::spawn(DEBUG_TUI_C, &[])?;
+    tui.script(
+        r#"
+        b debug_tui_c.c:60
+        c
+        si
+        si
+        si
+        si
+        si
+        bt
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, main () at debug_tui_c.c:60
+check: (wasmtime-debug) si
+check: 60	  int r = area(&tri);
+check: : local.get 0
+check: (wasmtime-debug) si
+check: : i32.const 136
+check: (wasmtime-debug) si
+check: : i32.add
+check: (wasmtime-debug) si
+check: : call $area
+check: (wasmtime-debug) si
+check: area (
+sameln: at debug_tui_c.c:32
+check: 32	int area(struct Shape *s) {
+check: #0
+sameln: in area
+check: #1
+sameln: in main () at debug_tui_c.c:60
+check: [Program exited]
+"#,
+    )?;
     Ok(())
 }
 

@@ -106,5 +106,11 @@ stack, Wasm locals, globals, memories, tables, and GC objects.
    entities (`$local3`, `$stack0`, `$global1`, `$table0[4]`).
 
 The debugger is itself a WebAssembly component running in Wasmtime's
-debugger world; it is given read-only access to the host filesystem so
-that it can display source files referenced by the debug info.
+debugger world, and by default has no filesystem access. To let it
+display source files referenced by the debug info, give it read-only
+access to the relevant directories with `-Ddebug-fs` (which may be
+repeated):
+
+```console
+wasmtime run --debug-tui 1234 -Ddebug-fs=$HOME/src/myproject foo.wasm
+```
