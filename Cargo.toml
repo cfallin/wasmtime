@@ -111,6 +111,7 @@ rustix = { workspace = true, features = ["mm", "process"] }
 backtrace = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+wasmtime-debug-dap = { workspace = true }
 filecheck = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "macros", "rt-multi-thread"] }

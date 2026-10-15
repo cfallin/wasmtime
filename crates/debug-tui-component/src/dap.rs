@@ -374,6 +374,11 @@ async fn run_and_report(s: &mut Session<'_>, st: &mut DapState, how: Run) -> Res
                         .await?;
                 }
             }
+            if let StopReason::Breakpoint(Some(id)) = reason {
+                if let Some(b) = s.breakpoints.iter_mut().find(|b| b.id == id) {
+                    b.hits += 1;
+                }
+            }
             let (reason, description, hit) = match reason {
                 StopReason::Breakpoint(Some(id)) => (
                     "breakpoint",

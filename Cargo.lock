@@ -4718,6 +4718,7 @@ dependencies = [
  "wasmtime-internal-cache",
  "wasmtime-internal-component-util",
  "wasmtime-internal-cranelift",
+ "wasmtime-internal-debug-dap",
  "wasmtime-internal-debug-tui-component-artifact",
  "wasmtime-internal-debugger",
  "wasmtime-internal-explorer",

@@ -544,9 +544,12 @@ impl<'a> Ctx<'a> {
                 // A Rust reference (or C++ reference) is indexed through
                 // to its referent (`r[1]` for `r: &[i32; 3]` or
                 // `&Vec<i32>`); raw pointers do pointer arithmetic.
+                // In Rust, only raw pointers (`*const T`, `*mut T`) do
+                // pointer arithmetic; references and `Box` index their
+                // referent.
                 let is_ref = *kind != PtrKind::Pointer
                     || (t.lang == Lang::Rust
-                        && t.name.as_deref().is_some_and(|n| n.starts_with('&')));
+                        && t.name.as_deref().is_some_and(|n| !n.starts_with('*')));
                 if is_ref {
                     return self.index(&self.deref(v)?, i);
                 }
