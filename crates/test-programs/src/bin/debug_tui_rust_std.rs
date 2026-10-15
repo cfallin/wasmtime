@@ -2,13 +2,13 @@
 //! `--debug-tui` debugger.
 
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::cell::{Cell, OnceCell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
+use std::fmt::Debug;
 use std::mem::ManuallyDrop;
 use std::num::{NonZeroU32, Wrapping};
 use std::ops::Range;
-use std::cell::LazyCell;
-use std::fmt::Debug;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
@@ -72,12 +72,21 @@ fn main() {
     let cow_borrowed: Cow<'_, str> = Cow::Borrowed("borrowed");
     let cow_owned: Cow<'_, str> = Cow::Owned("owned".to_string());
     let cow_slice: Cow<'_, [u32]> = Cow::Borrowed(&[1, 2, 3]);
-    let boxed: Box<Inner> = Box::new(Inner { id: 1, label: "boxed" });
+    let boxed: Box<Inner> = Box::new(Inner {
+        id: 1,
+        label: "boxed",
+    });
     let boxed_slice: Box<[u16]> = vec![4u16, 5, 6].into_boxed_slice();
     let boxed_str: Box<str> = "boxed str".into();
-    let mutex = Mutex::new(Inner { id: 2, label: "mutex" });
+    let mutex = Mutex::new(Inner {
+        id: 2,
+        label: "mutex",
+    });
     let rwlock = RwLock::new(vec![1u8, 2]);
-    let arc = Arc::new(Inner { id: 3, label: "arc" });
+    let arc = Arc::new(Inner {
+        id: 3,
+        label: "arc",
+    });
     let arc2 = arc.clone();
     let rc = Rc::new(String::from("rc"));
     let weak: Weak<String> = Rc::downgrade(&rc);
@@ -86,7 +95,10 @@ fn main() {
     let unsafe_cell = UnsafeCell::new(7i16);
     let once_cell: OnceCell<u32> = OnceCell::new();
     once_cell.set(99).unwrap();
-    let option_box: Option<Box<Inner>> = Some(Box::new(Inner { id: 4, label: "opt" }));
+    let option_box: Option<Box<Inner>> = Some(Box::new(Inner {
+        id: 4,
+        label: "opt",
+    }));
     let result: Result<Vec<u8>, String> = Ok(vec![1]);
     let manually_drop = ManuallyDrop::new(Inner { id: 5, label: "md" });
     let wrapping = Wrapping(250u8);
@@ -115,7 +127,10 @@ fn main() {
     let arc_str: Arc<str> = Arc::from("arc str");
     let rc_slice: Rc<[u32]> = Rc::from(vec![11u32, 12]);
     let rc_str: Rc<str> = Rc::from("rc str");
-    let boxed_dyn: Box<dyn Debug> = Box::new(Inner { id: 6, label: "dyn" });
+    let boxed_dyn: Box<dyn Debug> = Box::new(Inner {
+        id: 6,
+        label: "dyn",
+    });
     let ref_dyn: &dyn Debug = &tuple;
     let custom = MyCustomPointer {
         _inner: Box::new(vec![1, 2, 3]),
@@ -172,5 +187,9 @@ fn main() {
     consume(&custom);
     consume(&s);
     consume(&GLOBAL_LAZY_UNFORCED);
-    println!("{vec:?} {deque:?} {} {}", btree_map.len(), linked_list.len());
+    println!(
+        "{vec:?} {deque:?} {} {}",
+        btree_map.len(),
+        linked_list.len()
+    );
 }
