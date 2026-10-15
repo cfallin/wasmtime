@@ -4955,6 +4955,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtime-internal-debug-info"
+version = "51.0.0-dev"
+dependencies = [
+ "anyhow",
+ "cpp_demangle",
+ "gimli 0.33.0",
+ "rustc-demangle",
+ "tokio",
+ "wasmparser 0.262.0",
+ "wasmprinter",
+ "wasmtime",
+ "wasmtime-wasi",
+ "wat",
+]
+
+[[package]]
+name = "wasmtime-internal-debug-tui-component"
+version = "51.0.0-dev"
+
+[[package]]
+name = "wasmtime-internal-debug-tui-component-artifact"
+version = "51.0.0-dev"
+dependencies = [
+ "wasmtime-internal-core",
+]
+
+[[package]]
 name = "wasmtime-internal-debugger"
 version = "51.0.0-dev"
 dependencies = [

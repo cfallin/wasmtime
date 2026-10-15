@@ -202,6 +202,9 @@ members = [
   "crates/debugger",
   "crates/gdbstub-component",
   "crates/gdbstub-component/artifact",
+  "crates/debug-info",
+  "crates/debug-tui-component",
+  "crates/debug-tui-component/artifact",
   "crates/wizer/fuzz",
   "crates/wizer/benches/regex-bench",
   "crates/wizer/benches/uap-bench",
@@ -318,6 +321,8 @@ wasmtime-wit-bindgen = { path = "crates/wit-bindgen", version = "=51.0.0-dev", p
 wasmtime-unwinder = { path = "crates/unwinder", version = "=51.0.0-dev", package = 'wasmtime-internal-unwinder' }
 wasmtime-debugger = { path = "crates/debugger", version = "=51.0.0-dev", package = "wasmtime-internal-debugger" }
 gdbstub-component-artifact = { path = "crates/gdbstub-component/artifact", version = "=51.0.0-dev", package = "wasmtime-internal-gdbstub-component-artifact" }
+wasmtime-debug-info = { path = "crates/debug-info", version = "=51.0.0-dev", package = "wasmtime-internal-debug-info" }
+debug-tui-component-artifact = { path = "crates/debug-tui-component/artifact", version = "=51.0.0-dev", package = "wasmtime-internal-debug-tui-component-artifact" }
 wasmtime-wizer = { path = "crates/wizer", version = "51.0.0-dev" }
 
 # Miscellaneous crates without a `wasmtime-*` prefix in their name but still
