@@ -1101,6 +1101,99 @@ check: %10 = 7
     Ok(())
 }
 
+#[test]
+#[ignore]
+fn debug_tui_locations() -> Result<()> {
+    // Optimized code keeps some variables in Wasm locals.
+    let mut tui = Tui::spawn(DEBUG_TUI_C_OPT, &[])?;
+    tui.script(
+        r#"
+        b checksum
+        c
+        location data
+        location n
+        p &n
+        location data[2]
+        location global_buf
+        location global_buf[3]
+        p &global_buf
+        x/16xb &global_buf
+        x/16cb global_buf
+        location %local1
+        location %global0
+        location %pc
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: Breakpoint 1, checksum (data=
+check: (wasmtime-debug) location data
+nextln: local 0
+check: (wasmtime-debug) location n
+nextln: local 1
+check: cannot take the address of a value in local 1
+check: (wasmtime-debug) location data[2]
+nextln: memory
+sameln: length 0x1
+check: (wasmtime-debug) location global_buf
+nextln: memory
+sameln: length 0x10
+check: (wasmtime-debug) location global_buf[3]
+nextln: memory
+sameln: length 0x1
+check: %1 = (unsigned char [16] *)
+check: 0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x61 0x62 0x63 0x64 0x65 0x66
+check: '0' '1' '2' '3' '4' '5' '6' '7' '8' '9' 'a' 'b' 'c' 'd' 'e' 'f'
+check: (wasmtime-debug) location %local1
+nextln: local 1
+check: (wasmtime-debug) location %global0
+nextln: global 0
+check: `%pc` is not stored
+check: [Program exited]
+"#,
+    )?;
+
+    // Unoptimized code, and Wasm-level names.
+    let mut tui = Tui::spawn(DEBUG_TUI_C, &[])?;
+    tui.script(
+        r#"
+        b debug_tui_c.c:60
+        c
+        location tri
+        location tri.points[1]
+        location tri.flags
+        p &tri.points[1]
+        x/2dw &tri.points[1]
+        location %1
+        c
+        "#,
+    )?;
+    let (transcript, _) = tui.finish()?;
+    check_output(
+        &transcript,
+        r#"
+check: (wasmtime-debug) location tri
+nextln: memory
+sameln: length 0x40
+check: (wasmtime-debug) location tri.points[1]
+nextln: memory
+sameln: length 0x8
+check: (wasmtime-debug) location tri.flags
+nextln: memory
+sameln: length 0x1
+check: %1 = (struct Point *)
+check: (wasmtime-debug) x/2dw &tri.points[1]
+nextln: 4 0
+check: (wasmtime-debug) location %1
+nextln: the value has no storage location
+"#,
+    )?;
+    Ok(())
+}
+
 macro_rules! assert_test_exists {
     ($name:ident) => {
         #[expect(unused_imports, reason = "here to assert the test exists")]
@@ -1130,3 +1223,8 @@ fn debug_tui_rust_std() {}
     reason = "test-program names checked by `assert_test_exists`"
 )]
 fn debug_tui_cpp() {}
+#[expect(
+    dead_code,
+    reason = "test-program names checked by `assert_test_exists`"
+)]
+fn debug_tui_c_opt() {}

@@ -3,6 +3,7 @@
 
 use crate::dwarf::{DebugInfo, Variable};
 use crate::eval::Location;
+use crate::location::{self, WasmSlot};
 use crate::pretty;
 use crate::target::Target;
 use crate::types::*;
@@ -14,8 +15,14 @@ pub enum Data {
     /// An object in linear memory at this address (read lazily).
     Memory(u64),
     /// Captured bytes (from a Wasm local, a constant, or a snapshot),
-    /// with the original memory address if the value was an lvalue.
-    Bytes { bytes: Vec<u8>, addr: Option<u64> },
+    /// with the original memory address if the value was an lvalue in
+    /// memory, or the Wasm slot (and byte offset within it) it came
+    /// from.
+    Bytes {
+        bytes: Vec<u8>,
+        addr: Option<u64>,
+        slot: Option<(WasmSlot, u64)>,
+    },
 }
 
 /// A typed value.
@@ -50,7 +57,25 @@ impl Value {
     pub fn from_bytes(ty: TypeId, bytes: Vec<u8>) -> Value {
         Value {
             ty,
-            data: Data::Bytes { bytes, addr: None },
+            data: Data::Bytes {
+                bytes,
+                addr: None,
+                slot: None,
+            },
+            bitfield: None,
+        }
+    }
+
+    /// A value held in a Wasm slot (local, global, or operand-stack
+    /// entry), whose current contents are `bytes`.
+    pub fn in_slot(ty: TypeId, bytes: Vec<u8>, slot: WasmSlot) -> Value {
+        Value {
+            ty,
+            data: Data::Bytes {
+                bytes,
+                addr: None,
+                slot: Some((slot, 0)),
+            },
             bitfield: None,
         }
     }
@@ -70,11 +95,12 @@ impl Value {
     pub fn sub(&self, ty: TypeId, byte_offset: u64, bitfield: Option<(u64, u64)>) -> Value {
         let data = match &self.data {
             Data::Memory(a) => Data::Memory(a + byte_offset),
-            Data::Bytes { bytes, addr } => {
+            Data::Bytes { bytes, addr, slot } => {
                 let start = usize::try_from(byte_offset).unwrap_or(usize::MAX);
                 Data::Bytes {
                     bytes: bytes.get(start..).map(|b| b.to_vec()).unwrap_or_default(),
                     addr: addr.map(|a| a + byte_offset),
+                    slot: slot.map(|(s, o)| (s, o + byte_offset)),
                 }
             }
         };
@@ -177,6 +203,7 @@ impl<'a> Ctx<'a> {
                     data: Data::Bytes {
                         bytes,
                         addr: Some(*a),
+                        slot: None,
                     },
                     bitfield: None,
                 })
@@ -193,9 +220,21 @@ impl<'a> Ctx<'a> {
                 bytes.resize(usize::try_from(size)?.max(bytes.len()), 0);
                 Ok(Value::from_bytes(ty, bytes))
             }
-            Location::WasmLocal(i) => Ok(Value::from_bytes(ty, self.target.local(i)?.to_bytes())),
-            Location::WasmGlobal(i) => Ok(Value::from_bytes(ty, self.target.global(i)?.to_bytes())),
-            Location::WasmStack(i) => Ok(Value::from_bytes(ty, self.target.operand(i)?.to_bytes())),
+            Location::WasmLocal(i) => Ok(Value::in_slot(
+                ty,
+                self.target.local(i)?.to_bytes(),
+                WasmSlot::Local(i),
+            )),
+            Location::WasmGlobal(i) => Ok(Value::in_slot(
+                ty,
+                self.target.global(i)?.to_bytes(),
+                WasmSlot::Global(i),
+            )),
+            Location::WasmStack(i) => Ok(Value::in_slot(
+                ty,
+                self.target.operand(i)?.to_bytes(),
+                WasmSlot::Stack(i),
+            )),
             Location::Pieces(pieces) => {
                 let mut bytes = vec![];
                 for p in pieces {
@@ -263,13 +302,42 @@ impl<'a> Ctx<'a> {
 
     /// Take the address of a value.
     pub fn address_of(&self, v: &Value) -> Result<Value> {
-        let addr = v
-            .address()
-            .ok_or_else(|| anyhow!("cannot take the address of a value not in memory"))?;
+        let addr = match v.address() {
+            Some(a) => a,
+            None => match self.location(v) {
+                Ok(loc) => bail!("cannot take the address of a value in {loc}"),
+                Err(_) if v.bitfield.is_some() => bail!("cannot take the address of a bitfield"),
+                Err(e) => bail!("cannot take the address: {e}"),
+            },
+        };
         let ptr_size = self.ptr_size();
         let pty = self.info.pointer_to(v.ty, ptr_size);
         let bytes = addr.to_le_bytes()[..usize::try_from(ptr_size)?].to_vec();
         Ok(Value::from_bytes(pty, bytes))
+    }
+
+    /// Where a value lives: a range of linear memory, or (part of) a Wasm
+    /// local, global or operand-stack slot. Fails for values that were
+    /// computed rather than stored (constants, and values whose DWARF
+    /// location is a computed expression or split into pieces).
+    pub fn location(&self, v: &Value) -> Result<location::Location> {
+        let size = match v.bitfield {
+            Some((off, bits)) => (off + bits).div_ceil(8),
+            None => self.info.type_size(v.ty).unwrap_or(0),
+        };
+        match &v.data {
+            Data::Memory(base) => Ok(location::Location::Mem { base: *base, size }),
+            Data::Bytes {
+                addr: Some(base), ..
+            } => Ok(location::Location::Mem { base: *base, size }),
+            Data::Bytes {
+                slot: Some((slot, offset)),
+                ..
+            } => Ok(location::Location::in_slot(*slot, *offset, size)),
+            Data::Bytes { .. } => {
+                bail!("the value has no storage location (it is computed, not stored)")
+            }
+        }
     }
 
     /// If `v` is a Rust-style enum (struct with a variant part), find

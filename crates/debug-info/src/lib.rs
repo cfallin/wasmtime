@@ -18,6 +18,8 @@
 //!   enums (variant parts).
 //! - [`eval`]: DWARF location-expression evaluation with the Wasm
 //!   extensions (`DW_OP_WASM_location`).
+//! - [`location`]: where a value lives (memory range, Wasm local,
+//!   global or operand-stack slot).
 //! - [`value`] and [`path`]: values and simple "access path"
 //!   expressions (`p->x`, `arr[2].y`, `*p`, `$1.field`).
 //! - [`format`] and [`pretty`]: value formatting and a small set of
@@ -28,6 +30,7 @@ pub mod demangle;
 pub mod dwarf;
 pub mod eval;
 pub mod format;
+pub mod location;
 pub mod module;
 pub mod path;
 pub mod pretty;

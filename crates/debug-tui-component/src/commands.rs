@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow, bail};
 use std::fmt::Write;
 use wasmtime_debug_info::demangle::demangle;
 use wasmtime_debug_info::format::{FormatOptions, describe_type, format_value};
+use wasmtime_debug_info::location::{Location, WasmSlot};
 use wasmtime_debug_info::path::{self, HistoryRef, Path};
 use wasmtime_debug_info::types::{BaseEnc, Lang, TypeKind};
 use wasmtime_debug_info::value::{Ctx, Value};
@@ -42,6 +43,10 @@ Source and data:
                            %localN, %stackN, %globalN, %tableN[I], %pc.
                            GC refs: `.N` (field), `[I]`.
   ptype PATH, whatis PATH  Show the type of a value.
+  location (loc) PATH      Show where a value is stored: `memory ADDR length N`,
+                           `local N`, `global N` or `stack N`. `&PATH` gives
+                           the address of a value in memory, e.g. for
+                           `x/16xb &buf`.
   info locals|args         Show variables of the selected frame.
   info frame               Describe the selected frame.
   info functions [TEXT]    List functions (with debug info) matching TEXT.
@@ -219,6 +224,7 @@ impl Session<'_> {
             "list" | "l" => self.cmd_list(args),
             "print" | "p" | "output" => self.cmd_print(args, fmt),
             "ptype" => self.cmd_ptype(args, true),
+            "location" | "loc" => self.cmd_location(args),
             "whatis" => self.cmd_ptype(args, false),
             "x" => self.cmd_examine(args, fmt),
             "info" | "i" => self.cmd_info(args),
@@ -1009,6 +1015,13 @@ impl Session<'_> {
     /// Evaluate a path to either a source-level value (with its module
     /// and instance) or a Wasm-level value.
     fn eval(&mut self, expr: &str) -> Result<HistEntry> {
+        self.eval_opts(expr, true)
+    }
+
+    /// Evaluate a path. With `snapshot`, source-level values are captured
+    /// (as for the value history); otherwise they keep referring to
+    /// their storage, which preserves their location for `location`.
+    fn eval_opts(&mut self, expr: &str, snapshot: bool) -> Result<HistEntry> {
         let p = path::parse(expr)?;
         match p.root() {
             Path::History(h) => {
@@ -1037,7 +1050,11 @@ impl Session<'_> {
                         let target = FrameTarget::new(self.d, None, inst);
                         let ctx = Ctx::new(dbg, &target);
                         let v = path::eval(&ctx, &p, &mut |_| Ok(value.clone()))?;
-                        let v = ctx.snapshot(&v).unwrap_or(v);
+                        let v = if snapshot {
+                            ctx.snapshot(&v).unwrap_or(v)
+                        } else {
+                            v
+                        };
                         Ok(HistEntry::Src {
                             module,
                             inst: self.inst_index_of(inst),
@@ -1059,7 +1076,7 @@ impl Session<'_> {
                 let root = self.builtin_root(name)?;
                 self.eval_wasm_path(&p, root)
             }
-            _ => self.eval_source(&p),
+            _ => self.eval_source(&p, snapshot),
         }
     }
 
@@ -1128,54 +1145,110 @@ impl Session<'_> {
     /// selected frame's function, else a global or table of the selected
     /// frame's instance (or the default instance).
     fn named_wasm_entity(&self, name: &str) -> Result<Option<WVal>> {
+        Ok(match self.resolve_wasm_name(name) {
+            Some(NamedEntity::Local(i)) => Some(self.builtin_root(&format!("local{i}"))?),
+            Some(NamedEntity::Global(i)) => Some(self.builtin_root(&format!("global{i}"))?),
+            Some(NamedEntity::Table(i)) => Some(self.builtin_root(&format!("table{i}"))?),
+            None => None,
+        })
+    }
+
+    /// Resolve a name-section name: a local of the selected frame's
+    /// function, else a table or global of the default instance.
+    fn resolve_wasm_name(&self, name: &str) -> Option<NamedEntity> {
         if let Some(v) = self.vframes.get(self.selected) {
             let p = &self.phys[v.phys];
             let info = &self.modules[p.module].info;
             if let Some(func) = p.func {
-                let index = info
+                if let Some(((_, l), _)) = info
                     .local_names
                     .iter()
                     .find(|((f, _), n)| *f == func && n.as_str() == name)
-                    .map(|((_, l), _)| *l);
-                if let Some(i) = index {
-                    let locals = p.frame.get_locals(self.d).map_err(|e| anyhow!("{e:?}"))?;
-                    let v = locals
-                        .get(usize::try_from(i)?)
-                        .ok_or_else(|| anyhow!("No local {i} (frame has {}).", locals.len()))?;
-                    return Ok(Some(WVal::from_api(v)));
+                {
+                    return Some(NamedEntity::Local(*l));
                 }
             }
         }
-        let Ok(ii) = self.default_inst() else {
-            return Ok(None);
-        };
+        let ii = self.default_inst().ok()?;
         let info = &self.modules[self.instances[ii].module].info;
-        if let Some(t) = info
-            .table_names
-            .iter()
-            .find(|(_, n)| n.as_str() == name)
-            .map(|(t, _)| *t)
-        {
-            let table = self.instances[ii]
-                .handle
-                .get_table(self.d, t)
-                .map_err(|_| anyhow!("No table {t}."))?;
-            return Ok(Some(WVal::Table(table)));
-        }
-        let Some(g) = info
-            .global_names
-            .iter()
-            .find(|(_, n)| n.as_str() == name)
-            .map(|(g, _)| *g)
-        else {
-            return Ok(None);
+        let find = |names: &std::collections::HashMap<u32, String>| {
+            names
+                .iter()
+                .find(|(_, n)| n.as_str() == name)
+                .map(|(i, _)| *i)
         };
-        let global = self.instances[ii]
-            .handle
-            .get_global(self.d, g)
-            .map_err(|_| anyhow!("No global {g}."))?;
-        let v = global.get(self.d).map_err(|e| anyhow!("{e:?}"))?;
-        Ok(Some(WVal::from_api(&v)))
+        if let Some(t) = find(&info.table_names) {
+            return Some(NamedEntity::Table(t));
+        }
+        find(&info.global_names).map(NamedEntity::Global)
+    }
+
+    /// The storage location of a Wasm-level path (`%local3`, `$x`,
+    /// `%global0`, `%stack1`). Only whole slots are locations; GC object
+    /// fields and table elements are not (yet) supported.
+    fn wasm_location(&self, p: &Path) -> Result<Location> {
+        let slot = match p {
+            Path::Builtin(name) => {
+                let num = |prefix: &str| -> Option<u32> { name.strip_prefix(prefix)?.parse().ok() };
+                if let Some(i) = num("local") {
+                    WasmSlot::Local(i)
+                } else if let Some(i) = num("global") {
+                    WasmSlot::Global(i)
+                } else if let Some(i) = num("stack") {
+                    WasmSlot::Stack(i)
+                } else if name == "pc" {
+                    bail!("`%pc` is not stored in the Wasm machine's state.")
+                } else {
+                    bail!("`%{name}` has no storage location.")
+                }
+            }
+            Path::WasmName(name) => match self.resolve_wasm_name(name) {
+                Some(NamedEntity::Local(i)) => WasmSlot::Local(i),
+                Some(NamedEntity::Global(i)) => WasmSlot::Global(i),
+                Some(NamedEntity::Table(_)) => bail!("`${name}` is a table, not a storage slot."),
+                None => bail!("No Wasm local or global named `${name}`."),
+            },
+            _ => bail!("Locations of Wasm GC object fields and table elements are not supported."),
+        };
+        let size = match self.builtin_root(&match slot {
+            WasmSlot::Local(i) => format!("local{i}"),
+            WasmSlot::Global(i) => format!("global{i}"),
+            WasmSlot::Stack(i) => format!("stack{i}"),
+        })? {
+            WVal::Num(WasmVal::I32(_) | WasmVal::F32(_)) => 4,
+            WVal::Num(WasmVal::I64(_) | WasmVal::F64(_)) => 8,
+            WVal::Num(WasmVal::V128(_)) => 16,
+            // References are opaque; report a nominal size.
+            _ => 4,
+        };
+        Ok(Location::in_slot(slot, 0, size))
+    }
+
+    fn cmd_location(&mut self, args: &str) -> Result<()> {
+        if args.is_empty() {
+            bail!("Argument required (path whose location to show).");
+        }
+        let p = path::parse(args)?;
+        let loc = match p.root() {
+            Path::WasmName(_) | Path::Builtin(_) => self.wasm_location(&p)?,
+            _ => match self.eval_opts(args, false)? {
+                HistEntry::Src {
+                    module,
+                    inst,
+                    value,
+                } => {
+                    let dbg = self.modules[module].info.debug.as_ref().unwrap();
+                    let inst = inst.unwrap_or(0);
+                    let target = FrameTarget::new(self.d, None, &self.instances[inst].handle);
+                    Ctx::new(dbg, &target).location(&value)?
+                }
+                HistEntry::Wasm(_) => bail!(
+                    "Locations of Wasm GC object fields and table elements are not supported."
+                ),
+            },
+        };
+        self.conn.println(&loc.to_string());
+        Ok(())
     }
 
     fn eval_wasm_path(&self, p: &Path, root: WVal) -> Result<HistEntry> {
@@ -1192,7 +1265,7 @@ impl Session<'_> {
         Ok(HistEntry::Wasm(go(self, p, &root)?))
     }
 
-    fn eval_source(&mut self, p: &Path) -> Result<HistEntry> {
+    fn eval_source(&mut self, p: &Path, snapshot: bool) -> Result<HistEntry> {
         let module = self
             .default_module()
             .ok_or_else(|| anyhow!("No debug info available."))?;
@@ -1250,7 +1323,11 @@ impl Session<'_> {
             }
         };
         let v = path::eval(&ctx, p, &mut root)?;
-        let v = ctx.snapshot(&v).unwrap_or(v);
+        let v = if snapshot {
+            ctx.snapshot(&v).unwrap_or(v)
+        } else {
+            v
+        };
         Ok(HistEntry::Src {
             module,
             inst: Some(inst),
@@ -1918,6 +1995,13 @@ impl Session<'_> {
         self.conn.print(&out);
         Ok(())
     }
+}
+
+/// A Wasm entity named in the name section.
+enum NamedEntity {
+    Local(u32),
+    Global(u32),
+    Table(u32),
 }
 
 #[derive(Clone, Copy)]
