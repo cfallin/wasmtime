@@ -8,7 +8,7 @@ pub fn debug_tui() -> Result<&'static [u8]> {
     crate::DEBUG_TUI_COMPONENT.ok_or_else(|| {
         format_err!(concat!(
             "debug-tui component not included in this build. Please build ",
-            "in-tree with `--features debug-tui` or use release binaries.",
+            "in-tree with `--features debug-dap-tui` or use release binaries.",
         ))
     })
 }

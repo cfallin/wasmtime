@@ -13,9 +13,9 @@ mod cross_engine;
 mod custom_code_memory;
 mod debug;
 mod debug_component;
-#[cfg(feature = "debug-tui")]
+#[cfg(feature = "debug-dap-tui")]
 mod debug_dap;
-#[cfg(feature = "debug-tui")]
+#[cfg(feature = "debug-dap-tui")]
 mod debug_tui;
 mod defaults;
 mod engine;

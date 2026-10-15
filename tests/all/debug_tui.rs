@@ -9,11 +9,11 @@
 //! with `-Ddebug-fs`.
 //!
 //! Requirements:
-//!   - Built with `--features debug-tui`.
+//!   - Built with `--features debug-dap-tui`.
 //!   - `WASI_SDK_PATH` set at build time (for the C test program).
 //!
 //! These are `#[ignore]`d by default, like the gdbstub tests; run them with
-//! `cargo test --features debug-tui --test all -- --ignored debug_tui::`.
+//! `cargo test --features debug-dap-tui --test all -- --ignored debug_tui::`.
 
 use filecheck::{CheckerBuilder, NO_VARIABLES};
 use std::io::{BufRead, BufReader, Read, Write};
