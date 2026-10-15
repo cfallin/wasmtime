@@ -469,6 +469,16 @@ impl ModuleInfo {
         instrs.get(i + 1).map(|(o, _)| *o)
     }
 
+    /// The offset of the instruction immediately preceding the one at
+    /// `pc` in the same function, if any. For a caller frame's return
+    /// address, this is the call instruction.
+    pub fn prev_instruction(&self, pc: u32) -> Option<u32> {
+        let f = self.func_at_pc(pc)?;
+        let instrs = self.instructions(f.index).ok()?;
+        let i = instrs.iter().position(|(o, _)| *o == pc)?;
+        instrs.get(i.checked_sub(1)?).map(|(o, _)| *o)
+    }
+
     /// Kind of the instruction at `pc`.
     pub fn instruction_kind(&self, pc: u32) -> Option<InstrKind> {
         let f = self.func_at_pc(pc)?;

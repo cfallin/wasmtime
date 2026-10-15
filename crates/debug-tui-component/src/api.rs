@@ -30,6 +30,19 @@ impl Resumption {
         Resumption { future, pollable }
     }
 
+    /// Run backward by one instruction (`step`) or to the previous
+    /// breakpoint or watchpoint stop. Fails for debuggees that are not
+    /// replays.
+    pub fn reverse(d: &Debuggee, step: bool) -> std::result::Result<Self, Error> {
+        let future = if step {
+            d.reverse_step()?
+        } else {
+            d.reverse_continue()?
+        };
+        let pollable = Some(AsyncPollable::new(future.subscribe()));
+        Ok(Resumption { future, pollable })
+    }
+
     pub async fn wait(&mut self) {
         if let Some(pollable) = self.pollable.as_mut() {
             pollable.wait_for().await;

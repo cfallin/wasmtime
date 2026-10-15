@@ -11,9 +11,13 @@
 //!   into trees mirroring the pretty-printer's view (struct fields,
 //!   sequence elements, map entries, enum payloads), including Wasm GC
 //!   objects.
-//! - Breakpoints: source lines, functions, and instructions.
+//! - Breakpoints: source lines, functions, and instructions; data
+//!   breakpoints (watchpoints) on values in linear memory, which stop on
+//!   writes.
 //! - Execution: continue, pause, next/step-in (by line or, with
-//!   `granularity: "instruction"`, by Wasm instruction), step-out.
+//!   `granularity: "instruction"`, by Wasm instruction), step-out. When
+//!   debugging a replay (`wasmtime replay`), also `stepBack` and
+//!   `reverseContinue`.
 //! - Memory: `readMemory` on linear memory, and `disassemble`.
 //! - `evaluate`: access paths for watches and hovers; in the `repl`
 //!   context, any command of the text interface (e.g. `wasm-table`,
@@ -26,6 +30,7 @@
 //! [`wasmtime_debug_dap::code_address`]).
 
 use crate::api;
+use crate::commands::WatchTarget;
 use crate::session::{FrameTarget, Front, HistEntry, Outcome, RunState, Session, StopReason};
 use crate::wasmval::{self, WVal};
 use anyhow::{Result, anyhow};
@@ -128,6 +133,11 @@ struct DapState {
     source_bps: HashMap<String, Vec<u32>>,
     function_bps: Vec<u32>,
     instruction_bps: Vec<u32>,
+    /// Watchpoint ids set via `setDataBreakpoints`.
+    data_bps: Vec<u32>,
+    /// Watch targets handed out by `dataBreakpointInfo`, indexed by
+    /// `dataId`.
+    data_targets: Vec<(String, WatchTarget)>,
     stop_on_entry: bool,
 }
 
@@ -147,6 +157,26 @@ enum Run {
     NextI,
     StepI,
     Finish,
+    ReverseContinue,
+    ReverseNext,
+    ReverseStep,
+    ReverseNextI,
+    ReverseStepI,
+    ReverseFinish,
+}
+
+impl Run {
+    fn is_reverse(self) -> bool {
+        matches!(
+            self,
+            Run::ReverseContinue
+                | Run::ReverseNext
+                | Run::ReverseStep
+                | Run::ReverseNextI
+                | Run::ReverseStepI
+                | Run::ReverseFinish
+        )
+    }
 }
 
 fn args(req: &Value) -> &Value {
@@ -184,8 +214,11 @@ fn threads() -> Value {
     json!({ "threads": [{ "id": 1, "name": "main" }] })
 }
 
-fn capabilities() -> Value {
+fn capabilities(reversible: bool) -> Value {
     json!({
+        "supportsStepBack": reversible,
+        "supportsDataBreakpoints": true,
+        "supportsDataBreakpointBytes": true,
         "supportsConfigurationDoneRequest": true,
         "supportsFunctionBreakpoints": true,
         "supportsInstructionBreakpoints": true,
@@ -213,6 +246,12 @@ fn repl_run_command(word: &str) -> Option<Run> {
         "nexti" | "ni" => Run::NextI,
         "stepi" | "si" => Run::StepI,
         "finish" | "fin" => Run::Finish,
+        "reverse-continue" | "rc" => Run::ReverseContinue,
+        "reverse-next" | "rn" => Run::ReverseNext,
+        "reverse-step" | "rs" => Run::ReverseStep,
+        "reverse-nexti" | "rni" => Run::ReverseNextI,
+        "reverse-stepi" | "rsi" => Run::ReverseStepI,
+        "reverse-finish" => Run::ReverseFinish,
         _ => return None,
     })
 }
@@ -231,7 +270,8 @@ pub async fn run(s: &mut Session<'_>) -> Result<()> {
         let command = req["command"].as_str().unwrap_or("").to_string();
         match command.as_str() {
             "initialize" => {
-                s.transport().respond(&req, Ok(capabilities())).await?;
+                let caps = capabilities(s.reversible);
+                s.transport().respond(&req, Ok(caps)).await?;
                 s.transport().event("initialized", json!({})).await?;
             }
             "launch" | "attach" => {
@@ -255,7 +295,7 @@ pub async fn run(s: &mut Session<'_>) -> Result<()> {
                     run_and_report(s, &mut st, Run::Continue).await?;
                 }
             }
-            "continue" | "next" | "stepIn" | "stepOut" => {
+            "continue" | "next" | "stepIn" | "stepOut" | "stepBack" | "reverseContinue" => {
                 let instr = args(&req)["granularity"].as_str() == Some("instruction");
                 let how = match (command.as_str(), instr) {
                     ("continue", _) => Run::Continue,
@@ -263,8 +303,17 @@ pub async fn run(s: &mut Session<'_>) -> Result<()> {
                     ("next", true) => Run::NextI,
                     ("stepIn", false) => Run::Step,
                     ("stepIn", true) => Run::StepI,
+                    ("stepBack", false) => Run::ReverseNext,
+                    ("stepBack", true) => Run::ReverseNextI,
+                    ("reverseContinue", _) => Run::ReverseContinue,
                     _ => Run::Finish,
                 };
+                if how.is_reverse() && !s.reversible {
+                    s.transport()
+                        .respond(&req, Err(crate::session::NOT_REVERSIBLE.into()))
+                        .await?;
+                    continue;
+                }
                 if s.state == RunState::Exited {
                     s.transport()
                         .respond(&req, Err("The program is not being run.".into()))
@@ -301,6 +350,12 @@ pub async fn run(s: &mut Session<'_>) -> Result<()> {
             {
                 let expr = args(&req)["expression"].as_str().unwrap_or("").to_string();
                 let how = repl_run_command(expr.split_whitespace().next().unwrap()).unwrap();
+                if how.is_reverse() && !s.reversible {
+                    s.transport()
+                        .respond(&req, Err(crate::session::NOT_REVERSIBLE.into()))
+                        .await?;
+                    continue;
+                }
                 s.transport()
                     .respond(&req, Ok(json!({ "result": "", "variablesReference": 0 })))
                     .await?;
@@ -339,6 +394,12 @@ async fn run_and_report(s: &mut Session<'_>, st: &mut DapState, how: Run) -> Res
         Run::NextI => s.nexti().await,
         Run::StepI => s.stepi().await,
         Run::Finish => s.finish().await,
+        Run::ReverseContinue => s.reverse_cont().await,
+        Run::ReverseNext => s.reverse_step_line(true).await,
+        Run::ReverseStep => s.reverse_step_line(false).await,
+        Run::ReverseNextI => s.reverse_nexti().await,
+        Run::ReverseStepI => s.reverse_stepi().await,
+        Run::ReverseFinish => s.reverse_finish().await,
     };
     let outcome = match outcome {
         Ok(o) => o,
@@ -379,6 +440,24 @@ async fn run_and_report(s: &mut Session<'_>, st: &mut DapState, how: Run) -> Res
                     b.hits += 1;
                 }
             }
+            // Describe watchpoint and history-boundary stops in the
+            // console too.
+            let note = match &reason {
+                StopReason::Watchpoint(r) => s.watch_report_text(r),
+                StopReason::ReplayBegin => {
+                    "No more reverse-execution history: at the beginning of the recording.\n".into()
+                }
+                StopReason::ReplayEnd => "No more execution history: at the end of the \
+                                          recording; continuing will complete it.\n"
+                    .into(),
+                _ => String::new(),
+            };
+            let note = note.trim_start_matches('\n');
+            if !note.is_empty() {
+                s.transport()
+                    .event("output", json!({ "category": "console", "output": note }))
+                    .await?;
+            }
             let (reason, description, hit) = match reason {
                 StopReason::Breakpoint(Some(id)) => (
                     "breakpoint",
@@ -394,6 +473,24 @@ async fn run_and_report(s: &mut Session<'_>, st: &mut DapState, how: Run) -> Res
                     vec![],
                 ),
                 StopReason::Exception => ("exception", "Wasm exception thrown".into(), vec![]),
+                StopReason::Watchpoint(r) => {
+                    let ids: Vec<String> = r.ids.iter().map(|i| i.to_string()).collect();
+                    (
+                        "data breakpoint",
+                        format!("Watchpoint {}", ids.join(", ")),
+                        r.ids.iter().map(|&i| i64::from(i)).collect(),
+                    )
+                }
+                StopReason::ReplayBegin => (
+                    "beginning of recording",
+                    "At the beginning of the recording".into(),
+                    vec![],
+                ),
+                StopReason::ReplayEnd => (
+                    "end of recording",
+                    "At the end of the recording".into(),
+                    vec![],
+                ),
             };
             let ev = StoppedEvent {
                 reason: reason.into(),
@@ -423,6 +520,8 @@ async fn handle(s: &mut Session<'_>, st: &mut DapState, command: &str, a: &Value
         "setFunctionBreakpoints" => set_function_breakpoints(s, st, a),
         "setInstructionBreakpoints" => set_instruction_breakpoints(s, st, a),
         "setExceptionBreakpoints" => Ok(json!({})),
+        "dataBreakpointInfo" => data_breakpoint_info(s, st, a),
+        "setDataBreakpoints" => set_data_breakpoints(s, st, a),
         "readMemory" => read_memory(s, a),
         "disassemble" => disassemble(s, a),
         "source" => source(s, a),
@@ -1011,6 +1110,141 @@ fn set_instruction_breakpoints(s: &mut Session<'_>, st: &mut DapState, a: &Value
     let bps = add_breakpoints(s, &specs, &mut ids);
     st.instruction_bps = ids;
     Ok(json!({ "breakpoints": bps }))
+}
+
+/// Resolve the target of a data breakpoint: a variable (a child of a
+/// `variablesReference`), an expression, or an address range.
+fn data_target(s: &mut Session<'_>, st: &DapState, a: &Value) -> Result<(String, WatchTarget)> {
+    let name = a["name"].as_str().unwrap_or("").to_string();
+    if a["asAddress"].as_bool() == Some(true) {
+        let addr = parse_memory_reference(&name)
+            .map(Ok)
+            .unwrap_or_else(|| s.eval_address(&name))?;
+        let len = a["bytes"].as_u64().unwrap_or(1);
+        let t = WatchTarget {
+            inst: s.default_inst()?,
+            addr,
+            len,
+            ty: None,
+        };
+        return Ok((format!("memory {addr:#x} length {len:#x}"), t));
+    }
+    let reference = a["variablesReference"].as_i64().filter(|r| *r > 0);
+    let Some(r) = reference else {
+        // An expression, evaluated in the given frame.
+        let saved = s.selected;
+        if a.get("frameId").is_some_and(|f| !f.is_null()) && !s.vframes.is_empty() {
+            s.selected = frame_index(s, a)?;
+        }
+        let t = s.watch_target(&name);
+        s.selected = saved;
+        return Ok((name, t?));
+    };
+    let r = st
+        .refs
+        .get(usize::try_from(r - 1)?)
+        .ok_or_else(|| anyhow!("invalid variables reference {r}"))?;
+    match r {
+        VarRef::Scope {
+            frame,
+            kind: ScopeKind::Args | ScopeKind::Locals,
+        } => {
+            let saved = s.selected;
+            s.selected = *frame;
+            let t = s.watch_target(&name);
+            s.selected = saved;
+            Ok((name, t?))
+        }
+        VarRef::Src {
+            module,
+            inst,
+            value,
+            path,
+        } => {
+            let (module, inst) = (*module, *inst);
+            let dbg = s.modules[module].info.debug.as_ref().unwrap();
+            let target = FrameTarget::new(s.d, None, &s.instances[inst].handle);
+            let ctx = Ctx::new(dbg, &target);
+            let opts = FormatOptions::default();
+            let mut start = 0;
+            loop {
+                let kids = children(&ctx, value, &opts, start, 1000);
+                if kids.is_empty() {
+                    break Err(anyhow!("no member `{name}`"));
+                }
+                start += kids.len();
+                if let Some(k) = kids.into_iter().find(|k| k.name == name) {
+                    let desc = path
+                        .as_deref()
+                        .and_then(|p| k.eval_name(p))
+                        .unwrap_or_else(|| name.clone());
+                    drop(ctx);
+                    break Ok((desc, s.value_watch_target(module, inst, &k.value)?));
+                }
+            }
+        }
+        _ => Err(anyhow!(
+            "Only values in linear memory can be watched, not Wasm locals, globals or operands."
+        )),
+    }
+}
+
+fn data_breakpoint_info(s: &mut Session<'_>, st: &mut DapState, a: &Value) -> Result<Value> {
+    Ok(match data_target(s, st, a) {
+        Ok((desc, t)) => {
+            st.data_targets.push((desc.clone(), t));
+            json!({
+                "dataId": (st.data_targets.len() - 1).to_string(),
+                "description": desc,
+                "accessTypes": ["write"],
+                "canPersist": false,
+            })
+        }
+        Err(e) => json!({ "dataId": null, "description": format!("{e}") }),
+    })
+}
+
+fn set_data_breakpoints(s: &mut Session<'_>, st: &mut DapState, a: &Value) -> Result<Value> {
+    for id in std::mem::take(&mut st.data_bps) {
+        s.delete_breakpoint(id);
+    }
+    let mut out = vec![];
+    for b in a["breakpoints"].as_array().cloned().unwrap_or_default() {
+        let result = (|| -> Result<u32> {
+            if b["accessType"].as_str().is_some_and(|t| t != "write") {
+                return Err(anyhow!("Only writes can be watched."));
+            }
+            let (desc, t) = b["dataId"]
+                .as_str()
+                .and_then(|d| d.parse::<usize>().ok())
+                .and_then(|i| st.data_targets.get(i))
+                .ok_or_else(|| anyhow!("unknown dataId"))?;
+            let t = *t;
+            s.add_watchpoint(desc.clone(), t.inst, t.addr, t.len, t.ty)
+        })();
+        match result {
+            Ok(id) => {
+                st.data_bps.push(id);
+                let w = s.watchpoints.iter().find(|w| w.id == id).unwrap();
+                out.push(Breakpoint {
+                    id: Some(i64::from(id)),
+                    verified: true,
+                    message: Some(if w.ty.is_some() {
+                        format!("{} (memory {:#x} length {:#x})", w.spec, w.addr, w.len)
+                    } else {
+                        w.spec.clone()
+                    }),
+                    ..Default::default()
+                });
+            }
+            Err(e) => out.push(Breakpoint {
+                verified: false,
+                message: Some(format!("{e}")),
+                ..Default::default()
+            }),
+        }
+    }
+    Ok(json!({ "breakpoints": out }))
 }
 
 fn read_memory(s: &mut Session<'_>, a: &Value) -> Result<Value> {

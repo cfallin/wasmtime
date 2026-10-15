@@ -1,12 +1,14 @@
 //! Command parsing and execution.
 
-use crate::session::{FrameTarget, HistEntry, Outcome, RunState, Session, StopReason, to_wasm_val};
+use crate::session::{
+    FrameTarget, HistEntry, Outcome, RunState, Session, StopReason, WatchReport, to_wasm_val,
+};
 use crate::wasmval::{self, WVal};
 use anyhow::{Result, anyhow, bail};
 use std::fmt::Write;
 use wasmtime_debug_info::cli::{
-    BreakpointSpec, ExamineFormat, HELP, basename, demangle_wat, format_examine_string, hexdump,
-    parse_u64, truncate,
+    BreakpointSpec, ExamineFormat, HELP, basename, demangle_wat, format_examine_string,
+    format_watched_bytes, hexdump, parse_u64, truncate,
 };
 use wasmtime_debug_info::format::{FormatOptions, describe_type, format_value};
 use wasmtime_debug_info::location::{Location, WasmSlot};
@@ -40,6 +42,18 @@ pub fn is_command(word: &str) -> bool {
             | "finish"
             | "fin"
             | "interrupt"
+            | "reverse-continue"
+            | "rc"
+            | "reverse-step"
+            | "rs"
+            | "reverse-next"
+            | "rn"
+            | "reverse-finish"
+            | "reverse-stepi"
+            | "rsi"
+            | "reverse-nexti"
+            | "rni"
+            | "watch"
             | "break"
             | "b"
             | "br"
@@ -76,6 +90,15 @@ pub fn is_command(word: &str) -> bool {
             | "wasm-modules"
             | "wasm-functions"
     )
+}
+
+/// Memory to watch, with the type of the value it holds.
+#[derive(Clone, Copy)]
+pub struct WatchTarget {
+    pub inst: usize,
+    pub addr: u64,
+    pub len: u64,
+    pub ty: Option<(usize, wasmtime_debug_info::types::TypeId)>,
 }
 
 /// Result of executing a command.
@@ -182,6 +205,13 @@ impl Session<'_> {
             "stepi" | "si" => self.cmd_resume(Resume::StepI).await,
             "nexti" | "ni" => self.cmd_resume(Resume::NextI).await,
             "finish" | "fin" => self.cmd_resume(Resume::Finish).await,
+            "reverse-continue" | "rc" => self.cmd_resume(Resume::ReverseContinue).await,
+            "reverse-step" | "rs" => self.cmd_resume(Resume::ReverseStep).await,
+            "reverse-next" | "rn" => self.cmd_resume(Resume::ReverseNext).await,
+            "reverse-finish" => self.cmd_resume(Resume::ReverseFinish).await,
+            "reverse-stepi" | "rsi" => self.cmd_resume(Resume::ReverseStepI).await,
+            "reverse-nexti" | "rni" => self.cmd_resume(Resume::ReverseNextI).await,
+            "watch" => self.cmd_watch(args),
             "interrupt" => {
                 self.println("The program is not running.");
                 Ok(())
@@ -453,6 +483,14 @@ impl Session<'_> {
             let desc = self.frame_desc(self.selected);
             self.println(&format!("Run till exit from #{}  {desc}", self.selected));
         }
+        if let Resume::ReverseFinish = how {
+            self.require_stopped()?;
+            if !self.reversible {
+                bail!("{}", crate::session::NOT_REVERSIBLE);
+            }
+            let desc = self.frame_desc(self.selected);
+            self.println(&format!("Run back to call of #{}  {desc}", self.selected));
+        }
         // Remember the callee (for return values) when finishing.
         let finishing = match how {
             Resume::Finish => {
@@ -485,12 +523,21 @@ impl Session<'_> {
                 self.nexti().await
             }
             Resume::Finish => self.finish().await,
+            Resume::ReverseContinue => self.reverse_cont().await,
+            Resume::ReverseStep => self.reverse_step_line(false).await,
+            Resume::ReverseNext => self.reverse_step_line(true).await,
+            Resume::ReverseFinish => self.reverse_finish().await,
+            Resume::ReverseStepI => self.reverse_stepi().await,
+            Resume::ReverseNextI => self.reverse_nexti().await,
         }?;
         self.report(
             outcome,
             before,
             finishing,
-            matches!(how, Resume::StepI | Resume::NextI),
+            matches!(
+                how,
+                Resume::StepI | Resume::NextI | Resume::ReverseStepI | Resume::ReverseNextI
+            ),
         );
         Ok(())
     }
@@ -509,7 +556,24 @@ impl Session<'_> {
             }
             Outcome::Stopped(r) => r,
         };
+        match &reason {
+            StopReason::ReplayBegin => {
+                self.println(
+                    "\nNo more reverse-execution history: at the beginning of the recording.",
+                );
+            }
+            StopReason::ReplayEnd => {
+                self.println(
+                    "\nNo more execution history: at the end of the recording; \
+                     continuing will complete it.",
+                );
+            }
+            _ => {}
+        }
         if self.vframes.is_empty() {
+            if matches!(reason, StopReason::ReplayBegin | StopReason::ReplayEnd) {
+                return;
+            }
             self.println("Stopped (no Wasm frames on the stack).");
             return;
         }
@@ -570,6 +634,15 @@ impl Session<'_> {
                     self.print_current_line(0);
                 }
             }
+            StopReason::Watchpoint(report) => {
+                self.report_watch(&report);
+                self.println(&self.frame_desc(0));
+                self.print_current_line(0);
+            }
+            StopReason::ReplayBegin | StopReason::ReplayEnd => {
+                self.println(&self.frame_desc(0));
+                self.print_current_line(0);
+            }
             StopReason::Finished => {
                 self.print_frame_header(0, false);
                 if let Some((module, pc, inlined)) = finishing {
@@ -579,6 +652,62 @@ impl Session<'_> {
                 }
             }
         }
+    }
+
+    /// Describe a watchpoint stop: the watchpoints hit, with their old and
+    /// new values.
+    pub(crate) fn report_watch(&mut self, r: &WatchReport) {
+        let text = self.watch_report_text(r);
+        self.print(&text);
+    }
+
+    /// The text describing a watchpoint stop.
+    pub(crate) fn watch_report_text(&self, r: &WatchReport) -> String {
+        let mut out = String::new();
+        if r.ids.is_empty() {
+            out.push_str("\nWatched memory is being written.\n");
+        }
+        for (k, id) in r.ids.iter().enumerate() {
+            let spec = self
+                .watchpoints
+                .iter()
+                .find(|w| w.id == *id)
+                .map(|w| w.spec.clone())
+                .unwrap_or_default();
+            let old = self.format_watch_value(*id, r.old[k].as_deref());
+            let new = self.format_watch_value(*id, r.new[k].as_deref());
+            if r.reverse {
+                let _ = write!(
+                    out,
+                    "\nWatchpoint {id}: {spec} (running backward: stopped before the write)\n\n\
+                     Value before = {old}\nValue after = {new}\n"
+                );
+            } else {
+                let _ = write!(
+                    out,
+                    "\nWatchpoint {id}: {spec}\n\nOld value = {old}\nNew value = {new}\n"
+                );
+            }
+        }
+        out
+    }
+
+    /// Format the contents of watchpoint `id`'s memory, with the watched
+    /// value's type if known.
+    fn format_watch_value(&self, id: u32, bytes: Option<&[u8]>) -> String {
+        let Some(bytes) = bytes else {
+            return "<unknown>".into();
+        };
+        let w = self.watchpoints.iter().find(|w| w.id == id);
+        if let Some((module, ty, inst)) = w.and_then(|w| w.ty.map(|(m, t)| (m, t, w.inst))) {
+            if let Some(dbg) = self.modules[module].info.debug.as_ref() {
+                let target = FrameTarget::new(self.d, None, &self.instances[inst].handle);
+                let ctx = Ctx::new(dbg, &target);
+                let v = Value::from_bytes(ty, bytes.to_vec());
+                return format_value(&ctx, &v, &FormatOptions::default());
+            }
+        }
+        format_watched_bytes(bytes)
     }
 
     /// After `finish`, show the callee's return value(s), which are on
@@ -784,10 +913,82 @@ impl Session<'_> {
         Ok(())
     }
 
+    fn cmd_watch(&mut self, args: &str) -> Result<()> {
+        if args.is_empty() {
+            bail!("Argument required (expression to watch, or `-m ADDR LEN`).");
+        }
+        if let Some(rest) = args.strip_prefix("-m ") {
+            let mut parts = rest.split_whitespace();
+            let (Some(a), Some(l), None) = (parts.next(), parts.next(), parts.next()) else {
+                bail!("Usage: watch -m ADDR LEN");
+            };
+            let addr = self.eval_address(a)?;
+            let len = parse_u64(l)?;
+            let inst = self.default_inst()?;
+            let id = self.add_watchpoint(format!("-m {addr:#x} {len}"), inst, addr, len, None)?;
+            self.println(&format!(
+                "Watchpoint {id}: memory {addr:#x} length {len:#x}"
+            ));
+            return Ok(());
+        }
+        let t = self.watch_target(args)?;
+        let id = self.add_watchpoint(args.to_string(), t.inst, t.addr, t.len, t.ty)?;
+        self.println(&format!(
+            "Watchpoint {id}: {args} (memory {:#x} length {:#x})",
+            t.addr, t.len
+        ));
+        Ok(())
+    }
+
+    /// The memory holding the value of access path `expr`, to watch.
+    pub(crate) fn watch_target(&mut self, expr: &str) -> Result<WatchTarget> {
+        let p = path::parse(expr)?;
+        if matches!(p.root(), Path::WasmName(_) | Path::Builtin(_)) {
+            let loc = self.wasm_location(&p)?;
+            bail!("Only values in linear memory can be watched; `{expr}` is in {loc}.");
+        }
+        let (module, inst, value) = match self.eval_opts(expr, false)? {
+            HistEntry::Src {
+                module,
+                inst,
+                value,
+            } => (module, inst.unwrap_or(0), value),
+            HistEntry::Wasm(_) => bail!("Only values in linear memory can be watched."),
+        };
+        self.value_watch_target(module, inst, &value)
+            .map_err(|e| anyhow!("{e}; `{expr}` cannot be watched."))
+    }
+
+    /// The memory holding a source-level value, to watch.
+    pub(crate) fn value_watch_target(
+        &self,
+        module: usize,
+        inst: usize,
+        value: &Value,
+    ) -> Result<WatchTarget> {
+        let dbg = self.modules[module].info.debug.as_ref().unwrap();
+        let target = FrameTarget::new(self.d, None, &self.instances[inst].handle);
+        let loc = Ctx::new(dbg, &target).location(value)?;
+        let Location::Mem { base, size } = loc else {
+            bail!("Only values in linear memory can be watched; the value is in {loc}");
+        };
+        Ok(WatchTarget {
+            inst,
+            addr: base,
+            len: size,
+            ty: Some((module, value.ty)),
+        })
+    }
+
     fn cmd_delete(&mut self, args: &str) -> Result<()> {
         let args = args.strip_prefix("breakpoints").unwrap_or(args).trim();
         if args.is_empty() {
-            let ids: Vec<u32> = self.breakpoints.iter().map(|b| b.id).collect();
+            let ids: Vec<u32> = self
+                .breakpoints
+                .iter()
+                .map(|b| b.id)
+                .chain(self.watchpoints.iter().map(|w| w.id))
+                .collect();
             for id in ids {
                 self.delete_breakpoint(id);
             }
@@ -806,8 +1007,8 @@ impl Session<'_> {
     }
 
     fn info_breakpoints(&mut self) {
-        if self.breakpoints.is_empty() {
-            self.println("No breakpoints.");
+        if self.breakpoints.is_empty() && self.watchpoints.is_empty() {
+            self.println("No breakpoints or watchpoints.");
             return;
         }
         let mut out = String::from("Num  Type          Hits  Where\n");
@@ -826,7 +1027,39 @@ impl Session<'_> {
                 );
             }
         }
-        self.print(&out);
+        for w in &self.watchpoints {
+            let _ = writeln!(
+                out,
+                "{:<4} {:<13} {:<5} {}",
+                w.id, "watchpoint", w.hits, w.spec
+            );
+            if w.ty.is_some() {
+                let _ = writeln!(
+                    out,
+                    "                         memory {:#x} length {:#x}",
+                    w.addr, w.len
+                );
+            }
+        }
+        // Keep the listing in id order.
+        let mut lines: Vec<&str> = out.lines().collect();
+        let header = lines.remove(0);
+        let mut entries: Vec<(u32, Vec<&str>)> = vec![];
+        for l in lines {
+            match l.split_whitespace().next().and_then(|w| w.parse().ok()) {
+                Some(id) if !l.starts_with(' ') => entries.push((id, vec![l])),
+                _ => entries.last_mut().unwrap().1.push(l),
+            }
+        }
+        entries.sort_by_key(|(id, _)| *id);
+        let mut sorted = format!("{header}\n");
+        for (_, ls) in entries {
+            for l in ls {
+                sorted.push_str(l);
+                sorted.push('\n');
+            }
+        }
+        self.print(&sorted);
     }
 
     // -----------------------------------------------------------------
@@ -1352,8 +1585,37 @@ impl Session<'_> {
     fn cmd_examine(&mut self, args: &str, fmt: &str) -> Result<()> {
         let ef = ExamineFormat::parse(fmt)?;
         let (count, format) = (ef.count, ef.format);
-        // Determine the address.
-        let addr = if let Ok(a) = parse_u64(args) {
+        let addr = self.eval_address(args)?;
+        let inst = self.default_inst()?;
+        let target = FrameTarget::new(self.d, None, &self.instances[inst].handle);
+        let mut out = String::new();
+        if format == 's' {
+            let mut a = addr;
+            for _ in 0..count {
+                let mut bytes = vec![];
+                loop {
+                    let b = target.read_memory(0, a, 1)?;
+                    a += 1;
+                    if b[0] == 0 || bytes.len() >= 1024 {
+                        break;
+                    }
+                    bytes.push(b[0]);
+                }
+                out.push_str(&format_examine_string(a - bytes.len() as u64 - 1, &bytes));
+            }
+            self.print(&out);
+            return Ok(());
+        }
+        let bytes = target.read_memory(0, addr, ef.byte_len())?;
+        out.push_str(&ef.format(addr, &bytes));
+        self.print(&out);
+        Ok(())
+    }
+
+    /// Evaluate an address: a number, a pointer or integer value, or the
+    /// address of a value in memory.
+    pub(crate) fn eval_address(&mut self, args: &str) -> Result<u64> {
+        Ok(if let Ok(a) = parse_u64(args) {
             a
         } else {
             let e = self.eval(args)?;
@@ -1380,31 +1642,7 @@ impl Session<'_> {
                     None => bail!("Not an address."),
                 },
             }
-        };
-        let inst = self.default_inst()?;
-        let target = FrameTarget::new(self.d, None, &self.instances[inst].handle);
-        let mut out = String::new();
-        if format == 's' {
-            let mut a = addr;
-            for _ in 0..count {
-                let mut bytes = vec![];
-                loop {
-                    let b = target.read_memory(0, a, 1)?;
-                    a += 1;
-                    if b[0] == 0 || bytes.len() >= 1024 {
-                        break;
-                    }
-                    bytes.push(b[0]);
-                }
-                out.push_str(&format_examine_string(a - bytes.len() as u64 - 1, &bytes));
-            }
-            self.print(&out);
-            return Ok(());
-        }
-        let bytes = target.read_memory(0, addr, ef.byte_len())?;
-        out.push_str(&ef.format(addr, &bytes));
-        self.print(&out);
-        Ok(())
+        })
     }
 
     // -----------------------------------------------------------------
@@ -1894,4 +2132,10 @@ enum Resume {
     StepI,
     NextI,
     Finish,
+    ReverseContinue,
+    ReverseStep,
+    ReverseNext,
+    ReverseFinish,
+    ReverseStepI,
+    ReverseNextI,
 }
