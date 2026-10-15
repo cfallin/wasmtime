@@ -117,3 +117,33 @@ repeated):
 ```console
 wasmtime run --debug-tui 1234 -Ddebug-fs=$HOME/src/myproject foo.wasm
 ```
+
+### Debug Adapter Protocol (`--debug-dap`)
+
+The same built-in debugger can serve the [Debug Adapter Protocol]
+(DAP) instead of a text interface, for use with DAP clients such as
+editors:
+
+```console
+wasmtime run --debug-dap 1234 -Ddebug-fs=$HOME/src/myproject foo.wasm
+```
+
+Point a DAP client at port 1234 (for example, a VS Code launch
+configuration with `"debugServer": 1234`). The server presents:
+
+- stack frames (including inlined frames), with source locations and
+  instruction-pointer references for disassembly views;
+- scopes for source-level arguments and locals, and for the Wasm machine
+  state: Wasm locals, the operand stack, and globals, all of which expand
+  into trees (struct fields, sequence elements, map entries, enum
+  payloads, Wasm GC objects);
+- source, function, and instruction breakpoints; stepping by line or by
+  Wasm instruction (`granularity: "instruction"`);
+- watch/hover evaluation of access paths, `readMemory` on linear memory,
+  and `disassemble`.
+
+Any command of the text interface can also be typed in the client's
+debug console (the `repl` evaluation context), e.g. `wasm-table`,
+`x/16xb &buf`, or `info functions`.
+
+[Debug Adapter Protocol]: https://microsoft.github.io/debug-adapter-protocol/

@@ -26,7 +26,7 @@ use wasmtime::{Result, bail, format_err};
 const PROMPT: &str = "(wasmtime-debug) ";
 
 /// Find the wasmtime binary built alongside the test binary.
-fn wasmtime_binary() -> std::path::PathBuf {
+pub(crate) fn wasmtime_binary() -> std::path::PathBuf {
     let mut me = std::env::current_exe().expect("current_exe specified");
     me.pop(); // chop off file name
     me.pop(); // chop off `deps`
@@ -38,7 +38,7 @@ fn wasmtime_binary() -> std::path::PathBuf {
     me
 }
 
-fn free_port() -> u16 {
+pub(crate) fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -194,7 +194,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Validate output against FileCheck-style directives. A `$` in the
 /// directives matches a literal `$` (as printed for value-history
 /// numbers).
-fn check_output(output: &str, directives: &str) -> Result<()> {
+pub(crate) fn check_output(output: &str, directives: &str) -> Result<()> {
     let directives = directives.replace('$', "$$");
     let mut builder = CheckerBuilder::new();
     builder
@@ -212,7 +212,7 @@ fn check_output(output: &str, directives: &str) -> Result<()> {
     Ok(())
 }
 
-fn wat_file(text: &str) -> Result<tempfile::NamedTempFile> {
+pub(crate) fn wat_file(text: &str) -> Result<tempfile::NamedTempFile> {
     let mut f = tempfile::Builder::new().suffix(".wat").tempfile()?;
     f.write_all(text.as_bytes())?;
     Ok(f)
@@ -457,7 +457,7 @@ check: [Program exited]
     Ok(())
 }
 
-const GC_WAT: &str = r#"
+pub(crate) const GC_WAT: &str = r#"
 (module $gcdemo
   (type $point (struct (field $x (mut i32)) (field $y f64) (field $next (ref null $point))))
   (type $arr (array (mut i32)))
