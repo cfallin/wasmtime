@@ -542,10 +542,7 @@ impl<T: Send + 'static> Debuggee<T> {
 
     /// Run the debugger body until completion, with no further events.
     pub async fn finish(&mut self) -> Result<()> {
-        if self.is_complete() {
-            return Ok(());
-        }
-        loop {
+        while !self.is_complete() {
             match self.run().await? {
                 DebugRunResult::Finished => break,
                 e => {
@@ -553,6 +550,8 @@ impl<T: Send + 'static> Debuggee<T> {
                 }
             }
         }
+        // Join the inner task (even if a debugger already observed
+        // completion) to propagate the inner body's result.
         if let Some(handle) = self.handle.take() {
             handle.await??;
         }

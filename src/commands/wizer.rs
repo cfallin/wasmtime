@@ -97,6 +97,7 @@ impl WizerCommand {
             #[cfg(feature = "rr")]
             rr_sink: None,
             module_bytes: None,
+            under_debugger: false,
         };
         let engine = run.new_engine()?;
 
