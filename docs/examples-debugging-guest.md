@@ -72,8 +72,8 @@ standard-library types such as Rust's `String`, `Vec`, `Box` and
 `HashMap`) and also offers a Wasm "virtual machine" view: the operand
 stack, Wasm locals, globals, memories, tables, and GC objects.
 
-1. Build Wasmtime with the `debug-tui` feature
-   (`cargo build --features debug-tui`).
+1. Build Wasmtime with the `debug-dap-tui` feature
+   (`cargo build --features debug-dap-tui`).
 
 2. Run your program with the debugger listening on a TCP port:
 

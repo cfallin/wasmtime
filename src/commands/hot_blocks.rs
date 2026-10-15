@@ -1135,9 +1135,9 @@ mod test {
                 gdbstub: None,
                 #[cfg(feature = "rr")]
                 record: None,
-                #[cfg(feature = "debug-tui")]
+                #[cfg(feature = "debug-dap-tui")]
                 debug_tui: None,
-                #[cfg(feature = "debug-tui")]
+                #[cfg(feature = "debug-dap-tui")]
                 debug_dap: None,
                 readonly_dirs: Vec::new(),
             },

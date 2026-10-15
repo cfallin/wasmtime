@@ -9,7 +9,7 @@
 //!
 //! Like the text-interface tests these are `#[ignore]`d by default; run
 //! them with
-//! `cargo test --features debug-tui --test all -- --ignored debug_dap::`.
+//! `cargo test --features debug-dap-tui --test all -- --ignored debug_dap::`.
 
 use super::debug_tui::{GC_WAT, check_output, free_port, wasmtime_binary, wat_file};
 use serde_json::{Value, json};

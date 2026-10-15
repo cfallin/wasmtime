@@ -129,7 +129,7 @@ pub struct RunCommon {
     ///
     /// To let the debugger display source files, give it read-only
     /// access to the relevant directories with `-Ddebug-fs=<dir>`.
-    #[cfg(feature = "debug-tui")]
+    #[cfg(feature = "debug-dap-tui")]
     #[arg(long = "debug-tui", value_name = "[ADDR:]PORT")]
     pub debug_tui: Option<String>,
 
@@ -138,7 +138,7 @@ pub struct RunCommon {
     /// (e.g. `1234`) or a full `address:port`. A bare port number will
     /// bind on localhost only (`127.0.0.1`). Connect a DAP client such as
     /// `dapper` or an editor's debugger to this port.
-    #[cfg(feature = "debug-tui")]
+    #[cfg(feature = "debug-dap-tui")]
     #[arg(long = "debug-dap", value_name = "[ADDR:]PORT")]
     pub debug_dap: Option<String>,
 
@@ -215,7 +215,7 @@ impl RunCommon {
                 &[],
             ));
         }
-        #[cfg(feature = "debug-tui")]
+        #[cfg(feature = "debug-dap-tui")]
         if let Some(addr) = self.debug_tui.clone() {
             requests.push((
                 "debug-tui",
@@ -226,7 +226,7 @@ impl RunCommon {
                 &[],
             ));
         }
-        #[cfg(feature = "debug-tui")]
+        #[cfg(feature = "debug-dap-tui")]
         if let Some(addr) = self.debug_dap.clone() {
             requests.push((
                 "debug-dap",
