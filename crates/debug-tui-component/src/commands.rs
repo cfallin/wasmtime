@@ -462,6 +462,12 @@ impl Session<'_> {
     // Execution.
 
     async fn cmd_start(&mut self) -> Result<()> {
+        if self.state == RunState::Exited {
+            bail!(
+                "The program has exited; a debugger session cannot start it again. \
+                 Run Wasmtime again to debug it again."
+            );
+        }
         if self.state != RunState::NotStarted {
             bail!("The program is already running.");
         }

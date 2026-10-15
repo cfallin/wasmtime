@@ -859,6 +859,7 @@ fn debug_tui_reverse_execution() -> Result<()> {
         p acc
         c
         c
+        start
         "#,
     )?;
     let (transcript, stdout) = tui.finish()?;
@@ -979,6 +980,8 @@ check: (wasmtime-debug) c
 check: No more execution history
 check: (wasmtime-debug) c
 check: [Program exited]
+check: (wasmtime-debug) start
+check: The program has exited; a debugger session cannot start it again.
 "#,
     )?;
     assert!(stdout.contains("total = 30 count = 4 counter = 4"));
