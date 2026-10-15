@@ -18,6 +18,8 @@ wstd = { workspace = true }
 wasip2 = { workspace = true }
 futures = { workspace = true, default-features = true }
 wasmtime-debug-info = { workspace = true }
+wasmtime-debug-dap = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true

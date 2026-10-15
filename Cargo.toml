@@ -204,6 +204,7 @@ members = [
   "crates/gdbstub-component",
   "crates/gdbstub-component/artifact",
   "crates/debug-info",
+  "crates/debug-dap",
   "crates/debug-tui-component",
   "crates/debug-tui-component/artifact",
   "crates/wizer/fuzz",
@@ -323,6 +324,7 @@ wasmtime-unwinder = { path = "crates/unwinder", version = "=51.0.0-dev", package
 wasmtime-debugger = { path = "crates/debugger", version = "=51.0.0-dev", package = "wasmtime-internal-debugger" }
 gdbstub-component-artifact = { path = "crates/gdbstub-component/artifact", version = "=51.0.0-dev", package = "wasmtime-internal-gdbstub-component-artifact" }
 wasmtime-debug-info = { path = "crates/debug-info", version = "=51.0.0-dev", package = "wasmtime-internal-debug-info" }
+wasmtime-debug-dap = { path = "crates/debug-dap", version = "=51.0.0-dev", package = "wasmtime-internal-debug-dap" }
 debug-tui-component-artifact = { path = "crates/debug-tui-component/artifact", version = "=51.0.0-dev", package = "wasmtime-internal-debug-tui-component-artifact" }
 wasmtime-wizer = { path = "crates/wizer", version = "51.0.0-dev" }
 

@@ -23,9 +23,14 @@
 //! - [`value`] and [`path`]: values and simple "access path"
 //!   expressions (`p->x`, `arr[2].y`, `*p`, `$1.field`).
 //! - [`format`] and [`pretty`]: value formatting and a small set of
-//!   pretty-printers for well-known standard-library types.
+//!   pretty-printers for well-known standard-library types; [`children`]
+//!   gives the same view as an expandable tree.
+//! - [`cli`]: helpers shared by command-line front-ends (breakpoint
+//!   location syntax, memory-examination formats, hex dumps).
 //! - [`demangle`]: Rust and C++ symbol demangling.
 
+pub mod children;
+pub mod cli;
 pub mod demangle;
 pub mod dwarf;
 pub mod eval;

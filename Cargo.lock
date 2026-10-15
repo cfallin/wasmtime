@@ -4956,6 +4956,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtime-internal-debug-dap"
+version = "51.0.0-dev"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "wasmtime-internal-debug-info"
 version = "51.0.0-dev"
 dependencies = [
@@ -4978,7 +4988,9 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "serde_json",
  "wasip2",
+ "wasmtime-internal-debug-dap",
  "wasmtime-internal-debug-info",
  "wit-bindgen 0.63.0",
  "wstd",

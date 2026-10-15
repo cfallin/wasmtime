@@ -4,7 +4,10 @@ use crate::session::{FrameTarget, HistEntry, Outcome, RunState, Session, StopRea
 use crate::wasmval::{self, WVal};
 use anyhow::{Result, anyhow, bail};
 use std::fmt::Write;
-use wasmtime_debug_info::demangle::demangle;
+use wasmtime_debug_info::cli::{
+    BreakpointSpec, ExamineFormat, HELP, basename, demangle_wat, format_examine_string, hexdump,
+    parse_u64, truncate,
+};
 use wasmtime_debug_info::format::{FormatOptions, describe_type, format_value};
 use wasmtime_debug_info::location::{Location, WasmSlot};
 use wasmtime_debug_info::path::{self, HistoryRef, Path};
@@ -12,75 +15,73 @@ use wasmtime_debug_info::types::{BaseEnc, Lang, TypeKind};
 use wasmtime_debug_info::value::{Ctx, Value};
 use wasmtime_debug_info::{Target, WasmVal};
 
-const HELP: &str = "\
-Execution:
-  start                    Run to the beginning of `main`.
-  continue (c), run (r)    Continue execution.
-  step (s)                 Step one source line, entering calls.
-  next (n)                 Step one source line, stepping over calls.
-  finish (fin)             Run until the selected frame returns.
-  stepi (si)               Step one Wasm instruction.
-  nexti (ni)               Step one Wasm instruction, stepping over calls.
-  interrupt, Ctrl-C        Stop a running program.
-Breakpoints:
-  break (b) LOC            Set a breakpoint. LOC is FILE:LINE, LINE, FUNCTION,
-                           *PC (module offset in the current module), or
-                           *MODULE:PC.
-  tbreak LOC               Set a temporary (one-shot) breakpoint.
-  delete (d) [N...]        Delete breakpoints (all if none given).
-  info breakpoints         List breakpoints.
-Stack:
-  backtrace (bt)           Show the call stack (including inlined frames).
-  frame (f) [N]            Select / show a frame.
-  up [N], down [N]         Move up (toward callers) / down the stack.
-Source and data:
-  list (l) [LOC]           List source lines.
-  print (p)[/x|/r] PATH    Print a value. PATH is an access path: `x`, `p->x`,
-                           `arr[2].y`, `*p`, `&x`, `t.0`, `%1->next`, `%`, `%%2`.
-                           /x prints integers in hex; /r disables pretty-printers.
-                           Wasm-level roots: $NAME (a Wasm local, global or
-                           table named in the name section), and built-ins
-                           %localN, %stackN, %globalN, %tableN[I], %pc.
-                           GC refs: `.N` (field), `[I]`.
-  ptype PATH, whatis PATH  Show the type of a value.
-  location (loc) PATH      Show where a value is stored: `memory ADDR length N`,
-                           `local N`, `global N` or `stack N`. `&PATH` gives
-                           the address of a value in memory, e.g. for
-                           `x/16xb &buf`.
-  info locals|args         Show variables of the selected frame.
-  info frame               Describe the selected frame.
-  info functions [TEXT]    List functions (with debug info) matching TEXT.
-  info variables [TEXT]    List global variables matching TEXT.
-  info source              Show the current source file.
-  x/NFU ADDR|PATH          Examine linear memory: N count, F format
-                           (x,d,u,c,s), U unit size (b,h,w,g).
-Wasm machine level:
-  disassemble (disas) [FUNC|*PC] [all]
-                           Disassemble around the PC (or a whole function).
-  wasm-locals              Wasm locals of the selected frame.
-  wasm-stack               Wasm operand stack of the selected frame.
-  wasm-globals [-i INST]   Globals of an instance.
-  wasm-memory [-i INST] [-m MEM] [ADDR [LEN]]
-                           Show a memory's size, or hexdump its contents.
-  wasm-table [-i INST] [-t TABLE] [START [COUNT]]
-                           Show a table's size and elements.
-  wasm-instances           List all instances in the store.
-  wasm-modules             List all modules in the store.
-  wasm-functions [-i INST | -m MODULE] [TEXT]
-                           List functions of a module.
-Other:
-  help                     Show this help.
-  quit (q), detach         Detach (the program runs to completion).
-";
+/// Whether `word` names a command of the text interface.
+pub fn is_command(word: &str) -> bool {
+    matches!(
+        word,
+        "help"
+            | "h"
+            | "quit"
+            | "q"
+            | "detach"
+            | "start"
+            | "continue"
+            | "c"
+            | "run"
+            | "r"
+            | "step"
+            | "s"
+            | "next"
+            | "n"
+            | "stepi"
+            | "si"
+            | "nexti"
+            | "ni"
+            | "finish"
+            | "fin"
+            | "interrupt"
+            | "break"
+            | "b"
+            | "br"
+            | "tbreak"
+            | "delete"
+            | "d"
+            | "backtrace"
+            | "bt"
+            | "where"
+            | "frame"
+            | "f"
+            | "up"
+            | "down"
+            | "list"
+            | "l"
+            | "print"
+            | "p"
+            | "output"
+            | "ptype"
+            | "location"
+            | "loc"
+            | "whatis"
+            | "x"
+            | "info"
+            | "i"
+            | "disassemble"
+            | "disas"
+            | "wasm-locals"
+            | "wasm-stack"
+            | "wasm-globals"
+            | "wasm-memory"
+            | "wasm-table"
+            | "wasm-instances"
+            | "wasm-modules"
+            | "wasm-functions"
+    )
+}
 
 /// Result of executing a command.
 pub enum Flow {
     Continue,
     Quit,
-}
-
-fn basename(p: &str) -> &str {
-    p.rsplit('/').next().unwrap_or(p)
 }
 
 fn compact_opts() -> FormatOptions {
@@ -90,35 +91,6 @@ fn compact_opts() -> FormatOptions {
         max_string: 32,
         ..Default::default()
     }
-}
-
-fn truncate(mut s: String, n: usize) -> String {
-    if s.chars().count() > n {
-        s = s.chars().take(n).collect::<String>() + "...";
-    }
-    s
-}
-
-fn parse_u64(s: &str) -> Result<u64> {
-    let s = s.trim();
-    if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Ok(u64::from_str_radix(h, 16)?)
-    } else {
-        Ok(s.parse()?)
-    }
-}
-
-/// Demangle `$`-prefixed mangled symbol names in a line of WAT.
-fn demangle_wat(line: &str) -> String {
-    line.split(' ')
-        .map(|tok| match tok.strip_prefix('$') {
-            Some(sym) if sym.starts_with("_Z") || sym.starts_with("_R") => {
-                format!("<{}>", demangle(sym))
-            }
-            _ => tok.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Options parsed from `-i N` / `-m N` / `-t N` flags.
@@ -176,11 +148,11 @@ impl Session<'_> {
             "The program has not started. Type `start` to run to `main`, `continue` to run,\n\
              or `help` for a list of commands.\n",
         );
-        self.conn.print(&out);
+        self.print(&out);
     }
 
     pub fn prompt(&mut self) {
-        self.conn.print("(wasmtime-debug) ");
+        self.print("(wasmtime-debug) ");
     }
 
     /// Execute one command line.
@@ -199,7 +171,7 @@ impl Session<'_> {
         };
         let r = match cmd {
             "help" | "h" => {
-                self.conn.print(HELP);
+                self.print(HELP);
                 Ok(())
             }
             "quit" | "q" | "detach" => return Flow::Quit,
@@ -211,7 +183,7 @@ impl Session<'_> {
             "nexti" | "ni" => self.cmd_resume(Resume::NextI).await,
             "finish" | "fin" => self.cmd_resume(Resume::Finish).await,
             "interrupt" => {
-                self.conn.println("The program is not running.");
+                self.println("The program is not running.");
                 Ok(())
             }
             "break" | "b" | "br" => self.cmd_break(args, false),
@@ -240,7 +212,7 @@ impl Session<'_> {
             _ => Err(anyhow!("Undefined command: \"{cmd}\". Try \"help\".")),
         };
         if let Err(e) = r {
-            self.conn.println(&format!("{e}"));
+            self.println(&format!("{e}"));
         }
         if self.detached {
             return Flow::Quit;
@@ -251,7 +223,7 @@ impl Session<'_> {
     // -----------------------------------------------------------------
     // Helpers.
 
-    fn require_stopped(&self) -> Result<()> {
+    pub(crate) fn require_stopped(&self) -> Result<()> {
         match self.state {
             RunState::Stopped if !self.vframes.is_empty() => Ok(()),
             RunState::NotStarted => bail!("The program has not been started."),
@@ -261,7 +233,7 @@ impl Session<'_> {
     }
 
     /// The instance to use for instance-scoped commands by default.
-    fn default_inst(&self) -> Result<usize> {
+    pub(crate) fn default_inst(&self) -> Result<usize> {
         if let Some(v) = self.vframes.get(self.selected) {
             return Ok(self.phys[v.phys].inst);
         }
@@ -288,7 +260,7 @@ impl Session<'_> {
     }
 
     /// The module to resolve source-level names in by default.
-    fn default_module(&self) -> Option<usize> {
+    pub(crate) fn default_module(&self) -> Option<usize> {
         if let Some(v) = self.vframes.get(self.selected) {
             let m = self.phys[v.phys].module;
             if self.modules[m].info.debug.is_some() {
@@ -305,7 +277,7 @@ impl Session<'_> {
         }
     }
 
-    fn source_lines(&mut self, path: &str) -> Option<&Vec<String>> {
+    pub(crate) fn source_lines(&mut self, path: &str) -> Option<&Vec<String>> {
         if !self.source_cache.contains_key(path) {
             let lines = std::fs::read_to_string(path)
                 .ok()
@@ -330,16 +302,14 @@ impl Session<'_> {
             .and_then(|ls| ls.get(usize::try_from(line).ok()?.checked_sub(1)?))
             .cloned();
         match text {
-            Some(t) => self.conn.println(&format!("{line}\t{t}")),
-            None => self
-                .conn
-                .println(&format!("{line}\tin {path} (source unavailable)")),
+            Some(t) => self.println(&format!("{line}\t{t}")),
+            None => self.println(&format!("{line}\tin {path} (source unavailable)")),
         }
     }
 
     /// A one-line description of logical frame `vi`: `name (args) at
     /// file:line`.
-    fn frame_desc(&self, vi: usize) -> String {
+    pub(crate) fn frame_desc(&self, vi: usize) -> String {
         let v = &self.vframes[vi];
         let p = &self.phys[v.phys];
         let args = self.frame_args(vi);
@@ -360,7 +330,7 @@ impl Session<'_> {
         s
     }
 
-    fn frame_args(&self, vi: usize) -> String {
+    pub(crate) fn frame_args(&self, vi: usize) -> String {
         let v = &self.vframes[vi];
         let Some(scope) = &v.scope else {
             return self.wasm_frame_args(vi);
@@ -386,7 +356,7 @@ impl Session<'_> {
     }
 
     /// Without debug info, show the Wasm-level parameters of a frame.
-    fn wasm_frame_args(&self, vi: usize) -> String {
+    pub(crate) fn wasm_frame_args(&self, vi: usize) -> String {
         let p = &self.phys[self.vframes[vi].phys];
         let Some(func) = p.func else {
             return String::new();
@@ -420,9 +390,9 @@ impl Session<'_> {
     fn print_frame_header(&mut self, vi: usize, with_number: bool) {
         let desc = self.frame_desc(vi);
         if with_number {
-            self.conn.println(&format!("#{vi}  {desc}"));
+            self.println(&format!("#{vi}  {desc}"));
         } else {
-            self.conn.println(&desc);
+            self.println(&desc);
         }
         self.print_current_line(vi);
     }
@@ -453,8 +423,8 @@ impl Session<'_> {
                     .map(|l| demangle_wat(&l.text))
             });
         match text {
-            Some(t) => self.conn.println(&format!("=> {pc:#x}: {t}")),
-            None => self.conn.println(&format!("=> {pc:#x}")),
+            Some(t) => self.println(&format!("=> {pc:#x}: {t}")),
+            None => self.println(&format!("=> {pc:#x}")),
         }
     }
 
@@ -481,8 +451,7 @@ impl Session<'_> {
         if let Resume::Finish = how {
             self.require_stopped()?;
             let desc = self.frame_desc(self.selected);
-            self.conn
-                .println(&format!("Run till exit from #{}  {desc}", self.selected));
+            self.println(&format!("Run till exit from #{}  {desc}", self.selected));
         }
         // Remember the callee (for return values) when finishing.
         let finishing = match how {
@@ -493,7 +462,7 @@ impl Session<'_> {
             }
             _ => None,
         };
-        let _ = self.conn.flush().await;
+        let _ = self.flush_output().await;
         let outcome = match how {
             Resume::Continue => {
                 if self.state == RunState::NotStarted {
@@ -535,13 +504,13 @@ impl Session<'_> {
     ) {
         let reason = match outcome {
             Outcome::Exited => {
-                self.conn.println("[Program exited]");
+                self.println("[Program exited]");
                 return;
             }
             Outcome::Stopped(r) => r,
         };
         if self.vframes.is_empty() {
-            self.conn.println("Stopped (no Wasm frames on the stack).");
+            self.println("Stopped (no Wasm frames on the stack).");
             return;
         }
         let same_frame = before
@@ -560,38 +529,34 @@ impl Session<'_> {
                 let desc = self.frame_desc(0);
                 if temp {
                     self.delete_breakpoint(id);
-                    self.conn
-                        .println(&format!("\nTemporary breakpoint {id}, {desc}"));
+                    self.println(&format!("\nTemporary breakpoint {id}, {desc}"));
                 } else {
-                    self.conn.println(&format!("\nBreakpoint {id}, {desc}"));
+                    self.println(&format!("\nBreakpoint {id}, {desc}"));
                 }
                 self.print_current_line(0);
             }
             StopReason::Breakpoint(None) => {
-                self.conn
-                    .println(&format!("\nStopped at {}", self.frame_desc(0)));
+                self.println(&format!("\nStopped at {}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Interrupted => {
-                self.conn
-                    .println(&format!("\nProgram interrupted.\n{}", self.frame_desc(0)));
+                self.println(&format!("\nProgram interrupted.\n{}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Trap => {
-                self.conn.println(&format!(
+                self.println(&format!(
                     "\nProgram trapped (Wasm trap); continuing will terminate it.\n{}",
                     self.frame_desc(0)
                 ));
                 self.print_current_line(0);
             }
             StopReason::Exception => {
-                self.conn
-                    .println(&format!("\nWasm exception thrown.\n{}", self.frame_desc(0)));
+                self.println(&format!("\nWasm exception thrown.\n{}", self.frame_desc(0)));
                 self.print_current_line(0);
             }
             StopReason::Step => {
                 if !same_frame {
-                    self.conn.println(&self.frame_desc(0));
+                    self.println(&self.frame_desc(0));
                 }
                 if instruction_step {
                     let p = &self.phys[0];
@@ -618,7 +583,7 @@ impl Session<'_> {
 
     /// After `finish`, show the callee's return value(s), which are on
     /// top of the caller's operand stack.
-    fn print_return_value(&mut self, callee_module: usize, callee_pc: u32) {
+    pub(crate) fn print_return_value(&mut self, callee_module: usize, callee_pc: u32) {
         let info = &self.modules[callee_module].info;
         let Some(func) = info.func_at_pc(callee_pc).map(|b| b.index) else {
             return;
@@ -666,16 +631,14 @@ impl Session<'_> {
                     value: v,
                 });
                 let n = self.history.len();
-                self.conn
-                    .println(&format!("Value returned is %{n} = {text}"));
+                self.println(&format!("Value returned is %{n} = {text}"));
             }
             None => {
                 let vals: Vec<String> = results
                     .iter()
                     .map(|r| wasmval::format(self.d, &WVal::from_api(r), false, 1))
                     .collect();
-                self.conn
-                    .println(&format!("Wasm results: {}", vals.join(", ")));
+                self.println(&format!("Wasm results: {}", vals.join(", ")));
             }
         }
     }
@@ -684,35 +647,25 @@ impl Session<'_> {
     // Breakpoints.
 
     /// Resolve a location spec into (module, pc) pairs.
-    fn resolve_location(&self, spec: &str) -> Result<Vec<(usize, u32)>> {
-        let spec = spec.trim();
-        if spec.is_empty() {
-            bail!("Argument required (location).");
-        }
-        // `*PC` or `*MODULE:PC`.
-        if let Some(rest) = spec.strip_prefix('*') {
-            let (module, pc) = match rest.split_once(':') {
-                Some((m, pc)) => (usize::try_from(parse_u64(m)?)?, parse_u64(pc)?),
-                None => (
-                    self.default_module()
+    pub(crate) fn resolve_location(&self, spec: &str) -> Result<Vec<(usize, u32)>> {
+        let (file, line) = match BreakpointSpec::parse(spec)? {
+            BreakpointSpec::Pc { module, pc } => {
+                let module = match module {
+                    Some(m) => m,
+                    None => self
+                        .default_module()
                         .or_else(|| self.vframes.first().map(|v| self.phys[v.phys].module))
                         .ok_or_else(|| anyhow!("No default module."))?,
-                    parse_u64(rest)?,
-                ),
-            };
-            if module >= self.modules.len() {
-                bail!("No module {module}.");
+                };
+                if module >= self.modules.len() {
+                    bail!("No module {module}.");
+                }
+                return Ok(vec![(module, pc)]);
             }
-            return Ok(vec![(module, u32::try_from(pc)?)]);
-        }
-        // `FILE:LINE` or `LINE`.
-        let (file, line) = match spec.rsplit_once(':') {
-            Some((f, l)) if l.chars().all(|c| c.is_ascii_digit()) && !l.is_empty() => {
-                (Some(f.to_string()), Some(l.parse::<u32>()?))
-            }
-            _ if spec.chars().all(|c| c.is_ascii_digit()) => (None, Some(spec.parse::<u32>()?)),
-            _ => (None, None),
+            BreakpointSpec::Line { file, line } => (file, Some(line)),
+            BreakpointSpec::Function(_) => (None, None),
         };
+        let spec = spec.trim();
         if let Some(line) = line {
             let mut out = vec![];
             let mut found_file = false;
@@ -778,7 +731,7 @@ impl Session<'_> {
         Ok(out)
     }
 
-    fn describe_pc(&self, module: usize, pc: u32) -> String {
+    pub(crate) fn describe_pc(&self, module: usize, pc: u32) -> String {
         let m = &self.modules[module];
         let mut s = format!("pc {pc:#x}");
         if let (Some(dbg), Some(addr)) = (&m.info.debug, m.info.pc_to_dwarf(pc)) {
@@ -821,12 +774,11 @@ impl Session<'_> {
             "Breakpoint"
         };
         if descs.len() == 1 {
-            self.conn.println(&format!("{kind} {id} at {}", descs[0]));
+            self.println(&format!("{kind} {id} at {}", descs[0]));
         } else {
-            self.conn
-                .println(&format!("{kind} {id} at {} locations:", descs.len()));
+            self.println(&format!("{kind} {id} at {} locations:", descs.len()));
             for d in descs {
-                self.conn.println(&format!("  {d}"));
+                self.println(&format!("  {d}"));
             }
         }
         Ok(())
@@ -839,7 +791,7 @@ impl Session<'_> {
             for id in ids {
                 self.delete_breakpoint(id);
             }
-            self.conn.println("Deleted all breakpoints.");
+            self.println("Deleted all breakpoints.");
             return Ok(());
         }
         for a in args.split_whitespace() {
@@ -847,7 +799,7 @@ impl Session<'_> {
                 .parse()
                 .map_err(|_| anyhow!("Bad breakpoint number '{a}'"))?;
             if !self.delete_breakpoint(id) {
-                self.conn.println(&format!("No breakpoint number {id}."));
+                self.println(&format!("No breakpoint number {id}."));
             }
         }
         Ok(())
@@ -855,7 +807,7 @@ impl Session<'_> {
 
     fn info_breakpoints(&mut self) {
         if self.breakpoints.is_empty() {
-            self.conn.println("No breakpoints.");
+            self.println("No breakpoints.");
             return;
         }
         let mut out = String::from("Num  Type          Hits  Where\n");
@@ -874,7 +826,7 @@ impl Session<'_> {
                 );
             }
         }
-        self.conn.print(&out);
+        self.print(&out);
     }
 
     // -----------------------------------------------------------------
@@ -894,7 +846,7 @@ impl Session<'_> {
             };
             let _ = writeln!(out, "{marker}#{vi:<3} {pcs} in {}", self.frame_desc(vi));
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1000,7 +952,7 @@ impl Session<'_> {
             let Some(text) = lines.get(usize::try_from(n)? - 1) else {
                 break;
             };
-            self.conn.println(&format!("{n}\t{text}"));
+            self.println(&format!("{n}\t{text}"));
             last = n;
         }
         // The next `list` (without arguments) continues after the last
@@ -1014,14 +966,14 @@ impl Session<'_> {
 
     /// Evaluate a path to either a source-level value (with its module
     /// and instance) or a Wasm-level value.
-    fn eval(&mut self, expr: &str) -> Result<HistEntry> {
+    pub(crate) fn eval(&mut self, expr: &str) -> Result<HistEntry> {
         self.eval_opts(expr, true)
     }
 
     /// Evaluate a path. With `snapshot`, source-level values are captured
     /// (as for the value history); otherwise they keep referring to
     /// their storage, which preserves their location for `location`.
-    fn eval_opts(&mut self, expr: &str, snapshot: bool) -> Result<HistEntry> {
+    pub(crate) fn eval_opts(&mut self, expr: &str, snapshot: bool) -> Result<HistEntry> {
         let p = path::parse(expr)?;
         match p.root() {
             Path::History(h) => {
@@ -1186,7 +1138,7 @@ impl Session<'_> {
     /// The storage location of a Wasm-level path (`%local3`, `$x`,
     /// `%global0`, `%stack1`). Only whole slots are locations; GC object
     /// fields and table elements are not (yet) supported.
-    fn wasm_location(&self, p: &Path) -> Result<Location> {
+    pub(crate) fn wasm_location(&self, p: &Path) -> Result<Location> {
         let slot = match p {
             Path::Builtin(name) => {
                 let num = |prefix: &str| -> Option<u32> { name.strip_prefix(prefix)?.parse().ok() };
@@ -1247,7 +1199,7 @@ impl Session<'_> {
                 ),
             },
         };
-        self.conn.println(&loc.to_string());
+        self.println(&loc.to_string());
         Ok(())
     }
 
@@ -1365,7 +1317,7 @@ impl Session<'_> {
         let text = self.format_entry(&e, &opts);
         self.history.push(e);
         let n = self.history.len();
-        self.conn.println(&format!("%{n} = {text}"));
+        self.println(&format!("%{n} = {text}"));
         Ok(())
     }
 
@@ -1393,34 +1345,13 @@ impl Session<'_> {
                 }
             }
         };
-        self.conn.println(&format!("type = {text}"));
+        self.println(&format!("type = {text}"));
         Ok(())
     }
 
     fn cmd_examine(&mut self, args: &str, fmt: &str) -> Result<()> {
-        // Parse N, F, U from e.g. `16xb`.
-        let digits: String = fmt.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let count: u64 = if digits.is_empty() {
-            1
-        } else {
-            digits.parse()?
-        };
-        let letters = &fmt[digits.len()..];
-        let mut format = 'x';
-        let mut unit = 0u64;
-        for c in letters.chars() {
-            match c {
-                'x' | 'd' | 'u' | 'c' | 's' => format = c,
-                'b' => unit = 1,
-                'h' => unit = 2,
-                'w' => unit = 4,
-                'g' => unit = 8,
-                _ => bail!("Invalid format letter '{c}'."),
-            }
-        }
-        if unit == 0 {
-            unit = if format == 'c' { 1 } else { 4 };
-        }
+        let ef = ExamineFormat::parse(fmt)?;
+        let (count, format) = (ef.count, ef.format);
         // Determine the address.
         let addr = if let Ok(a) = parse_u64(args) {
             a
@@ -1465,43 +1396,14 @@ impl Session<'_> {
                     }
                     bytes.push(b[0]);
                 }
-                let _ = writeln!(
-                    out,
-                    "{:#x}: {}",
-                    a - bytes.len() as u64 - 1,
-                    wasmtime_debug_info::format::quote_bytes(&bytes, false)
-                );
+                out.push_str(&format_examine_string(a - bytes.len() as u64 - 1, &bytes));
             }
-            self.conn.print(&out);
+            self.print(&out);
             return Ok(());
         }
-        let bytes = target.read_memory(0, addr, count * unit)?;
-        let per_line = (16 / unit).max(1);
-        for (i, chunk) in bytes.chunks(usize::try_from(unit)?).enumerate() {
-            let i = i as u64;
-            if i % per_line == 0 {
-                if i > 0 {
-                    out.push('\n');
-                }
-                let _ = write!(out, "{:#010x}:", addr + i * unit);
-            }
-            let mut b = [0u8; 8];
-            b[..chunk.len()].copy_from_slice(chunk);
-            let v = u64::from_le_bytes(b);
-            let w = usize::try_from(unit * 2)?;
-            let _ = match format {
-                'x' => write!(out, " 0x{v:0w$x}"),
-                'u' => write!(out, " {v}"),
-                'd' => {
-                    let shift = 64 - unit * 8;
-                    write!(out, " {}", ((v << shift) as i64) >> shift)
-                }
-                'c' => write!(out, " {:?}", (v as u8) as char),
-                _ => unreachable!(),
-            };
-        }
-        out.push('\n');
-        self.conn.print(&out);
+        let bytes = target.read_memory(0, addr, ef.byte_len())?;
+        out.push_str(&ef.format(addr, &bytes));
+        self.print(&out);
         Ok(())
     }
 
@@ -1537,7 +1439,7 @@ impl Session<'_> {
         self.require_stopped()?;
         let v = &self.vframes[self.selected];
         let Some(scope) = &v.scope else {
-            self.conn.println("No symbol table info available.");
+            self.println("No symbol table info available.");
             return Ok(());
         };
         let p = &self.phys[v.phys];
@@ -1564,7 +1466,7 @@ impl Session<'_> {
                 "No locals.\n"
             });
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1599,7 +1501,7 @@ impl Session<'_> {
         if let Some(fb) = self.frame_base(v.phys, &target) {
             let _ = writeln!(out, "  frame base: {fb:#x}");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1628,7 +1530,7 @@ impl Session<'_> {
                 out.push_str("  ...\n");
             }
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1654,7 +1556,7 @@ impl Session<'_> {
                 let _ = writeln!(out, "  {n}");
             }
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1670,7 +1572,7 @@ impl Session<'_> {
             .file_name(f)
             .to_string();
         let readable = self.source_lines(&path).is_some();
-        self.conn.println(&format!(
+        self.println(&format!(
             "Current source file is {path}{}",
             if readable { "" } else { " (not readable)" }
         ));
@@ -1746,7 +1648,7 @@ impl Session<'_> {
             out.push_str("   ...\n");
         }
         out.push_str("End of dump.\n");
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1774,7 +1676,7 @@ impl Session<'_> {
         if locals.is_empty() {
             out.push_str("No locals.\n");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1794,7 +1696,7 @@ impl Session<'_> {
                 wasmval::format(self.d, &WVal::from_api(v), false, 1)
             );
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1821,7 +1723,7 @@ impl Session<'_> {
                 .unwrap_or_default();
             let _ = writeln!(out, "  global {g}{name}: {text}");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1836,7 +1738,7 @@ impl Session<'_> {
         let size = mem.size_bytes(self.d);
         let page = mem.page_size_bytes(self.d);
         if f.rest.is_empty() {
-            self.conn.println(&format!(
+            self.println(&format!(
                 "Memory {mi} of instance #{ii}: {size} bytes ({} pages of {page} bytes)",
                 size / page.max(1)
             ));
@@ -1851,28 +1753,8 @@ impl Session<'_> {
         let bytes = mem
             .get_bytes(self.d, addr, len)
             .map_err(|_| anyhow!("Cannot access memory at {addr:#x}+{len} (size {size})."))?;
-        let mut out = String::new();
-        for (i, chunk) in bytes.chunks(16).enumerate() {
-            let _ = write!(out, "{:#010x}:", addr + 16 * i as u64);
-            for j in 0..16 {
-                match chunk.get(j) {
-                    Some(b) => {
-                        let _ = write!(out, " {b:02x}");
-                    }
-                    None => out.push_str("   "),
-                }
-            }
-            out.push_str("  |");
-            for b in chunk {
-                out.push(if (0x20..0x7f).contains(b) {
-                    *b as char
-                } else {
-                    '.'
-                });
-            }
-            out.push_str("|\n");
-        }
-        self.conn.print(&out);
+        let out = hexdump(addr, &bytes);
+        self.print(&out);
         Ok(())
     }
 
@@ -1901,7 +1783,7 @@ impl Session<'_> {
             };
             let _ = writeln!(out, "  [{i}] {text}");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1924,7 +1806,7 @@ impl Session<'_> {
         if self.instances.is_empty() {
             out.push_str("No instances.\n");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1942,7 +1824,7 @@ impl Session<'_> {
                 if m.info.debug.is_some() { "yes" } else { "no" }
             );
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 
@@ -1992,7 +1874,7 @@ impl Session<'_> {
             };
             let _ = writeln!(out, "  {idx:>5}  {name} {sig}  [{kind}]");
         }
-        self.conn.print(&out);
+        self.print(&out);
         Ok(())
     }
 }

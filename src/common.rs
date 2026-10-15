@@ -131,6 +131,15 @@ pub struct RunCommon {
     #[arg(long = "debug-tui", value_name = "[ADDR:]PORT")]
     pub debug_tui: Option<String>,
 
+    /// Attach the built-in debugger serving the Debug Adapter Protocol
+    /// (DAP), listening on the given TCP address. Accepts a port number
+    /// (e.g. `1234`) or a full `address:port`. A bare port number will
+    /// bind on localhost only (`127.0.0.1`). Connect a DAP client such as
+    /// `dapper` or an editor's debugger to this port.
+    #[cfg(feature = "debug-tui")]
+    #[arg(long = "debug-dap", value_name = "[ADDR:]PORT")]
+    pub debug_dap: Option<String>,
+
     /// Host directories to preopen read-only, as `(host, guest)` pairs.
     /// Not exposed on the command line; used to configure built-in
     /// debugger components.
@@ -192,7 +201,7 @@ impl RunCommon {
     #[cfg(feature = "debug")]
     pub fn builtin_debugger(&mut self) -> Result<Option<BuiltinDebugger>> {
         #[allow(unused_mut, reason = "depends on features")]
-        let mut requests: Vec<(&str, String, BuiltinDebugger)> = vec![];
+        let mut requests: Vec<(&str, String, BuiltinDebugger, &[&str])> = vec![];
         #[cfg(feature = "gdbstub")]
         if let Some(addr) = self.gdbstub.clone() {
             requests.push((
@@ -201,6 +210,7 @@ impl RunCommon {
                 BuiltinDebugger {
                     bytes: gdbstub_component_artifact::gdbstub()?,
                 },
+                &[],
             ));
         }
         #[cfg(feature = "debug-tui")]
@@ -211,17 +221,29 @@ impl RunCommon {
                 BuiltinDebugger {
                     bytes: debug_tui_component_artifact::debug_tui()?,
                 },
+                &[],
+            ));
+        }
+        #[cfg(feature = "debug-tui")]
+        if let Some(addr) = self.debug_dap.clone() {
+            requests.push((
+                "debug-dap",
+                addr,
+                BuiltinDebugger {
+                    bytes: debug_tui_component_artifact::debug_tui()?,
+                },
+                &["--dap"],
             ));
         }
         if requests.len() > 1 {
-            bail!("-g/--gdbstub and --debug-tui cannot be combined");
+            bail!("only one of -g/--gdbstub, --debug-tui and --debug-dap may be used");
         }
-        let Some((name, addr, debugger)) = requests.pop() else {
+        let Some((name, addr, debugger, extra_args)) = requests.pop() else {
             return Ok(None);
         };
         if self.common.debug.debugger.is_some() {
             bail!(
-                "built-in debuggers (-g/--gdbstub, --debug-tui) cannot be combined with -Ddebugger="
+                "built-in debuggers (-g/--gdbstub, --debug-tui, --debug-dap) cannot be combined with -Ddebugger="
             );
         }
         // Accept either a bare port number or a full address:port.
@@ -235,6 +257,10 @@ impl RunCommon {
         };
         self.common.debug.debugger = Some(format!("<built-in {name}>").into());
         self.common.debug.arg.push(addr);
+        self.common
+            .debug
+            .arg
+            .extend(extra_args.iter().map(|a| a.to_string()));
         Ok(Some(debugger))
     }
 

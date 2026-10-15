@@ -1,0 +1,17 @@
+[package]
+name = "wasmtime-internal-debug-dap"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Debug Adapter Protocol (DAP) message framing, types, and a simple client"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std"] }
+serde_derive = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

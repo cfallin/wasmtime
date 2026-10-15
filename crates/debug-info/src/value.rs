@@ -540,7 +540,16 @@ impl<'a> Ctx<'a> {
                     .ok_or_else(|| anyhow!("element type has unknown size"))?;
                 Ok(v.sub(*elem, i * esize, None))
             }
-            TypeKind::Pointer { pointee, .. } => {
+            TypeKind::Pointer { pointee, kind } => {
+                // A Rust reference (or C++ reference) is indexed through
+                // to its referent (`r[1]` for `r: &[i32; 3]` or
+                // `&Vec<i32>`); raw pointers do pointer arithmetic.
+                let is_ref = *kind != PtrKind::Pointer
+                    || (t.lang == Lang::Rust
+                        && t.name.as_deref().is_some_and(|n| n.starts_with('&')));
+                if is_ref {
+                    return self.index(&self.deref(v)?, i);
+                }
                 let pointee = pointee.ok_or_else(|| anyhow!("cannot index a `void *` pointer"))?;
                 let esize = self
                     .info
