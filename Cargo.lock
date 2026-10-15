@@ -4718,6 +4718,7 @@ dependencies = [
  "wasmtime-internal-cache",
  "wasmtime-internal-component-util",
  "wasmtime-internal-cranelift",
+ "wasmtime-internal-debug-tui-component-artifact",
  "wasmtime-internal-debugger",
  "wasmtime-internal-explorer",
  "wasmtime-internal-gdbstub-component-artifact",
@@ -4975,6 +4976,15 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-debug-tui-component"
 version = "51.0.0-dev"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "wasip2",
+ "wasmtime-internal-debug-info",
+ "wit-bindgen 0.63.0",
+ "wstd",
+]
 
 [[package]]
 name = "wasmtime-internal-debug-tui-component-artifact"

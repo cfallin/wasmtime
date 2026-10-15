@@ -74,6 +74,7 @@ wasmtime-unwinder = { workspace = true }
 wasmtime-wizer = { workspace = true, optional = true, features = ['clap', 'wasmtime'] }
 wasmtime-debugger = { workspace = true, optional = true }
 gdbstub-component-artifact = { workspace = true, optional = true }
+debug-tui-component-artifact = { workspace = true, optional = true }
 clap = { workspace = true }
 clap_complete = { workspace = true, optional = true }
 target-lexicon = { workspace = true }
@@ -577,6 +578,9 @@ rr = [
 # the default build because the published-to-crates.io crates cannot build the
 # artifact (a limitation caused by lack of artifact dependencies).
 gdbstub = ["debug", "dep:gdbstub-component-artifact"]
+# Like `gdbstub`, but for the built-in interactive text-mode debugger
+# (`--debug-tui`).
+debug-tui = ["debug", "dep:debug-tui-component-artifact"]
 
 # This feature, when enabled, will statically compile out all logging statements
 # throughout Wasmtime and its dependencies.

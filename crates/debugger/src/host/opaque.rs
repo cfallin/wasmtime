@@ -9,7 +9,7 @@ use crate::host::{
 #[cfg(feature = "threads")]
 use std::sync::atomic::{AtomicU8, Ordering};
 use wasmtime::{
-    Engine, ExnRef, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance, Module,
+    AnyRef, Engine, ExnRef, RootScope, ExnRefPre, ExnType, FrameHandle, Func, FuncType, Global, Instance, Module,
     OwnedRooted, Result, Table, Tag, TagType, Val, ValType,
 };
 
@@ -154,6 +154,15 @@ pub(crate) trait OpaqueDebugger {
     async fn exnref_get_fields(&mut self, exn: OwnedRooted<ExnRef>) -> Result<Vec<WasmValue>>;
     async fn exnref_new(&mut self, tag: Tag, fields: Vec<WasmValue>)
     -> Result<OwnedRooted<ExnRef>>;
+
+    async fn anyref_kind(&mut self, r: OwnedRooted<AnyRef>) -> Result<wit::AnyrefKind>;
+    async fn anyref_struct_fields(&mut self, r: OwnedRooted<AnyRef>) -> Result<Vec<WasmValue>>;
+    async fn anyref_array_elements(
+        &mut self,
+        r: OwnedRooted<AnyRef>,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<WasmValue>>;
 
     async fn frame_instance(&mut self, frame: FrameHandle) -> Result<Instance>;
     async fn frame_func_and_pc(&mut self, frame: FrameHandle) -> Result<(u32, u32)>;
@@ -657,6 +666,68 @@ impl<T: Send + 'static> OpaqueDebugger for crate::Debuggee<T> {
                 .into_iter()
                 .map(|v| WasmValue::new(&mut store, v))
                 .collect::<Result<Vec<_>>>()
+        })
+        .await?
+    }
+
+    async fn anyref_kind(&mut self, r: OwnedRooted<AnyRef>) -> Result<wit::AnyrefKind> {
+        self.with_store(move |mut store| -> Result<wit::AnyrefKind> {
+            // Downcasts must operate on LIFO-rooted references, so
+            // convert within a temporary rooting scope.
+            let mut store = RootScope::new(&mut store);
+            let r = r.to_rooted(&mut store);
+            if let Some(i) = r.as_i31(&store)? {
+                return Ok(wit::AnyrefKind::I31(i.get_i32()));
+            }
+            if let Some(s) = r.as_struct(&store)? {
+                let n = s.ty(&store)?.fields().len();
+                return Ok(wit::AnyrefKind::StructRef(u32::try_from(n)?));
+            }
+            if let Some(a) = r.as_array(&store)? {
+                return Ok(wit::AnyrefKind::ArrayRef(a.len(&store)?));
+            }
+            Ok(wit::AnyrefKind::Other)
+        })
+        .await?
+    }
+
+    async fn anyref_struct_fields(&mut self, r: OwnedRooted<AnyRef>) -> Result<Vec<WasmValue>> {
+        self.with_store(move |mut store| -> Result<Vec<WasmValue>> {
+            let mut store = RootScope::new(&mut store);
+            let r = r.to_rooted(&mut store);
+            let s = r.as_struct(&store)?.ok_or(wit::Error::MismatchedType)?;
+            let n = s.ty(&store)?.fields().len();
+            let mut out = vec![];
+            for i in 0..n {
+                let v = s.field(&mut store, i)?;
+                out.push(WasmValue::new(&mut store, v)?);
+            }
+            Ok(out)
+        })
+        .await?
+    }
+
+    async fn anyref_array_elements(
+        &mut self,
+        r: OwnedRooted<AnyRef>,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<WasmValue>> {
+        self.with_store(move |mut store| -> Result<Vec<WasmValue>> {
+            let mut store = RootScope::new(&mut store);
+            let r = r.to_rooted(&mut store);
+            let a = r.as_array(&store)?.ok_or(wit::Error::MismatchedType)?;
+            let len = a.len(&store)?;
+            if start > len {
+                return Err(wit::Error::OutOfBounds.into());
+            }
+            let end = start.saturating_add(count).min(len);
+            let mut out = vec![];
+            for i in start..end {
+                let v = a.get(&mut store, i)?;
+                out.push(WasmValue::new(&mut store, v)?);
+            }
+            Ok(out)
         })
         .await?
     }

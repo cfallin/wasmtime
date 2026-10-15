@@ -1,0 +1,13 @@
+[package]
+name = "wasmtime-internal-debug-tui-component-artifact"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Interactive text-mode debugger component for Wasmtime (built artifact)"
+
+[lints]
+workspace = true
+
+[dependencies]
+wasmtime-core = { workspace = true }

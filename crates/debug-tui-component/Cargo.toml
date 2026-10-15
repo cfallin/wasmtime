@@ -1,0 +1,23 @@
+[package]
+name = "wasmtime-internal-debug-tui-component"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Interactive text-mode debugger component for Wasmtime"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true, features = ["macros"] }
+anyhow = { workspace = true, features = ["std"] }
+clap = { workspace = true }
+wstd = { workspace = true }
+wasip2 = { workspace = true }
+futures = { workspace = true, default-features = true }
+wasmtime-debug-info = { workspace = true }
+
+[lints]
+workspace = true

@@ -7,8 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wasmtime::{
-    Engine, ExnRef, FrameHandle, Func, Global, Instance, Module, OwnedRooted, Result, Table, Tag,
-    Val, component::Resource, component::ResourceTable,
+    AnyRef, Engine, ExnRef, ExternRef, FrameHandle, Func, Global, Instance, Module, OwnedRooted,
+    Result, Table, Tag, Val, component::Resource, component::ResourceTable,
 };
 use wasmtime_wasi::p2::{DynPollable, Pollable, subscribe};
 
@@ -72,7 +72,15 @@ impl WasmValue {
             Val::ExnRef(None) => WasmValue::Exn(None),
             Val::FuncRef(Some(f)) => WasmValue::Func(Some(f)),
             Val::FuncRef(None) => WasmValue::Func(None),
-            Val::ExternRef(_) | Val::AnyRef(_) | Val::ContRef(_) => {
+            Val::AnyRef(Some(rooted)) => {
+                WasmValue::Any(Some(rooted.to_owned_rooted(store).unwrap()))
+            }
+            Val::AnyRef(None) => WasmValue::Any(None),
+            Val::ExternRef(Some(rooted)) => {
+                WasmValue::Extern(Some(rooted.to_owned_rooted(store).unwrap()))
+            }
+            Val::ExternRef(None) => WasmValue::Extern(None),
+            Val::ContRef(_) => {
                 return Err(wit::Error::UnsupportedType.into());
             }
             Val::I32(_) | Val::I64(_) | Val::F32(_) | Val::F64(_) | Val::V128(_) => {
@@ -88,6 +96,10 @@ impl WasmValue {
             WasmValue::Exn(None) => Val::ExnRef(None),
             WasmValue::Func(Some(f)) => Val::FuncRef(Some(f)),
             WasmValue::Func(None) => Val::FuncRef(None),
+            WasmValue::Any(Some(owned)) => Val::AnyRef(Some(owned.to_rooted(store))),
+            WasmValue::Any(None) => Val::AnyRef(None),
+            WasmValue::Extern(Some(owned)) => Val::ExternRef(Some(owned.to_rooted(store))),
+            WasmValue::Extern(None) => Val::ExternRef(None),
         }
     }
 }
@@ -206,8 +218,15 @@ pub enum WasmValue {
     Exn(Option<OwnedRooted<ExnRef>>),
     /// A funcref.
     Func(Option<Func>),
-    // TODO: GC structs and arrays.
+    /// An anyref (GC struct, array, or i31).
+    Any(Option<OwnedRooted<AnyRef>>),
+    /// An externref.
+    Extern(Option<OwnedRooted<ExternRef>>),
 }
+
+/// Representation of a Wasm GC reference in the `any` hierarchy.
+#[derive(Clone)]
+pub struct WasmAnyRef(OwnedRooted<AnyRef>);
 
 /// Get the `OpaqueDebugger` or raise an error.
 fn debugger<'a>(
@@ -1051,6 +1070,8 @@ impl wit::HostWasmValue for ResourceTable {
             WasmValue::Primitive(Val::V128(_)) => Ok(wit::WasmType::WasmV128),
             WasmValue::Func(_) => Ok(wit::WasmType::WasmFuncref),
             WasmValue::Exn(_) => Ok(wit::WasmType::WasmExnref),
+            WasmValue::Any(_) => Ok(wit::WasmType::WasmAnyref),
+            WasmValue::Extern(_) => Ok(wit::WasmType::WasmExternref),
             WasmValue::Primitive(_) => unreachable!(),
         }
     }
@@ -1122,6 +1143,32 @@ impl wit::HostWasmValue for ResourceTable {
         }
     }
 
+    async fn unwrap_anyref(
+        &mut self,
+        self_: Resource<WasmValue>,
+    ) -> Result<Option<Resource<WasmAnyRef>>> {
+        let value = self.get(&self_)?;
+        match value {
+            WasmValue::Any(Some(a)) => {
+                let a = a.clone();
+                Ok(Some(self.push(WasmAnyRef(a))?))
+            }
+            WasmValue::Any(None) => Ok(None),
+            _ => wasmtime::bail!("Wasm value is not an anyref."),
+        }
+    }
+
+    async fn is_null(&mut self, self_: Resource<WasmValue>) -> Result<bool> {
+        let value = self.get(&self_)?;
+        Ok(match value {
+            WasmValue::Primitive(_) => false,
+            WasmValue::Func(f) => f.is_none(),
+            WasmValue::Exn(e) => e.is_none(),
+            WasmValue::Any(a) => a.is_none(),
+            WasmValue::Extern(e) => e.is_none(),
+        })
+    }
+
     async fn make_i32(&mut self, value: u32) -> Result<Resource<WasmValue>> {
         Ok(self.push(WasmValue::Primitive(Val::I32(value.cast_signed())))?)
     }
@@ -1153,6 +1200,60 @@ impl wit::HostWasmValue for ResourceTable {
     }
 
     async fn drop(&mut self, rep: Resource<WasmValue>) -> Result<()> {
+        self.delete(rep)?;
+        Ok(())
+    }
+}
+
+impl wit::HostWasmAnyref for ResourceTable {
+    async fn kind(
+        &mut self,
+        self_: Resource<WasmAnyRef>,
+        d: Resource<Debuggee>,
+    ) -> Result<wit::AnyrefKind> {
+        let r = self.get(&self_)?.0.clone();
+        let d = debugger(self, &d)?;
+        d.anyref_kind(r).await
+    }
+
+    async fn struct_fields(
+        &mut self,
+        self_: Resource<WasmAnyRef>,
+        d: Resource<Debuggee>,
+    ) -> Result<Vec<Resource<WasmValue>>> {
+        let r = self.get(&self_)?.0.clone();
+        let d = debugger(self, &d)?;
+        let vals = d.anyref_struct_fields(r).await?;
+        let mut out = vec![];
+        for v in vals {
+            out.push(self.push(v)?);
+        }
+        Ok(out)
+    }
+
+    async fn array_elements(
+        &mut self,
+        self_: Resource<WasmAnyRef>,
+        d: Resource<Debuggee>,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<Resource<WasmValue>>> {
+        let r = self.get(&self_)?.0.clone();
+        let d = debugger(self, &d)?;
+        let vals = d.anyref_array_elements(r, start, count).await?;
+        let mut out = vec![];
+        for v in vals {
+            out.push(self.push(v)?);
+        }
+        Ok(out)
+    }
+
+    async fn clone(&mut self, self_: Resource<WasmAnyRef>) -> Result<Resource<WasmAnyRef>> {
+        let r = self.get(&self_)?.clone();
+        Ok(self.push(r)?)
+    }
+
+    async fn drop(&mut self, rep: Resource<WasmAnyRef>) -> Result<()> {
         self.delete(rep)?;
         Ok(())
     }

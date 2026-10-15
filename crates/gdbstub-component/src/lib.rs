@@ -474,7 +474,9 @@ impl<'a> Debugger<'a> {
             WasmType::WasmF64 => value.unwrap_f64().to_le_bytes().to_vec(),
             WasmType::WasmV128 => value.unwrap_v128(),
             WasmType::WasmFuncref => 0u32.to_le_bytes().to_vec(),
-            WasmType::WasmExnref => 0u32.to_le_bytes().to_vec(),
+            WasmType::WasmExnref | WasmType::WasmAnyref | WasmType::WasmExternref => {
+                0u32.to_le_bytes().to_vec()
+            }
         }
     }
 }
