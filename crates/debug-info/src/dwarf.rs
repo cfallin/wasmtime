@@ -683,8 +683,8 @@ impl DebugInfo {
         Some((addrs, target))
     }
 
-    /// All line-table rows within `range`.
-    fn rows_in(&self, range: &Range<u64>) -> Vec<LineRow> {
+    /// All line-table rows within `range`, sorted by address.
+    pub fn rows_in(&self, range: &Range<u64>) -> Vec<LineRow> {
         let mut out = vec![];
         for s in &self.sequences {
             if s.end <= range.start || s.start >= range.end {
@@ -756,11 +756,15 @@ impl DebugInfo {
             return exact;
         }
         let suffix = format!("::{query}");
+        let query_base = function_base_name(query);
         self.functions
             .iter()
             .filter(|f| {
-                let base = strip_generics(&f.name);
-                base == query || base.ends_with(&suffix) || f.name.ends_with(&suffix)
+                let base = function_base_name(&f.name);
+                base == query
+                    || base == query_base
+                    || base.ends_with(&suffix)
+                    || f.name.ends_with(&suffix)
             })
             .collect()
     }
@@ -1598,8 +1602,49 @@ fn const_to_i128(v: &AttributeValue<R>, signed: bool, size: Option<u64>) -> i128
     }
 }
 
+/// Reduce a (demangled) function name to its qualified base name for
+/// matching: drop C++ parameter lists and qualifiers, template/generic
+/// arguments, and C++ template return types. For example,
+/// `int geo::twice<int>(int)` becomes `geo::twice` and
+/// `geo::Vec2::dot(geo::Vec2 const&) const` becomes `geo::Vec2::dot`.
+fn function_base_name(name: &str) -> String {
+    let mut s = name.trim();
+    // Drop a trailing parameter list (and any qualifiers after it).
+    if let Some(close) = s.rfind(')') {
+        let mut depth = 0;
+        let mut open = None;
+        for (i, c) in s[..=close].char_indices().rev() {
+            match c {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(open) = open {
+            // Only treat it as a parameter list if it follows a name
+            // (not e.g. a Rust tuple type).
+            if open > 0 && !s[..open].ends_with(['<', ' ']) {
+                s = &s[..open];
+            }
+        }
+    }
+    let base = strip_generics(s);
+    // Drop a leading return type (C++ templates).
+    match base.rsplit_once(' ') {
+        Some((_, last)) if !last.is_empty() => last.to_string(),
+        _ => base,
+    }
+}
+
 /// Strip generic arguments (`<...>`) from a name.
 fn strip_generics(name: &str) -> String {
+    // Note: `operator<`-style names are rare enough to ignore here.
     let mut out = String::new();
     let mut depth = 0;
     for c in name.chars() {
@@ -1644,5 +1689,28 @@ impl std::fmt::Debug for DebugInfo {
             .field("units", &self.units.len())
             .field("functions", &self.functions.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_names() {
+        assert_eq!(function_base_name("int geo::twice<int>(int)"), "geo::twice");
+        assert_eq!(
+            function_base_name("geo::Vec2::dot(geo::Vec2 const&) const"),
+            "geo::Vec2::dot"
+        );
+        assert_eq!(function_base_name("main"), "main");
+        assert_eq!(
+            function_base_name("alloc::vec::Vec<T>::push"),
+            "alloc::vec::Vec::push"
+        );
+        assert_eq!(
+            function_base_name("<core::option::Option<T>>::as_ref"),
+            "::as_ref"
+        );
     }
 }

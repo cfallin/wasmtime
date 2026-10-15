@@ -660,6 +660,11 @@ impl<'a> Session<'a> {
         if self.state == RunState::NotStarted {
             bail!("The program has not been started; use `start` or `continue`.");
         }
+        if over {
+            if let Some(o) = self.next_by_ranges().await? {
+                return Ok(o);
+            }
+        }
         let start_line = self.top_line();
         let start_phys = self.phys.len();
         let start_logical = self.vframes.len();
@@ -704,6 +709,95 @@ impl<'a> Session<'a> {
                 }
             }
         }
+    }
+
+    /// `next` via "range stepping": rather than single-stepping, place
+    /// temporary breakpoints at every statement in the current function
+    /// that is on a different line, plus the return address, and
+    /// continue. Returns `None` (without resuming) if this is not
+    /// possible, e.g. without line information.
+    async fn next_by_ranges(&mut self) -> Result<Option<Outcome>> {
+        let Some(start_line) = self.top_line() else {
+            return Ok(None);
+        };
+        let Some(addr) = self.dwarf_addr(0) else {
+            return Ok(None);
+        };
+        let module = self.phys[0].module;
+        let mut targets: Vec<u32> = {
+            let info = &self.modules[module].info;
+            let dbg = info.debug.as_ref().unwrap();
+            let Some(f) = dbg.function_at(addr) else {
+                return Ok(None);
+            };
+            let mut t = vec![];
+            for r in &f.ranges {
+                for row in dbg.rows_in(r) {
+                    if row.is_stmt && row.line != 0 && (row.file, row.line) != start_line {
+                        if let Some(pc) = info.dwarf_to_pc(row.addr) {
+                            t.push(pc);
+                        }
+                    }
+                }
+            }
+            t
+        };
+        targets.sort();
+        targets.dedup();
+        let ret = self.return_point(0);
+        let start_phys = self.phys.len();
+        let start_logical = self.vframes.len();
+
+        let mut installed = vec![];
+        for &pc in &targets {
+            self.install(module, pc)?;
+            installed.push((module, pc));
+        }
+        if let Some((m, pc, _)) = ret {
+            self.install(m, pc)?;
+            installed.push((m, pc));
+        }
+
+        let result = loop {
+            let ev = match self.resume(false).await {
+                Ok(ev) => ev,
+                Err(e) => break Err(e),
+            };
+            if let Some(o) = self.on_event(&ev) {
+                break Ok(Some(o));
+            }
+            let here = self.phys.first().map(|p| (p.module, p.pc));
+            let ours = here.is_some_and(|h| installed.contains(&h));
+            if !ours {
+                // A user breakpoint or other stop.
+                let bp = self.user_bp_here();
+                break Ok(Some(Outcome::Stopped(StopReason::Breakpoint(bp))));
+            }
+            let phys = self.phys.len();
+            if phys < start_phys {
+                // Returned to the caller.
+                break Ok(Some(Outcome::Stopped(StopReason::Step)));
+            }
+            if phys > start_phys {
+                // A recursive invocation of this function.
+                continue;
+            }
+            let logical = self.vframes.len();
+            if logical > start_logical {
+                // Inside code inlined into this frame.
+                continue;
+            }
+            if logical == start_logical && self.top_line() == Some(start_line) {
+                continue;
+            }
+            break Ok(Some(Outcome::Stopped(StopReason::Step)));
+        };
+        if self.state != RunState::Exited {
+            for (m, pc) in installed {
+                self.uninstall(m, pc);
+            }
+        }
+        result
     }
 
     /// If the top frame is in its function's prologue, run to the end
