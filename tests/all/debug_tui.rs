@@ -608,6 +608,54 @@ check: br $l
     Ok(())
 }
 
+#[test]
+#[ignore]
+fn debug_tui_trap_then_exit() -> Result<()> {
+    let wat = wat_file(
+        r#"
+        (module
+          (func $divide (param $a i32) (param $b i32) (result i32)
+            (i32.div_s (local.get $a) (local.get $b)))
+          (func (export "_start")
+            (drop (call $divide (i32.const 10) (i32.const 0)))))
+        "#,
+    )?;
+    let mut tui = Tui::spawn(wat.path().to_str().unwrap(), &[])?;
+    tui.script(
+        r#"
+        c
+        bt
+        c
+        bt
+        "#,
+    )?;
+    tui.send("quit")?;
+    let mut rest = String::new();
+    let _ = tui.stream.read_to_string(&mut rest);
+    let output = tui.child.wait_with_output()?;
+    eprintln!("--- transcript ---\n{}", tui.transcript);
+    check_output(
+        &tui.transcript,
+        r#"
+check: Program trapped (Wasm trap)
+check: divide (a=i32 10, b=i32 0)
+check: => 
+sameln: i32.div_s
+check: #0
+sameln: in divide
+check: #1
+sameln: in _start
+check: (wasmtime-debug) c
+check: [Program exited]
+check: The program is not being run.
+"#,
+    )?;
+    // The trap is still reported, and reflected in the exit status,
+    // once the debugger detaches.
+    assert!(!output.status.success());
+    Ok(())
+}
+
 macro_rules! assert_test_exists {
     ($name:ident) => {
         #[expect(unused_imports, reason = "here to assert the test exists")]

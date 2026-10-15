@@ -80,6 +80,13 @@ pub struct RunCommand {
     #[arg(skip)]
     pub(crate) rr_sink: Option<wasmtime::rr::EventSink>,
 
+    /// Whether this program runs under a debugger. If so, errors that
+    /// would normally exit the process immediately (traps, WASI
+    /// `proc_exit`) are instead propagated so that the debugger session
+    /// can observe program completion; the process exits afterward.
+    #[arg(skip)]
+    pub under_debugger: bool,
+
     /// The WebAssembly module to run and arguments to pass to it.
     ///
     /// Arguments passed to the wasm module will be configured as WASI CLI
@@ -87,6 +94,30 @@ pub struct RunCommand {
     /// arguments will be interpreted as arguments to the function specified.
     #[arg(value_name = "WASM", trailing_var_arg = true, required = true)]
     pub module_and_args: Vec<OsString>,
+}
+
+/// Exit the process if Wasmtime understands the error (a WASI exit
+/// status or a trap); otherwise, return it for Rust's default error
+/// printing/return code.
+fn exit_for_error(e: wasmtime::Error, wasip1: bool) -> wasmtime::Error {
+    if wasip1 {
+        if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+            std::process::exit(exit.0);
+        }
+    }
+    if e.is::<wasmtime::Trap>() {
+        eprintln!("Error: {e:?}");
+        cfg_select! {
+            unix => {
+                std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
+            }
+            windows => {
+                // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
+                std::process::exit(3);
+            }
+        }
+    }
+    e
 }
 
 impl RunCommand {
@@ -263,6 +294,8 @@ impl RunCommand {
 
             #[cfg(feature = "debug")]
             if let Some(mut debug_run) = debug_run {
+                self.under_debugger = true;
+                let wasip1 = store.data().wasip1_ctx.is_some();
                 // Pre-register the main module on the debuggee store
                 // so that `debug_all_modules()` returns it before any
                 // Wasm executes. This lets the debugger see modules
@@ -297,7 +330,9 @@ impl RunCommand {
                         Ok(())
                     })
                 });
-                debug_run.run_debugger(debuggee).await?;
+                if let Err(e) = debug_run.run_debugger(debuggee).await {
+                    return Err(exit_for_error(e, wasip1));
+                }
                 return Ok(());
             }
 
@@ -342,6 +377,7 @@ impl RunCommand {
             argv0: None,
             module_bytes: None,
             rr_sink: None,
+            under_debugger: false,
             module_and_args: vec![trace.into()],
         }
     }
@@ -522,27 +558,13 @@ impl RunCommand {
         let instance = match result {
             Ok(instance) => instance,
             Err(e) => {
-                // Exit the process if Wasmtime understands the error;
-                // otherwise, fall back on Rust's default error printing/return
-                // code.
-                if store.data().wasip1_ctx.is_some() {
-                    if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                        std::process::exit(exit.0);
-                    }
+                // Under a debugger, let the error propagate so that the
+                // debugger observes completion; `exit_for_error` is
+                // applied once the debugger is done.
+                if self.under_debugger {
+                    return Err(e);
                 }
-                if e.is::<wasmtime::Trap>() {
-                    eprintln!("Error: {e:?}");
-                    cfg_select! {
-                        unix => {
-                            std::process::exit(rustix::process::EXIT_SIGNALED_SIGABRT);
-                        }
-                        windows => {
-                            // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/abort?view=vs-2019
-                            std::process::exit(3);
-                        }
-                    }
-                }
-                return Err(e);
+                return Err(exit_for_error(e, store.data().wasip1_ctx.is_some()));
             }
         };
 
