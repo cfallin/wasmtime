@@ -120,6 +120,8 @@ enum VarRef {
 enum ScopeKind {
     Args,
     Locals,
+    /// Source-level globals of the frame's compilation unit.
+    Globals,
     WasmLocals,
     WasmStack,
     WasmGlobals,
@@ -604,6 +606,9 @@ fn scopes(s: &mut Session<'_>, st: &mut DapState, a: &Value) -> Result<Value> {
     if s.vframes[vi].scope.is_some() {
         push(st, "Arguments", Some("arguments"), ScopeKind::Args);
         push(st, "Locals", Some("locals"), ScopeKind::Locals);
+        if !frame_globals(s, vi).is_empty() {
+            push(st, "Globals", None, ScopeKind::Globals);
+        }
     }
     push(st, "Wasm Locals", Some("registers"), ScopeKind::WasmLocals);
     push(
@@ -638,7 +643,8 @@ fn src_variable(
     let target = FrameTarget::new(s.d, None, &s.instances[inst].handle);
     let ctx = Ctx::new(dbg, &target);
     let text = format_value(&ctx, &value, opts);
-    let ty = dbg.type_name(value.ty);
+    let ty = wasmtime_debug_info::pretty::dynamic_type(&ctx, &value)
+        .unwrap_or_else(|| dbg.type_name(value.ty));
     // For pointers, the memory reference is the address pointed to;
     // otherwise, the value's own address.
     let is_ptr = matches!(
@@ -827,6 +833,26 @@ fn wasm_children(
     Ok(out)
 }
 
+/// The source-level globals of frame `vi`'s compilation unit.
+fn frame_globals(s: &Session<'_>, vi: usize) -> Vec<wasmtime_debug_info::dwarf::GlobalVar> {
+    let v = &s.vframes[vi];
+    let module = s.phys[v.phys].module;
+    let (Some(dbg), Some(addr)) = (s.modules[module].info.debug.as_ref(), s.dwarf_addr(v.phys))
+    else {
+        return vec![];
+    };
+    let Some(f) = dbg.function_at(addr) else {
+        return vec![];
+    };
+    // A unit's own globals, bounded (a C++ unit can define thousands).
+    dbg.globals
+        .iter()
+        .filter(|g| g.die.unit == f.die.unit)
+        .take(1000)
+        .cloned()
+        .collect()
+}
+
 fn scope_variables(
     s: &mut Session<'_>,
     st: &mut DapState,
@@ -860,6 +886,45 @@ fn scope_variables(
                 // remain valid without the frame.
                 let val = ctx.variable(var, addr, fb);
                 vals.push((var.name.clone(), val));
+            }
+            drop(ctx);
+            for (name, val) in vals {
+                match val {
+                    Ok(value) => out.push(src_variable(
+                        s,
+                        st,
+                        name.clone(),
+                        Some(name),
+                        module,
+                        inst,
+                        value,
+                        opts,
+                    )),
+                    Err(e) => out.push(Variable {
+                        evaluate_name: Some(name.clone()),
+                        name,
+                        value: format!("{e}"),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
+        ScopeKind::Globals => {
+            let globals = frame_globals(s, vi);
+            let target = FrameTarget::new(s.d, None, &s.instances[inst].handle);
+            let dbg = s.modules[module].info.debug.as_ref().unwrap();
+            let ctx = Ctx::new(dbg, &target);
+            let mut vals = vec![];
+            for g in &globals {
+                let val = (|| {
+                    let ty = dbg
+                        .global_type(g)?
+                        .ok_or_else(|| anyhow!("global `{}` has no type", g.name))?;
+                    let loc = dbg.global_loc(g)?;
+                    let l = dbg.eval_loc(g.die.unit, &loc, 0, None, &target)?;
+                    ctx.from_location(ty, l)
+                })();
+                vals.push((g.name.clone(), val));
             }
             drop(ctx);
             for (name, val) in vals {
@@ -1148,7 +1213,7 @@ fn data_target(s: &mut Session<'_>, st: &DapState, a: &Value) -> Result<(String,
     match r {
         VarRef::Scope {
             frame,
-            kind: ScopeKind::Args | ScopeKind::Locals,
+            kind: ScopeKind::Args | ScopeKind::Locals | ScopeKind::Globals,
         } => {
             let saved = s.selected;
             s.selected = *frame;

@@ -117,6 +117,18 @@ pub trait PrettyPrinter: Sync {
     fn member(&self, _ctx: &Ctx<'_>, _v: &Value, _name: &str) -> Option<Result<Value>> {
         None
     }
+
+    /// The value's type as its language sees it, when that is decided at
+    /// run time (e.g. a JavaScript value's `number`, `string` or class).
+    fn dynamic_type(&self, _ctx: &Ctx<'_>, _v: &Value) -> Option<String> {
+        None
+    }
+}
+
+/// The run-time type of `v`, if its printer knows one (see
+/// [`PrettyPrinter::dynamic_type`]).
+pub fn dynamic_type(ctx: &Ctx<'_>, v: &Value) -> Option<String> {
+    find(ctx, v.ty)?.dynamic_type(ctx, v)
 }
 
 /// All registered printers.

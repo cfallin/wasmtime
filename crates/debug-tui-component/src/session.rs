@@ -936,8 +936,19 @@ impl<'a> Session<'a> {
             if phys > start_phys {
                 // Entered a callee.
                 let has_lines = self.top_line().is_some();
-                if over || !has_lines {
+                if over {
                     if let Some(o) = self.step_out_phys().await? {
+                        return Ok(o);
+                    }
+                    continue;
+                }
+                if !has_lines {
+                    // A callee without line info: a trampoline, or a
+                    // runtime that calls on into code with line info
+                    // (e.g. a language runtime invoking a compiled
+                    // guest function). Stop in the first function with
+                    // line info it reaches, else come back.
+                    if let Some(o) = self.step_through_lineless().await? {
                         return Ok(o);
                     }
                     continue;
@@ -1044,6 +1055,66 @@ impl<'a> Session<'a> {
                 continue;
             }
             break Ok(Some(Outcome::Stopped(StopReason::Step)));
+        };
+        if self.state != RunState::Exited {
+            for (m, pc) in installed {
+                self.uninstall(m, pc);
+            }
+        }
+        result
+    }
+
+    /// The top frame is a callee without line info, entered by a source
+    /// step: run until it returns, or until any function with line info
+    /// (in any module) is entered below it, stopping there after its
+    /// prologue. Returns `None` once back in the caller.
+    async fn step_through_lineless(&mut self) -> Result<Option<Outcome>> {
+        let Some(ret) = self.return_point(0) else {
+            return Ok(Some(self.cont().await?));
+        };
+        let entry_depth = self.phys.len();
+        let mut targets = vec![];
+        for (m, module) in self.modules.iter().enumerate() {
+            let Some(dbg) = &module.info.debug else {
+                continue;
+            };
+            for f in &dbg.functions {
+                if let Some(pc) = module.info.dwarf_to_pc(dbg.prologue_end(f)) {
+                    targets.push((m, pc));
+                }
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        let mut installed = vec![];
+        for &(m, pc) in targets.iter().chain(std::iter::once(&(ret.0, ret.1))) {
+            self.install(m, pc)?;
+            installed.push((m, pc));
+        }
+        let result = loop {
+            let ev = match self.resume(Motion::Continue).await {
+                Ok(ev) => ev,
+                Err(e) => break Err(e),
+            };
+            if let Some(o) = self.on_event(&ev) {
+                break Ok(Some(o));
+            }
+            let Some(here) = self.phys.first().map(|p| (p.module, p.pc)) else {
+                break Ok(Some(Outcome::Stopped(StopReason::Interrupted)));
+            };
+            let depth = self.phys.len();
+            if here == (ret.0, ret.1) && depth <= ret.2 {
+                break Ok(None);
+            }
+            if let Some(bp) = self.user_bp_here() {
+                break Ok(Some(Outcome::Stopped(StopReason::Breakpoint(Some(bp)))));
+            }
+            if targets.binary_search(&here).is_ok() && depth >= entry_depth {
+                break Ok(Some(Outcome::Stopped(StopReason::Step)));
+            }
+            if !matches!(ev, api::Event::Breakpoint) {
+                break Ok(Some(Outcome::Stopped(StopReason::Interrupted)));
+            }
         };
         if self.state != RunState::Exited {
             for (m, pc) in installed {

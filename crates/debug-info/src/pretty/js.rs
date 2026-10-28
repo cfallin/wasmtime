@@ -826,6 +826,37 @@ impl PrettyPrinter for JsValuePrinter {
         })
     }
 
+    fn dynamic_type(&self, ctx: &Ctx<'_>, v: &Value) -> Option<String> {
+        let l = Layout::of(ctx)?;
+        let h = Heap { ctx, l: &l };
+        let bits = u64::from_le_bytes(ctx.read_bytes(v, 8).ok()?[..8].try_into().ok()?);
+        Some(match h.decode(bits) {
+            Js::Double(_) | Js::Int32(_) => "number".into(),
+            Js::Bool(_) => "boolean".into(),
+            Js::Undefined => "undefined".into(),
+            Js::Null => "null".into(),
+            Js::String(_) => "string".into(),
+            Js::Symbol(_) => "symbol".into(),
+            Js::BigInt(_) => "bigint".into(),
+            Js::Magic(_) | Js::Other(_) => return None,
+            Js::Object(obj) => {
+                let class = h.class_name(obj).ok()?;
+                if class != "Object" || !h.is_native(obj).ok()? {
+                    return Some(class);
+                }
+                match h.proto(obj).ok()? {
+                    Some(p) if p != 0 => h
+                        .constructor_name(p)
+                        .ok()
+                        .flatten()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or(class),
+                    _ => class,
+                }
+            }
+        })
+    }
+
     fn index(&self, ctx: &Ctx<'_>, v: &Value, i: u64) -> Option<Result<Value>> {
         self.member(ctx, v, &i.to_string())
     }
