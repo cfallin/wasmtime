@@ -159,6 +159,9 @@ pub struct DebugInfo {
     /// Rust trait-object vtables: address -> the vtable variable's DIE
     /// (built lazily).
     vtables: RefCell<Option<HashMap<u64, DieRef>>>,
+    /// The JavaScript heap layout the DWARF describes, if any (loaded on
+    /// first use by the JS pretty-printer).
+    pub(crate) js_layout: RefCell<Option<Option<Rc<crate::pretty::js::Layout>>>>,
 }
 
 impl DebugInfo {
@@ -188,6 +191,7 @@ impl DebugInfo {
             type_cache: RefCell::new(HashMap::new()),
             synth_cache: RefCell::new(HashMap::new()),
             vtables: RefCell::new(None),
+            js_layout: RefCell::new(None),
         };
 
         let mut file_ids: HashMap<String, u32> = HashMap::new();

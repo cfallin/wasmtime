@@ -8,10 +8,12 @@
 //! smart pointers and cells).
 //!
 //! Printers are grouped by language: [`rust`] (Rust's `std`), [`cpp`]
-//! (LLVM's libc++, as shipped with wasi-sdk) and [`c`] (C strings).
+//! (LLVM's libc++, as shipped with wasi-sdk), [`c`] (C strings) and
+//! [`js`] (JavaScript values, as compiled by NightMonkey).
 
 mod c;
 mod cpp;
+pub(crate) mod js;
 mod rust;
 
 use crate::format::FormatOptions;
@@ -70,6 +72,20 @@ pub enum Summary {
     /// A prefix immediately followed by the inner value (e.g. `&` for a
     /// reference to a trait object).
     Prefixed { prefix: String, inner: Value },
+    /// Named entries (e.g. a JavaScript object's properties), of which
+    /// only the first few may be included; `total` is the full count.
+    /// Rendered `prefix{name: value, ...}`, or `prefix[value, ...]` for
+    /// an array (whose names are its indices), or just `prefix` when
+    /// `collapsed`. Each entry, then each of `internal` (shown only when
+    /// expanding, e.g. `[[Prototype]]`), is a child named by its name.
+    Fields {
+        prefix: String,
+        array: bool,
+        collapsed: bool,
+        fields: Vec<(String, Value)>,
+        total: u64,
+        internal: Vec<(String, Value)>,
+    },
 }
 
 /// A pretty-printer for a family of types.
@@ -95,6 +111,12 @@ pub trait PrettyPrinter: Sync {
     fn deref(&self, _ctx: &Ctx<'_>, _v: &Value) -> Option<Result<Value>> {
         None
     }
+
+    /// Synthetic member access, if supported (e.g. a JavaScript
+    /// object's properties, for `obj.name`).
+    fn member(&self, _ctx: &Ctx<'_>, _v: &Value, _name: &str) -> Option<Result<Value>> {
+        None
+    }
 }
 
 /// All registered printers.
@@ -103,6 +125,7 @@ pub fn printers() -> Vec<&'static dyn PrettyPrinter> {
     v.extend_from_slice(rust::PRINTERS);
     v.extend_from_slice(cpp::PRINTERS);
     v.extend_from_slice(c::PRINTERS);
+    v.extend_from_slice(js::PRINTERS);
     v
 }
 
@@ -129,6 +152,7 @@ pub fn find(ctx: &Ctx<'_>, ty: TypeId) -> Option<&'static dyn PrettyPrinter> {
         let lists: [&[&'static dyn PrettyPrinter]; 3] = match t.lang {
             Lang::Rust => [rust::PRINTERS, &[], &[]],
             Lang::Cpp => [cpp::PRINTERS, c::PRINTERS, &[]],
+            Lang::JavaScript => [js::PRINTERS, c::PRINTERS, &[]],
             _ => [c::PRINTERS, &[], &[]],
         };
         for list in lists {

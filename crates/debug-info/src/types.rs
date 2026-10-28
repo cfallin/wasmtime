@@ -16,8 +16,14 @@ pub enum Lang {
     C,
     Cpp,
     Rust,
+    /// JavaScript compiled to Wasm by NightMonkey (a vendor
+    /// `DW_LANG` code; DWARF has none for JavaScript).
+    JavaScript,
     Other,
 }
+
+/// NightMonkey's `DW_LANG` code for JavaScript.
+pub const DW_LANG_NIGHTMONKEY_JS: gimli::DwLang = gimli::DwLang(0xa53a);
 
 impl Lang {
     pub(crate) fn from_dwarf(lang: gimli::DwLang) -> Lang {
@@ -34,6 +40,7 @@ impl Lang {
             | gimli::DW_LANG_C_plus_plus_17
             | gimli::DW_LANG_C_plus_plus_20 => Lang::Cpp,
             gimli::DW_LANG_Rust => Lang::Rust,
+            DW_LANG_NIGHTMONKEY_JS => Lang::JavaScript,
             _ => Lang::Other,
         }
     }

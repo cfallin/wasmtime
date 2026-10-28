@@ -29,6 +29,12 @@ pub struct StackFrame {
     pub module_id: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation_hint: Option<String>,
+    /// Wasmtime extension: the index of the physical (Wasm) frame this
+    /// source-level frame belongs to. Frames inlined into one physical
+    /// frame share it (and its instruction pointer); recursive calls
+    /// share an instruction pointer but not this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_frame: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

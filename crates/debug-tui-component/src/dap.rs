@@ -583,6 +583,7 @@ fn stack_trace(s: &mut Session<'_>, a: &Value) -> Result<Value> {
             column,
             instruction_pointer_reference: Some(memory_reference(code_address(p.module, p.pc))),
             module_id: Some(json!(p.module)),
+            physical_frame: Some(v.phys as i64),
         });
     }
     Ok(json!({ "stackFrames": frames, "totalFrames": s.vframes.len() }))

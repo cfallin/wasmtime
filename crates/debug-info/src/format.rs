@@ -526,6 +526,43 @@ impl Formatter<'_, '_> {
                 out.push_str(&prefix);
                 self.value(&inner, depth + 1, out);
             }
+            Summary::Fields {
+                prefix,
+                array,
+                collapsed,
+                fields,
+                total,
+                internal: _,
+            } => {
+                out.push_str(&prefix);
+                if collapsed {
+                    return Ok(());
+                }
+                if depth >= self.opts.max_depth {
+                    out.push_str(if array { "[...]" } else { "{...}" });
+                    return Ok(());
+                }
+                out.push_str(if array { "[" } else { "{" });
+                for (i, (name, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    if !array {
+                        let _ = write!(out, "{name}: ");
+                    }
+                    self.value(v, depth + 1, out);
+                }
+                let shown = fields.len() as u64;
+                if shown < total {
+                    let _ = write!(
+                        out,
+                        "{}...({} more)",
+                        if shown > 0 { ", " } else { "" },
+                        total - shown
+                    );
+                }
+                out.push_str(if array { "]" } else { "}" });
+            }
             Summary::Labeled { label, inner } => {
                 out.push_str(&label);
                 if let Some(inner) = inner {

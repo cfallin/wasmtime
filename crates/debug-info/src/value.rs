@@ -407,6 +407,11 @@ impl<'a> Ctx<'a> {
     }
 
     fn member_impl(&self, v: &Value, name: &str, look_through: bool) -> Result<Value> {
+        if look_through {
+            if let Some(r) = pretty::find(self, v.ty).and_then(|p| p.member(self, v, name)) {
+                return r;
+            }
+        }
         let sty = self.info.strip(v.ty);
         let t = self.info.ty(sty);
         match &t.kind {

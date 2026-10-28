@@ -187,6 +187,25 @@ fn summary_children(
                 })
                 .collect()
         }
+        Summary::Fields {
+            fields, internal, ..
+        } => fields
+            .into_iter()
+            .chain(internal)
+            .take(limit)
+            .map(|(name, value)| {
+                let path = crate::pretty::js::property_path(&name);
+                Child {
+                    path: if path.is_empty() {
+                        ChildPath::None
+                    } else {
+                        ChildPath::Suffix(path)
+                    },
+                    name,
+                    value,
+                }
+            })
+            .collect(),
         // Wrappers are transparent: their contents' children (paths
         // through wrappers work because member access and indexing look
         // through them).
