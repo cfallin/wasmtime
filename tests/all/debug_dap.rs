@@ -241,6 +241,7 @@ fn debug_dap_c_values_and_stepping() -> DapResult<()> {
         [
             "Arguments",
             "Locals",
+            "Globals",
             "Wasm Locals",
             "Wasm Operand Stack",
             "Wasm Globals"

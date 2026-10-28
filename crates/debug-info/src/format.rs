@@ -538,7 +538,10 @@ impl Formatter<'_, '_> {
                 if collapsed {
                     return Ok(());
                 }
-                if depth >= self.opts.max_depth {
+                // Show two levels of objects inline, as JS consoles do
+                // (deeper ones, often cycles, are for expanding).
+                const MAX_INLINE_DEPTH: usize = 2;
+                if depth >= self.opts.max_depth.min(MAX_INLINE_DEPTH) {
                     out.push_str(if array { "[...]" } else { "{...}" });
                     return Ok(());
                 }
