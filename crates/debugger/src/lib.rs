@@ -23,8 +23,8 @@ use tokio::{
     task::JoinHandle,
 };
 use wasmtime::{
-    AsContextMut, DebugEvent, DebugHandler, Engine, ExnRef, OwnedRooted, Result, Store,
-    StoreContextMut, Trap, WatchpointHit,
+    AsContextMut, DebugEvent, DebugHandler, Engine, ExnRef, Frozen, Result, Store, StoreContextMut,
+    Trap, WatchpointHit,
 };
 
 mod host;
@@ -178,7 +178,10 @@ impl<T: Send + 'static> DebugHandler for Handler<T> {
 
         let result = match event {
             DebugEvent::HostcallError(_) => DebugRunResult::HostcallError,
-            DebugEvent::Exception(exn) => DebugRunResult::Exception(exn),
+            DebugEvent::Exception(exn) => DebugRunResult::Exception(
+                exn.to_frozen(&store)
+                    .expect("the event's exception is rooted"),
+            ),
             DebugEvent::Trap(trap) => DebugRunResult::Trap(trap),
             DebugEvent::Breakpoint => DebugRunResult::Breakpoint,
             DebugEvent::Watchpoint(hit) => DebugRunResult::Watchpoint(hit),
@@ -512,8 +515,8 @@ pub enum DebugRunResult {
     /// Wasm execution was interrupted by an epoch change.
     EpochYield,
     /// An exception is thrown by Wasm. The current state is at the
-    /// throw-point.
-    Exception(OwnedRooted<ExnRef>),
+    /// throw-point. The exception can be read until execution resumes.
+    Exception(Frozen<ExnRef>),
     /// A Wasm trap occurred.
     Trap(Trap),
     /// A breakpoint was reached.
@@ -527,6 +530,54 @@ pub enum DebugRunResult {
 mod test {
     use super::*;
     use wasmtime::*;
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn exception_events_are_frozen() -> wasmtime::Result<()> {
+        let mut config = Config::new();
+        config.guest_debug(true).wasm_exceptions(true);
+        let engine = Engine::new(&config)?;
+        let module = Module::new(
+            &engine,
+            r#"
+                (module
+                  (tag $t (param i32 i64))
+                  (func (export "main")
+                    i32.const 7
+                    i64.const 8
+                    throw $t))
+            "#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new_async(&mut store, &module, &[]).await?;
+        let main = instance.get_func(&mut store, "main").unwrap();
+        let mut debuggee = Debuggee::new(store, move |store| {
+            Box::pin(async move {
+                assert!(main.call_async(&mut *store, &[], &mut []).await.is_err());
+                Ok(())
+            })
+        });
+
+        let DebugRunResult::Exception(exn) = debuggee.run().await? else {
+            panic!("expected an exception event");
+        };
+        debuggee
+            .with_store(move |store| {
+                let fields = exn.fields(&store).unwrap();
+                assert_eq!(fields[0].unwrap_i32(), 7);
+                assert_eq!(fields[1].unwrap_i64(), 8);
+                assert_eq!(exn.tag(&store).unwrap().ty(&store).ty().params().len(), 2);
+            })
+            .await?;
+        // The exception can only be read while execution is paused.
+        while !matches!(debuggee.run().await?, DebugRunResult::Finished) {}
+        assert!(
+            !debuggee
+                .with_store(move |store| exn.is_valid(&store))
+                .await?
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
