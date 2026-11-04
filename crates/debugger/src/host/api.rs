@@ -69,10 +69,16 @@ impl WasmValue {
             Val::ExnRef(Some(rooted)) => {
                 WasmValue::Exn(Some(rooted.to_owned_rooted(store).unwrap()))
             }
+            Val::Frozen(wasmtime::FrozenRef::Exn(e)) => {
+                WasmValue::Exn(Some(e.to_owned_rooted(store)?))
+            }
             Val::ExnRef(None) => WasmValue::Exn(None),
             Val::FuncRef(Some(f)) => WasmValue::Func(Some(f)),
             Val::FuncRef(None) => WasmValue::Func(None),
-            Val::ExternRef(_) | Val::AnyRef(_) | Val::ContRef(_) => {
+            Val::ExternRef(_)
+            | Val::AnyRef(_)
+            | Val::ContRef(_)
+            | Val::Frozen(wasmtime::FrozenRef::Extern(_) | wasmtime::FrozenRef::Any(_)) => {
                 return Err(wit::Error::UnsupportedType.into());
             }
             Val::I32(_) | Val::I64(_) | Val::F32(_) | Val::F64(_) | Val::V128(_) => {
