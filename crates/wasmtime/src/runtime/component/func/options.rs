@@ -137,7 +137,8 @@ impl<'a, T: 'static> LowerContext<'a, T> {
     }
 
     /// Returns the `len` bytes of memory at `offset`, panicking if they are
-    /// out of bounds.
+    /// out of bounds. Unlike `as_slice_mut`, only these bytes are recorded as
+    /// written by record/replay.
     pub(crate) fn slice_mut(&mut self, offset: usize, len: usize) -> &mut [u8] {
         self.instance
             .options_memory_range_mut(self.store.0, self.options, offset, len)

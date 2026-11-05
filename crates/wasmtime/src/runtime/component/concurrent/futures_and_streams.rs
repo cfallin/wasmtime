@@ -3507,7 +3507,11 @@ impl Instance {
                             .options_memory(store_opaque, write_options)
                             .as_ptr()
                     {
-                        let memory = read_instance.options_memory_mut(store_opaque, read_options);
+                        let memory = read_instance.options_memory_mut_for(
+                            store_opaque,
+                            read_options,
+                            read_address..read_address + read_length_in_bytes,
+                        );
                         memory.copy_within(
                             write_address..write_address + write_length_in_bytes,
                             read_address,

@@ -30,6 +30,8 @@ struct TrampolineCompiler<'a> {
     signature: &'a WasmFuncType,
     builtins: BuiltinFunctions,
     alias_regions: AliasRegions<VMComponentOffsets<u8>>,
+    /// The ID of the call being recorded, in record/replay engines.
+    rr_call: Option<ir::Value>,
 }
 
 /// What host functions can be called, used in `translate_hostcall` below.
@@ -127,6 +129,7 @@ impl<'a> TrampolineCompiler<'a> {
             signature,
             builtins: BuiltinFunctions::new(compiler),
             alias_regions: AliasRegions::new(offsets),
+            rr_call: None,
         }
     }
 
@@ -1373,7 +1376,62 @@ impl<'a> TrampolineCompiler<'a> {
 
     /// Emit code to return the given result values, regardless of the ABI in use.
     fn abi_store_results(&mut self, results: &[ir::Value]) {
+        if let Some(call) = self.rr_call {
+            let ty = WasmFuncType::new(self.signature.results().iter().copied(), []).panic_on_oom();
+            let (values, _) = self.compiler.allocate_stack_array_and_spill_args(
+                &mut self.alias_regions,
+                &ty,
+                &mut self.builder,
+                results,
+            );
+            let caller_vmctx = self.caller_vmctx();
+            let succeeded = self.builder.ins().iconst(ir::types::I8, 1);
+            let recorded = self.compiler.rr_leave(
+                &mut self.builder,
+                &mut self.alias_regions,
+                caller_vmctx,
+                call,
+                values,
+                true,
+                succeeded,
+            );
+            self.compiler.raise_if_host_trapped(
+                &mut self.builder,
+                &mut self.alias_regions,
+                caller_vmctx,
+                recorded,
+            );
+        }
         self.builder.ins().return_(results);
+    }
+
+    /// Records the start of this trampoline's call by core Wasm, while the
+    /// store records. `func_ref_offset` is the offset of this trampoline's
+    /// `VMFuncRef` in the `VMComponentContext`.
+    ///
+    /// Every exit of the trampoline then records the call's outcome: returns
+    /// in `abi_store_results`, and errors and traps just before they are
+    /// raised.
+    fn rr_enter(&mut self, func_ref_offset: u32) {
+        let params = self.abi_load_params();
+        let (vmctx, caller_vmctx) = (params[0], params[1]);
+        let (values, _) = self.store_wasm_arguments(&params[2..]);
+        let vm_store_context = self.load_vm_store_context();
+        let func = self
+            .builder
+            .ins()
+            .iadd_imm_s(vmctx, i64::from(func_ref_offset));
+        let (call, recorded) = self.compiler.rr_enter(
+            &mut self.builder,
+            &mut self.alias_regions,
+            caller_vmctx,
+            vm_store_context,
+            func,
+            values,
+            true,
+        );
+        self.raise_if_host_trapped(recorded);
+        self.rr_call = Some(call);
     }
 
     fn caller_vmctx(&self) -> ir::Value {
@@ -1382,12 +1440,42 @@ impl<'a> TrampolineCompiler<'a> {
 
     fn raise_if_host_trapped(&mut self, succeeded: ir::Value) {
         let caller_vmctx = self.caller_vmctx();
+        let Some(call) = self.rr_call else {
+            self.compiler.raise_if_host_trapped(
+                &mut self.builder,
+                &mut self.alias_regions,
+                caller_vmctx,
+                succeeded,
+            );
+            return;
+        };
+
+        // Record the failure before raising it.
+        let trapped_block = self.builder.create_block();
+        self.builder.set_cold_block(trapped_block);
+        let continuation_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(succeeded, continuation_block, &[], trapped_block, &[]);
+        self.builder.seal_block(trapped_block);
+        self.builder.switch_to_block(trapped_block);
+        rr_leave_failed(
+            self.compiler,
+            &mut self.builder,
+            &mut self.alias_regions,
+            caller_vmctx,
+            Some(call),
+        );
+        let failed = self.builder.ins().iconst(ir::types::I8, 0);
         self.compiler.raise_if_host_trapped(
             &mut self.builder,
             &mut self.alias_regions,
             caller_vmctx,
-            succeeded,
+            failed,
         );
+        self.builder.ins().jump(continuation_block, &[]);
+        self.builder.seal_block(continuation_block);
+        self.builder.switch_to_block(continuation_block);
     }
 
     fn raise_if_transcode_trapped(&mut self, amount_copied: ir::Value) {
@@ -1516,6 +1604,7 @@ impl<'a> TrampolineCompiler<'a> {
                 vmctx: self.caller_vmctx(),
                 builtins: &mut self.builtins,
                 alias_regions: &mut self.alias_regions,
+                rr_call: self.rr_call,
             },
             &mut self.builder,
         )
@@ -1547,11 +1636,27 @@ struct TrapTranslator<'a, O: GetPtrSize> {
     vmctx: ir::Value,
     alias_regions: &'a mut AliasRegions<O>,
     builtins: &'a mut BuiltinFunctions,
+    rr_call: Option<ir::Value>,
 }
 
 impl<O: GetPtrSize> TranslateTrap<O> for TrapTranslator<'_, O> {
     fn compiler(&self) -> &Compiler {
         self.compiler
+    }
+
+    // A recorded call records its traps before raising them.
+    fn intercepts_traps(&self) -> bool {
+        self.rr_call.is_some()
+    }
+
+    fn before_raise(&mut self, builder: &mut FunctionBuilder<'_>) {
+        rr_leave_failed(
+            self.compiler,
+            builder,
+            self.alias_regions,
+            self.vmctx,
+            self.rr_call,
+        );
     }
 
     fn vmctx_val(&mut self, _: &mut FuncCursor<'_>) -> ir::Value {
@@ -1568,6 +1673,30 @@ impl<O: GetPtrSize> TranslateTrap<O> for TrapTranslator<'_, O> {
         index: BuiltinFunctionIndex,
     ) -> ir::FuncRef {
         self.builtins.load_builtin(builder.func, index)
+    }
+}
+
+/// Records the failure of the call being recorded, if any, with the error
+/// that is about to be raised.
+fn rr_leave_failed<O: GetPtrSize>(
+    compiler: &Compiler,
+    builder: &mut FunctionBuilder<'_>,
+    alias_regions: &mut AliasRegions<O>,
+    caller_vmctx: ir::Value,
+    rr_call: Option<ir::Value>,
+) {
+    if let Some(call) = rr_call {
+        let values = builder.ins().iconst(compiler.isa.pointer_type(), 0);
+        let succeeded = builder.ins().iconst(ir::types::I8, 0);
+        compiler.rr_leave(
+            builder,
+            alias_regions,
+            caller_vmctx,
+            call,
+            values,
+            true,
+            succeeded,
+        );
     }
 }
 
@@ -1689,6 +1818,14 @@ impl ComponentCompiler for Compiler {
             vm_store_context,
         );
 
+        if self.tunables.recording {
+            let offset = c
+                .alias_regions
+                .offsets()
+                .trampoline_func_refs()
+                .at(trampoline_index);
+            c.rr_enter(offset);
+        }
         c.translate(&component.trampolines[trampoline_index]);
         c.builder.finalize(c.isa.frontend_config());
         crate::alias_region::debug_assert_all_mem_insts_have_alias_regions(
@@ -1762,6 +1899,14 @@ impl ComponentCompiler for Compiler {
         // it over this standalone trampoline's body: we load the trampoline's
         // parameters, hand them to the intrinsic compiler, and return whatever
         // value (if any) it produces.
+        if self.tunables.recording {
+            let offset = c
+                .alias_regions
+                .offsets()
+                .intrinsic_func_refs()
+                .at(intrinsic);
+            c.rr_enter(offset);
+        }
         let params = c.abi_load_params();
         let isa = c.isa;
         let (mut traps, builder) = c.traps();
@@ -1950,7 +2095,7 @@ impl TrampolineCompiler<'_> {
             }
         };
 
-        self.builder.ins().return_(&raw_results);
+        self.abi_store_results(&raw_results);
     }
 
     // Helper function to cast an input parameter to the host pointer type.
