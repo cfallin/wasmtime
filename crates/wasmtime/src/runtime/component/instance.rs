@@ -508,10 +508,25 @@ impl Instance {
         store: &'a mut StoreOpaque,
         options: OptionsIndex,
     ) -> &'a mut [u8] {
+        self.options_memory_mut_for(store, options, 0..usize::MAX)
+    }
+
+    /// Like `options_memory_mut`, but the caller writes only the `written`
+    /// range, so record/replay records only those bytes.
+    pub(crate) fn options_memory_mut_for<'a>(
+        &self,
+        store: &'a mut StoreOpaque,
+        options: OptionsIndex,
+        written: core::ops::Range<usize>,
+    ) -> &'a mut [u8] {
         let memory = match self.options_memory_raw(store, options) {
             Some(m) => m,
             None => return &mut [],
         };
+        #[cfg(feature = "rr")]
+        store.rr_track_memory_definition(memory, written);
+        #[cfg(not(feature = "rr"))]
+        let _ = written;
         // SAFETY: See `options_memory` comment above, and note that this is
         // taking `&mut StoreOpaque` to thread the lifetime through instead.
         unsafe {
@@ -529,7 +544,8 @@ impl Instance {
         len: usize,
     ) -> Option<&'a mut [u8]> {
         let end = offset.checked_add(len)?;
-        self.options_memory_mut(store, options).get_mut(offset..end)
+        self.options_memory_mut_for(store, options, offset..end)
+            .get_mut(offset..end)
     }
 
     /// Helper function to simultaneously get a borrow to this instance's
@@ -713,8 +729,6 @@ impl<'a> Instantiator<'a> {
         imports: &'a Arc<PrimaryMap<RuntimeImportIndex, RuntimeImport>>,
     ) -> Result<Instantiator<'a>> {
         let env_component = component.env_component();
-        #[cfg(feature = "rr")]
-        store.rr.reject("components")?;
         let (modules, engine, breakpoints) = store.modules_and_engine_and_breakpoints_mut();
         modules.register_component(component, engine, breakpoints)?;
         let imported_resources: ImportedResources =
@@ -737,7 +751,7 @@ impl<'a> Instantiator<'a> {
         })
     }
 
-    async fn run<T>(
+    async fn run<T: 'static>(
         &mut self,
         store: &mut StoreContextMut<'_, T>,
         asyncness: Asyncness,
@@ -927,13 +941,18 @@ impl<'a> Instantiator<'a> {
                     self.extract_post_return(store.0, post_return)
                 }
 
-                GlobalInitializer::Resource(r) => self.resource(store.0, r)?,
+                GlobalInitializer::Resource(r) => self.resource(store, r)?,
             }
         }
         Ok(())
     }
 
-    fn resource(&mut self, store: &mut StoreOpaque, resource: &Resource) -> Result<()> {
+    fn resource<T: 'static>(
+        &mut self,
+        context: &mut StoreContextMut<'_, T>,
+        resource: &Resource,
+    ) -> Result<()> {
+        let store = &mut *context.0;
         let dtor = resource
             .dtor
             .as_ref()
@@ -942,6 +961,19 @@ impl<'a> Instantiator<'a> {
             crate::runtime::vm::Export::Function(f) => f.vm_func_ref(store),
             _ => unreachable!(),
         });
+        #[cfg(feature = "rr")]
+        let dtor = if context.0.rr.recording() {
+            match dtor {
+                Some(dtor) => {
+                    let wrapper = crate::rr::component::wrap_destructor(context, dtor)?;
+                    Some(context.0.func_refs_and_modules().0.rr_copy(wrapper)?)
+                }
+                None => None,
+            }
+        } else {
+            dtor
+        };
+        let store = &mut *context.0;
         let index = self
             .component
             .env_component()

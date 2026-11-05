@@ -383,6 +383,15 @@ impl Global {
     }
 
     #[cfg(feature = "rr")]
+    pub(crate) fn rr_is_component_flag(&self) -> bool {
+        #[cfg(feature = "component-model")]
+        if matches!(self.kind, VMGlobalKind::ComponentFlags(_)) {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "rr")]
     pub(crate) fn rr_key(&self, store: &StoreOpaque) -> usize {
         self.definition(store).as_ptr() as usize
     }

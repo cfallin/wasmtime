@@ -236,7 +236,7 @@ impl<T: 'static> Driver<'_, T> {
         let (tag, mut body) = self.reader.record()?;
         if self.pending_startup.is_some() {
             ensure!(
-                matches!(tag, codec::ENTER_WASM | codec::WRITE),
+                matches!(tag, codec::ENTER_WASM | codec::GLOBAL_WRITE | codec::WRITE),
                 "instance startup missing from trace"
             );
         }
@@ -256,6 +256,7 @@ impl<T: 'static> Driver<'_, T> {
             | codec::MODULE
             | codec::INSTANCE
             | codec::GLOBAL
+            | codec::GLOBAL_WRITE
             | codec::MEMORY
             | codec::TABLE => {
                 self.require_idle(

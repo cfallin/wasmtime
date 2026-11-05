@@ -113,6 +113,16 @@ impl FuncRefs {
         Ok(unpatched.as_non_null())
     }
 
+    /// Root a copy of a complete function reference without changing its ABI.
+    #[cfg(all(feature = "rr", feature = "component-model"))]
+    pub(crate) fn rr_copy(&mut self, func: VMFuncRef) -> Result<NonNull<VMFuncRef>, OutOfMemory> {
+        self.bump
+            .get_mut()
+            .try_alloc(func)
+            .map(NonNull::from)
+            .map_err(|_| OutOfMemory::new(size_of::<VMFuncRef>()))
+    }
+
     /// Patch any `VMFuncRef::wasm_call`s that need filling in.
     pub fn fill(&mut self, modules: &ModuleRegistry) {
         self.with_holes

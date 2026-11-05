@@ -1,4 +1,5 @@
-//! Core object construction. Host imports become typed replay stubs.
+//! Core object construction. Components are flattened into the core modules
+//! they instantiate; host and component imports become typed replay stubs.
 //! Traces identify modules by the checksums of their bytecode, which replay
 //! compiles from the bytecode the embedder provides, never native code.
 
@@ -74,6 +75,9 @@ impl Session {
             .globals_by_key
             .insert(global.rr_key(store), id)?;
         self.objects.globals.push(global);
+        if global.rr_is_component_flag() {
+            self.objects.flags.push(id);
+        }
         Ok(id)
     }
 
@@ -249,6 +253,30 @@ impl StoreOpaque {
             session.objects.register_instance(store, instance)?;
             Ok(())
         })
+    }
+
+    /// Component instance flags are ordinary imported i32 globals. Host-side
+    /// canonical-call bookkeeping can update them between any two crossings.
+    /// Recording their values at those crossings also covers generated adapter
+    /// code without adding a component-specific event to the protocol.
+    pub(super) fn rr_flush_flags(&mut self) -> Result<()> {
+        let session = self.rr.session.as_ref().unwrap();
+        let count = session.objects.flags.len();
+        for i in 0..count {
+            let objects = &self.rr.session.as_ref().unwrap().objects;
+            let id = objects.flags[i];
+            let global = objects.globals[id];
+            let value = global._get(self).unwrap_i32();
+            let mut body = [0; 8];
+            body[..4].copy_from_slice(&u32::try_from(id)?.to_le_bytes());
+            body[4..].copy_from_slice(&value.to_le_bytes());
+            self.rr
+                .session
+                .as_mut()
+                .unwrap()
+                .append(codec::GLOBAL_WRITE, &body)?;
+        }
+        Ok(())
     }
 }
 
@@ -516,6 +544,21 @@ pub(super) fn replay_event<T: 'static>(
                 };
                 crate::Table::new(StoreContextMut(&mut *store), ty, init)?;
             }
+        }
+        codec::GLOBAL_WRITE => {
+            let id = usize::try_from(body.u32()?)?;
+            let value = body.u32()? as i32;
+            body.end()?;
+            let global = *store
+                .rr
+                .session
+                .as_ref()
+                .unwrap()
+                .objects
+                .globals
+                .get(id)
+                .ok_or_else(|| format_err!("invalid global write"))?;
+            global._set(store, crate::Val::I32(value))?;
         }
         _ => unreachable!(),
     }

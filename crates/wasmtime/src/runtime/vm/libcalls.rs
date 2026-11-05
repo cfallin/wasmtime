@@ -1353,7 +1353,7 @@ fn watched_write(
 /// record/replay engines while their store records.
 fn rr_enter(
     store: &mut dyn VMStore,
-    _instance: InstanceId,
+    instance: InstanceId,
     func: *mut u8,
     values: *mut u8,
     host: u8,
@@ -1363,11 +1363,11 @@ fn rr_enter(
         let func = core::ptr::NonNull::new(func.cast()).unwrap();
         // SAFETY: trampolines pass the callee's live function reference and
         // its initialized arguments.
-        unsafe { store.rr_enter(func, values.cast(), host != 0) }
+        unsafe { store.rr_enter(instance, func, values.cast(), host != 0) }
     }
     #[cfg(not(feature = "rr"))]
     {
-        let _ = (store, func, values, host);
+        let _ = (store, instance, func, values, host);
         bail_bug!("recording without record/replay support")
     }
 }
