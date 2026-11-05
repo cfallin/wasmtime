@@ -25,6 +25,7 @@ pub(super) struct Objects {
     pub globals_by_key: TryHashMap<usize, usize>,
     pub tables: Vec<crate::Table>,
     pub tables_by_key: TryHashMap<(u32, u32), usize>,
+    pub flags: Vec<usize>,
     pub modules: Vec<crate::Module>,
 }
 
@@ -58,6 +59,10 @@ impl Objects {
         let host = match magic {
             wasmtime_environ::VMCONTEXT_MAGIC => false,
             wasmtime_environ::VM_ARRAY_CALL_HOST_FUNC_MAGIC => true,
+            // Component trampolines and intrinsics are host functions to the
+            // core Wasm that imports them.
+            #[cfg(feature = "component-model")]
+            wasmtime_environ::component::VMCOMPONENT_MAGIC => true,
             _ => bail!("unsupported function context in record/replay"),
         };
         let ty = func.load_ty(store);

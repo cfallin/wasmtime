@@ -5,6 +5,8 @@
 #[cfg(feature = "component-model")]
 mod component;
 mod core;
+#[cfg(feature = "rr")]
+mod rr;
 mod spectest;
 mod wast;
 

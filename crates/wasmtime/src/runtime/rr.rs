@@ -4,8 +4,9 @@
 //! identities automatically; all construction is part of the trace.
 //! Traces identify core modules only by the [`Checksum`]s of their bytecode,
 //! so that they stay small: replay compiles each module from bytecode that
-//! the embedder provides, and reconstructs core instances. It executes guest
-//! code on independent fibers and never invokes the original host functions.
+//! the embedder provides, and reconstructs core instances, including those
+//! inside components. It executes guest code on independent fibers and never
+//! invokes the original host functions or component builtins.
 //!
 //! Core function boundaries support numbers, vectors, and nullable abstract
 //! function references. Modules that use GC or exceptions are unsupported.
@@ -36,8 +37,11 @@ use codec::{Kind, Reader};
 pub type Checksum = [u8; 32];
 
 /// Returns the core modules that `engine` compiles from `wasm`, with their
-/// checksums. `wasm` is a core module, in the binary or (with the `wat`
-/// feature) text format, which is returned as is.
+/// checksums. `wasm` is a core module or a component, in the binary or (with
+/// the `wat` feature) text format. A core module is returned as is. A
+/// component's modules are those nested in it, at any depth, and the adapter
+/// modules that Wasmtime generates for it, which depend on the engine's
+/// configuration.
 ///
 /// A trace refers to the modules it instantiates by these checksums, so this
 /// can be used to find or package the bytecode that replaying it requires.
@@ -50,8 +54,34 @@ pub fn core_modules(engine: &crate::Engine, wasm: &[u8]) -> Result<Vec<(Checksum
     if !wasmparser::Parser::is_component(wasm) {
         return Ok(vec![(checksum(wasm), wasm.to_vec())]);
     }
-    let _ = engine;
-    bail!("record/replay does not support components")
+    #[cfg(all(
+        feature = "component-model",
+        any(feature = "cranelift", feature = "winch")
+    ))]
+    {
+        use wasmtime_environ::ScopeVec;
+        use wasmtime_environ::component::{ComponentTypesBuilder, Translator};
+        // Translate the component as compilation would, which generates its
+        // adapter modules, without compiling it.
+        let scope = ScopeVec::new();
+        let mut validator = wasmparser::Validator::new_with_features(engine.features());
+        let mut types = ComponentTypesBuilder::new(&validator);
+        let (_, translations) =
+            Translator::new(engine.tunables(), &mut validator, &mut types, &scope)
+                .translate(wasm)?;
+        Ok(translations
+            .values()
+            .map(|t| (checksum(t.wasm), t.wasm.to_vec()))
+            .collect())
+    }
+    #[cfg(not(all(
+        feature = "component-model",
+        any(feature = "cranelift", feature = "winch")
+    )))]
+    {
+        let _ = engine;
+        bail!("finding the core modules of a component requires component-model and a compiler")
+    }
 }
 
 /// Formats a checksum as hexadecimal, as in file names and messages.
@@ -60,6 +90,9 @@ pub fn checksum_hex(checksum: &Checksum) -> String {
 }
 
 /// Core instances constructed while replaying initialization.
+///
+/// Components replay as their constituent core instances. Their exports can
+/// be inspected here without rebuilding component host state.
 #[derive(Debug)]
 pub struct Replay {
     instances: Vec<crate::Instance>,
@@ -131,6 +164,8 @@ impl Trace {
     }
 }
 
+#[cfg(feature = "component-model")]
+pub(crate) mod component;
 mod init;
 mod objects;
 use objects::{Objects, RecordedFunc};
@@ -154,6 +189,7 @@ pub(crate) struct State {
     // Set once a replay ends: replayed host functions only run under the
     // replay driver, so the store's functions may no longer be called.
     replayed: bool,
+    passthrough: TryHashSet<(usize, usize)>,
 }
 
 struct Session {
@@ -242,7 +278,7 @@ impl<T: 'static> Store<T> {
     /// The engine must use [`crate::RRConfig::Recording`]. See [`crate::rr`]
     /// for the restrictions on the recorded execution. Store data `T` may be
     /// initialized, but no functions, memories, globals, tables, GC objects, or
-    /// core instances may have been created in this store.
+    /// core/component instances may have been created in this store.
     pub fn start_recording(&mut self) -> Result<()> {
         let store = self.as_context_mut().0;
         store.rr_validate()?;
@@ -279,7 +315,8 @@ impl<T: 'static> Store<T> {
     /// recording is discarded and recording is disabled on the store.
     ///
     /// A recording may end while guest calls are unfinished, for example
-    /// after a host panic; replay then ends with them suspended.
+    /// with component-model tasks suspended in host calls or after a host
+    /// panic; replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
@@ -300,8 +337,9 @@ impl<T: 'static> Store<T> {
     /// Replays a trace on independent fibers, without calling the original
     /// host functions. The store must be empty, as for [`Store::start_recording`].
     /// Initialization comes entirely from the trace, and modules from `wasm`,
-    /// the bytecode of the modules the trace instantiates, as core modules
-    /// in the binary or (with the `wat` feature) text format (see
+    /// the bytecode of the modules or components the trace instantiates, in
+    /// the binary or (with the `wat` feature) text format. A component
+    /// provides every core module nested in it, and its adapter modules (see
     /// [`core_modules`]). Modules that the trace does not instantiate are
     /// ignored. The engine must use [`crate::RRConfig::Replaying`].
     ///
@@ -347,6 +385,55 @@ impl StoreOpaque {
         id
     }
 
+    #[cfg(feature = "component-model")]
+    /// Tracks a host write to `written` (clamped to the memory's size) of a
+    /// component's memory.
+    pub(crate) fn rr_track_memory_definition(
+        &mut self,
+        definition: NonNull<crate::vm::VMMemoryDefinition>,
+        written: Range<usize>,
+    ) {
+        if !self.rr.active() {
+            return;
+        }
+        let objects = &self.rr_session().objects;
+        let memory = objects
+            .memories_by_key
+            .get(&(definition.as_ptr() as usize))
+            .map(|id| objects.memories[*id]);
+        match memory {
+            Some(memory) => {
+                let len = memory.internal_data_size(self);
+                self.rr_track_memory(memory, written.start.min(len)..written.end.min(len));
+            }
+            None => self
+                .rr_session()
+                .fail(format_err!("unregistered component memory")),
+        }
+    }
+
+    #[cfg(feature = "component-model")]
+    pub(crate) fn rr_track_raw_memory(&mut self, ptr: *mut u8, len: usize) {
+        if !self.rr.active() || len == 0 {
+            return;
+        }
+        let address = ptr as usize;
+        let memory = self
+            .all_memories()
+            .filter_map(|m| m.unshared())
+            .find_map(|m| {
+                let data = m.rr_data(self);
+                let offset = address.checked_sub(data.as_ptr() as usize)?;
+                (offset.checked_add(len)? <= data.len()).then_some((m, offset))
+            });
+        match memory {
+            Some((memory, offset)) => self.rr_track_memory(memory, offset..offset + len),
+            None => self
+                .rr_session()
+                .fail(format_err!("component write outside registered memories")),
+        }
+    }
+
     pub(crate) fn rr_memory_grown(&mut self, memory: Memory, old_size: usize) -> Result<()> {
         if !self.rr.recording() {
             return Ok(());
@@ -378,15 +465,22 @@ impl StoreOpaque {
     /// Commit host writes while the store is exclusively borrowed and before
     /// any guest execution. Pending ranges also cover forgotten guards.
     pub(crate) fn rr_flush(&mut self) -> Result<()> {
+        self.rr_flush_boundary(true)
+    }
+
+    fn rr_flush_boundary(&mut self, flags: bool) -> Result<()> {
         self.rr_check()?;
         if !self.rr.recording() {
             return Ok(());
         }
-        let result = self.rr_flush_writes();
+        let result = self.rr_flush_writes(flags);
         self.rr_poison_on_err(result)
     }
 
-    fn rr_flush_writes(&mut self) -> Result<()> {
+    fn rr_flush_writes(&mut self, flags: bool) -> Result<()> {
+        if flags {
+            self.rr_flush_flags()?;
+        }
         // Detach the pending ranges and the trace while reading memories; this
         // never runs guest or embedder code.
         let session = self.rr_session();
@@ -506,18 +600,21 @@ impl StoreOpaque {
     }
 
     /// The `rr_enter` builtin, which the trampolines of record/replay engines
-    /// call while the store records: at Wasm-to-host calls if `host`, and
-    /// otherwise at host-to-Wasm calls. Returns the call's ID, or
+    /// call while the store records: at calls by `caller` to the host if
+    /// `host`, and otherwise at host-to-Wasm calls. Returns the call's ID, or
     /// [`NOT_RECORDED`].
     ///
     /// The raw slots must contain initialized values of the callee's signature.
     pub(crate) unsafe fn rr_enter(
         &mut self,
+        caller: crate::store::InstanceId,
         func: NonNull<VMFuncRef>,
         raw: *const ValRaw,
         host: bool,
     ) -> Result<u32> {
-        if !self.rr.recording() {
+        // The host calls component functions with the store's dummy instance
+        // as their caller. Such calls are not guest boundaries.
+        if !self.rr.recording() || (host && !self.rr_guest_caller(caller)) {
             return Ok(NOT_RECORDED);
         }
         // SAFETY: inherited from this function's contract.
@@ -531,7 +628,12 @@ impl StoreOpaque {
         raw: *const ValRaw,
         host: bool,
     ) -> Result<u32> {
-        self.rr_flush()?;
+        self.rr_flush_boundary(!host)?;
+        // Resource destructors are wrapped as host functions only to record
+        // their calls as host-to-Wasm calls.
+        if host && self.rr.passthrough.contains(&func_key(func)) {
+            return Ok(NOT_RECORDED);
+        }
         let id = self.rr_session().objects.find_func(func)?;
         // SAFETY: inherited from this function's typed-slot contract.
         unsafe {
@@ -615,7 +717,7 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return Ok(());
         }
-        self.rr_flush()?;
+        self.rr_flush_boundary(host)?;
         let Mode::Recording { outstanding, .. } = &self.rr_session().mode else {
             unreachable!()
         };

@@ -1337,7 +1337,7 @@ fn watched_write(
 /// record/replay engines while their store records.
 fn rr_enter(
     store: &mut dyn VMStore,
-    _instance: InstanceId,
+    instance: InstanceId,
     func: *mut u8,
     values: *mut u8,
     host: u8,
@@ -1350,12 +1350,12 @@ fn rr_enter(
         unsafe {
             store
                 .store_opaque_mut()
-                .rr_enter(func, values.cast(), host != 0)
+                .rr_enter(instance, func, values.cast(), host != 0)
         }
     }
     #[cfg(not(feature = "rr"))]
     {
-        let _ = (store, func, values, host);
+        let _ = (store, instance, func, values, host);
         bail_bug!("recording without record/replay support")
     }
 }

@@ -53,6 +53,7 @@ where
                 let vmctx = self.vmctx_val(&mut builder.cursor());
                 let trap_code = builder.ins().iconst(I8, i64::from(trap.as_u8()));
                 builder.ins().call(trap_libcall, &[vmctx, trap_code]);
+                self.before_raise(builder);
                 let raise_libcall = self.builtin_funcref(builder, BuiltinFunctionIndex::raise());
                 let inst = builder.ins().call(raise_libcall, &[vmctx]);
                 builder.func.debug_tags.set(inst, debug_tags);
@@ -138,8 +139,19 @@ where
     /// debugger hooks.
     fn clif_instruction_traps_enabled(&self) -> bool {
         let tunables = self.compiler().tunables();
-        tunables.signals_based_traps || (self.is_pulley() && !tunables.debug_guest)
+        !self.intercepts_traps()
+            && (tunables.signals_based_traps || (self.is_pulley() && !tunables.debug_guest))
     }
+
+    /// Whether traps must be raised through the `trap` builtin, calling
+    /// `before_raise` just before raising them.
+    fn intercepts_traps(&self) -> bool {
+        false
+    }
+
+    /// Called when raising a trap through the `trap` builtin, after it records
+    /// the trap and before it is raised.
+    fn before_raise(&mut self, _builder: &mut FunctionBuilder) {}
 
     /// Returns whether translation is happening for Pulley bytecode.
     fn is_pulley(&self) -> bool {
