@@ -570,6 +570,7 @@ rr = [
   "component-model",
   "wasmtime-cli-flags?/rr",
   "wasmtime-wasi?/rr",
+  "wasmtime-debugger?/rr",
   "wasmtime-wast?/rr",
   "run",
 ]

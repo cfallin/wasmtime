@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wasmtime::{
     Engine, ExnRef, FrameHandle, Func, Global, Instance, Module, OwnedRooted, Result, Table, Tag,
-    Val, component::Resource, component::ResourceTable,
+    Unrooted, Val, component::Resource, component::ResourceTable,
 };
 use wasmtime_wasi::p2::{DynPollable, Pollable, subscribe};
 
@@ -64,30 +64,45 @@ impl Debuggee {
 }
 
 impl WasmValue {
-    pub(crate) fn new(store: impl wasmtime::AsContextMut, val: Val) -> Result<WasmValue> {
+    /// A value read from the paused debuggee.
+    pub(crate) fn new(store: impl wasmtime::AsContext, val: Val) -> Result<WasmValue> {
         Ok(match val {
-            Val::ExnRef(Some(rooted)) => {
-                WasmValue::Exn(Some(rooted.to_owned_rooted(store).unwrap()))
-            }
             Val::ExnRef(None) => WasmValue::Exn(None),
-            Val::FuncRef(Some(f)) => WasmValue::Func(Some(f)),
-            Val::FuncRef(None) => WasmValue::Func(None),
-            Val::ExternRef(_) | Val::AnyRef(_) | Val::ContRef(_) => {
-                return Err(wit::Error::UnsupportedType.into());
+            Val::ExnRef(Some(e)) => {
+                WasmValue::Exn(Some(WasmException::Unrooted(e.to_unrooted(store)?)))
             }
+            Val::FuncRef(f) => WasmValue::Func(f),
             Val::I32(_) | Val::I64(_) | Val::F32(_) | Val::F64(_) | Val::V128(_) => {
                 WasmValue::Primitive(val)
+            }
+            Val::ExternRef(_) | Val::AnyRef(_) | Val::ContRef(_) => {
+                return Err(wit::Error::UnsupportedType.into());
             }
         })
     }
 
-    pub(crate) fn into_val(self, store: impl wasmtime::AsContextMut) -> Val {
-        match self {
+    /// This value as a `Val`, with any GC reference unrooted.
+    ///
+    /// Root the result (for several values, all at once, with
+    /// `Val::ensure_all_rooted`) before passing it to an API that mutates the
+    /// store.
+    pub(crate) fn into_val(self, store: impl wasmtime::AsContext) -> Result<Val> {
+        Ok(match self {
             WasmValue::Primitive(v) => v,
-            WasmValue::Exn(Some(owned)) => Val::from(owned.to_rooted(store)),
+            WasmValue::Exn(Some(e)) => Val::from(e.to_unrooted(store)?),
             WasmValue::Exn(None) => Val::ExnRef(None),
-            WasmValue::Func(Some(f)) => Val::FuncRef(Some(f)),
-            WasmValue::Func(None) => Val::FuncRef(None),
+            WasmValue::Func(f) => Val::FuncRef(f),
+        })
+    }
+}
+
+impl WasmException {
+    /// An unrooted reference to this exception, for reading it.
+    pub(crate) fn to_unrooted(&self, store: impl wasmtime::AsContext) -> Result<Unrooted<ExnRef>> {
+        match self {
+            WasmException::Unrooted(e) if e.is_valid(&store) => Ok(*e),
+            WasmException::Unrooted(_) => Err(wit::Error::InvalidEntity.into()),
+            WasmException::Owned(e) => e.to_unrooted(store),
         }
     }
 }
@@ -179,18 +194,24 @@ pub struct Frame(FrameHandle);
 
 /// Representation of a Wasm exception object.
 #[derive(Clone)]
-pub struct WasmException(OwnedRooted<ExnRef>);
+pub enum WasmException {
+    /// An exception read from the debuggee, which can be used until it
+    /// resumes.
+    Unrooted(Unrooted<ExnRef>),
+    /// An exception the debugger created, which it keeps alive.
+    Owned(OwnedRooted<ExnRef>),
+}
 
 /// Representation of a Wasm value.
 ///
-/// This is distinct from `wasmtime::Val` because we need the Owned
-/// variants of GC references here.
+/// This is distinct from `wasmtime::Val` because GC references here must
+/// outlive the store borrow they were read with.
 #[derive(Clone)]
 pub enum WasmValue {
     /// A primitive (non-GC) value.
     Primitive(Val),
     /// An exception object.
-    Exn(Option<OwnedRooted<ExnRef>>),
+    Exn(Option<WasmException>),
     /// A funcref.
     Func(Option<Func>),
     // TODO: GC structs and arrays.
@@ -296,7 +317,7 @@ fn result_to_event(table: &mut ResourceTable, value: DebugRunResult) -> Result<w
         }
         DebugRunResult::EpochYield => wit::Event::Interrupted,
         DebugRunResult::Exception(e) => {
-            let e = table.push(WasmException(e))?;
+            let e = table.push(WasmException::Unrooted(e))?;
             wit::Event::Exception(e)
         }
     })
@@ -820,7 +841,7 @@ impl wit::HostWasmException for ResourceTable {
     ) -> Result<Resource<Tag>> {
         let exn = self.get(&self_)?.clone();
         let d = debugger(self, &d)?;
-        let tag = d.exnref_get_tag(exn.0).await?;
+        let tag = d.exnref_get_tag(exn).await?;
         Ok(self.push(tag)?)
     }
 
@@ -831,7 +852,7 @@ impl wit::HostWasmException for ResourceTable {
     ) -> Result<Vec<Resource<WasmValue>>> {
         let exn = self.get(&self_)?.clone();
         let d = debugger(self, &d)?;
-        let values = d.exnref_get_fields(exn.0).await?;
+        let values = d.exnref_get_fields(exn).await?;
         let mut resources = vec![];
         for v in values {
             resources.push(self.push(v)?);
@@ -861,7 +882,7 @@ impl wit::HostWasmException for ResourceTable {
         }
         let d = debugger(self, &d)?;
         let owned = d.exnref_new(tag_val, wasm_values).await?;
-        Ok(self.push(WasmException(owned))?)
+        Ok(self.push(WasmException::Owned(owned))?)
     }
 
     async fn drop(&mut self, rep: Resource<WasmException>) -> Result<()> {
@@ -1063,7 +1084,7 @@ impl wit::HostWasmValue for ResourceTable {
         match value {
             WasmValue::Exn(Some(e)) => {
                 let e = e.clone();
-                Ok(Some(self.push(WasmException(e))?))
+                Ok(Some(self.push(e)?))
             }
             WasmValue::Exn(None) => Ok(None),
             _ => wasmtime::bail!("Wasm value is not an exnref."),

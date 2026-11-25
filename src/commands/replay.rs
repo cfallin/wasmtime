@@ -1,5 +1,6 @@
 //! The module that implements the `wasmtime replay` command.
 
+use crate::commands::RunCommand;
 use crate::common::RunCommon;
 use crate::rr::{RecordedExit, load_replay, replay_exit};
 use clap::Parser;
@@ -14,7 +15,8 @@ use wasmtime::{Engine, Result, RrConfig};
 /// Replay reproduces the recorded execution deterministically, without
 /// running any host code: everything the guest received from the outside
 /// world comes from the trace, and the guest's recorded output is printed
-/// again.
+/// again. A replay can be debugged with `-g` or `-Ddebugger=...` like
+/// `wasmtime run`.
 ///
 /// Traces refer to the modules they instantiate by checksum. Replay finds
 /// them in a trace bundle (recorded with `-R bundle`), or in the Wasm given
@@ -48,17 +50,23 @@ impl ReplayCommand {
         runtime.block_on(self.replay())
     }
 
-    async fn replay(mut self) -> Result<()> {
+    async fn replay(self) -> Result<()> {
         if self.run.recording() {
             wasmtime::bail!("a replay cannot be recorded");
         }
         let trace_path = self.trace;
-        self.run.common.init_logging()?;
+        let modules = self.modules;
+        let mut cmd = RunCommand::for_replay(self.run, trace_path.clone());
+        cmd.run.common.init_logging()?;
+        // This also enables epoch interruption, so that the debugger can
+        // interrupt the replay.
+        #[cfg(feature = "debug")]
+        let debug_run = cmd.debugger_run()?;
 
-        let mut config = self.run.common.config(None)?;
+        let mut config = cmd.run.common.config(None)?;
         config.rr(Some(RrConfig::Replaying));
         let engine = Engine::new(&config)?;
-        let (trace, bytecode) = load_replay(&engine, &trace_path, &self.modules)?;
+        let (trace, bytecode) = load_replay(&engine, &trace_path, &modules)?;
         let mut replayer = Replayer::new(&engine, trace)?;
         for wasm in &bytecode {
             replayer.add_bytecode(wasm)?;
@@ -71,6 +79,14 @@ impl ReplayCommand {
             let exit = exit.clone();
             move |e: RecordedExit| *exit.lock().unwrap() = Some(e)
         });
+
+        #[cfg(feature = "debug")]
+        if let Some(mut debug_run) = debug_run {
+            let debuggee = wasmtime_debugger::Debuggee::new_replay(replayer);
+            debug_run.run_debugger(debuggee).await?;
+            return replay_exit(exit.lock().unwrap().take());
+        }
+
         while replayer.run().await? != ReplayStop::Finished {}
         replay_exit(exit.lock().unwrap().take())
     }
