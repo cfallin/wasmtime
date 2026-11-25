@@ -238,6 +238,14 @@ const _: () = {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct MemoryHashKey(usize);
 
+#[cfg(any(feature = "coredump", feature = "rr"))]
+impl MemoryHashKey {
+    /// The key of the memory that `definition` defines.
+    pub(crate) fn new(definition: core::ptr::NonNull<crate::vm::VMMemoryDefinition>) -> Self {
+        MemoryHashKey(definition.as_ptr().addr())
+    }
+}
+
 impl Memory {
     /// Creates a new WebAssembly memory given the configuration of `ty`.
     ///
@@ -899,7 +907,7 @@ impl Memory {
     /// this hash key will be consistent across all of these memories.
     #[cfg(any(feature = "coredump", feature = "rr"))]
     pub(crate) fn hash_key(&self, store: &StoreOpaque) -> MemoryHashKey {
-        MemoryHashKey(store[self.instance].memory_ptr(self.index).as_ptr().addr())
+        MemoryHashKey::new(store[self.instance].memory_ptr(self.index))
     }
 }
 

@@ -9,7 +9,7 @@ use crate::store::StoreOpaque;
 use crate::{HeapType, RefType, Trap, ValRaw, ValType};
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0b";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0c";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -28,6 +28,8 @@ pub(super) const MEMORY: u8 = 11;
 pub(super) const TABLE: u8 = 12;
 /// A guest's failed `memory.grow` or `table.grow`; see `GrowthFailure`.
 pub(super) const GROWTH_FAILED: u8 = 13;
+/// The host's write to a component instance flag: `[id, value]`.
+pub(super) const GLOBAL_WRITE: u8 = 14;
 
 pub(super) const UNSUPPORTED: &str =
     "record/replay does not support GC or typed reference boundaries";

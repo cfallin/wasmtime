@@ -1,10 +1,11 @@
-//! Core WebAssembly record/replay for a whole store.
+//! Record/replay for a whole store.
 //!
 //! Recording begins with an empty store, created by
 //! [`Store::new_recording`](crate::Store::new_recording). Objects receive
 //! numeric identities automatically; all construction is part of the trace.
 //! Traces identify core modules only by the checksums of their bytecode, so
-//! that they stay small.
+//! that they stay small. Components are recorded as the core instances that they
+//! instantiate.
 //!
 //! A `Replayer` replays a trace: it compiles each module from bytecode that the
 //! embedder provides, and executes guest code without invoking the original

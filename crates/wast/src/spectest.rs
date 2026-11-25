@@ -1,5 +1,14 @@
 use wasmtime::*;
 
+/// The module that "spectest" exports as `simple-module`.
+#[cfg(feature = "component-model")]
+pub(crate) const SIMPLE_MODULE: &str = r#"
+    (module
+        (global (export "g") i32 i32.const 100)
+        (func (export "f") (result i32) i32.const 101)
+    )
+"#;
+
 /// Configuration of how spectest primitives work.
 pub struct SpectestConfig {
     /// Whether or not to have a `shared_memory` definition.
@@ -108,15 +117,7 @@ pub fn link_component_spectest<T>(linker: &mut component::Linker<T>) -> Result<(
         .func_wrap("return-four", |_, _: ()| Ok((4u32,)))?;
 
     if !cfg!(miri) {
-        let module = Module::new(
-            &engine,
-            r#"
-                (module
-                    (global (export "g") i32 i32.const 100)
-                    (func (export "f") (result i32) i32.const 101)
-                )
-            "#,
-        )?;
+        let module = Module::new(&engine, SIMPLE_MODULE)?;
         i.module("simple-module", &module)?;
     }
 

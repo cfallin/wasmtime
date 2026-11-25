@@ -4,7 +4,7 @@
 use crate::prelude::*;
 use crate::rr::Growable;
 use crate::runtime::vm::VMFuncRef;
-use crate::store::StoreOpaque;
+use crate::store::{InstanceId, StoreOpaque};
 use crate::{Global, Instance, Memory, Module, Ref, Table, ValRaw, bail_bug};
 use core::ops::Range;
 use core::ptr::NonNull;
@@ -23,6 +23,15 @@ impl State {
     }
 }
 
+#[inline]
+#[cfg(feature = "component-model")]
+pub(crate) fn wrap_destructor<T: 'static>(
+    _store: &mut crate::StoreContextMut<'_, T>,
+    dtor: NonNull<VMFuncRef>,
+) -> Result<NonNull<VMFuncRef>> {
+    Ok(dtor)
+}
+
 impl StoreOpaque {
     #[inline]
     pub(crate) fn rr_flush(&mut self) -> Result<()> {
@@ -31,6 +40,19 @@ impl StoreOpaque {
 
     #[inline]
     pub(crate) fn rr_track_memory(&mut self, _memory: Memory, _range: Range<usize>) {}
+
+    #[inline]
+    #[cfg(feature = "component-model")]
+    pub(crate) fn rr_track_memory_definition(
+        &mut self,
+        _definition: NonNull<crate::runtime::vm::VMMemoryDefinition>,
+        _written: Range<usize>,
+    ) {
+    }
+
+    #[inline]
+    #[cfg(feature = "component-model")]
+    pub(crate) fn rr_track_raw_memory(&mut self, _ptr: *mut u8, _len: usize) {}
 
     #[inline]
     pub(crate) fn rr_memory_grown(&mut self, _memory: Memory) -> Result<()> {
@@ -78,6 +100,7 @@ impl StoreOpaque {
     /// See the enabled version's safety contract.
     pub(crate) unsafe fn rr_enter(
         &mut self,
+        _caller: InstanceId,
         _func: NonNull<VMFuncRef>,
         _raw: *const ValRaw,
         _kind: RrCallKind,

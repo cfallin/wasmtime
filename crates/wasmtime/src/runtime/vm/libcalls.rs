@@ -1379,7 +1379,7 @@ fn watched_write(
 /// record/replay engines while their store records.
 fn rr_enter(
     store: &mut dyn VMStore,
-    _instance: InstanceId,
+    instance: InstanceId,
     func: *mut u8,
     values: *mut u8,
     kind: u8,
@@ -1390,7 +1390,7 @@ fn rr_enter(
     };
     // SAFETY: trampolines pass the callee's live function reference, which the
     // store owns, and its initialized arguments.
-    unsafe { store.rr_enter(func, values.cast(), kind) }
+    unsafe { store.rr_enter(instance, func, values.cast(), kind) }
 }
 
 /// Records the return of a call from `rr_enter`.

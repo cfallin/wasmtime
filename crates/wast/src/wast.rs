@@ -179,19 +179,21 @@ impl WastContext {
         self
     }
 
-    /// Replays what the core store recorded.
+    /// Replays what `store` recorded, if it did.
     #[cfg(feature = "rr")]
-    fn replay(&mut self) -> Result<()> {
+    fn replay(&self, store: &mut Store<()>) -> Result<()> {
         let Some(engine) = &self.replay_engine else {
             return Ok(());
         };
-        let trace = self.core_store.finish_recording()?;
+        let trace = store.finish_recording()?;
         let mut replayer = rr::Replayer::new(engine, trace)?;
         for wasm in self.modules_by_filename.values() {
             // Scripts contain invalid modules too. Replay fails if this is a
             // module that it needs.
             let _ = replayer.add_bytecode(wasm);
         }
+        #[cfg(feature = "component-model")]
+        replayer.add_bytecode(SIMPLE_MODULE.as_bytes())?;
         let rt = tokio::runtime::Builder::new_current_thread().build()?;
         match rt.block_on(replayer.run()).context("replay failed")? {
             rr::ReplayStop::Finished => Ok(()),
@@ -271,7 +273,7 @@ impl WastContext {
         &mut self,
         component: &component::Component,
     ) -> Result<Outcome<(component::Component, Store<()>, component::Instance)>> {
-        let mut store = Store::new(self.engine(), ());
+        let mut store = new_store(self.engine());
         (self.configure_store)(&mut store);
         let instance = match &self.async_runtime {
             Some(rt) => rt.block_on(
@@ -282,7 +284,11 @@ impl WastContext {
         };
         Ok(match instance {
             Ok(i) => Outcome::Ok((component.clone(), store, i)),
-            Err(e) => Outcome::Trap(e),
+            Err(e) => {
+                #[cfg(feature = "rr")]
+                self.replay(&mut store)?;
+                Outcome::Trap(e)
+            }
         })
     }
 
@@ -443,6 +449,8 @@ impl WastContext {
     /// Instantiates the `module` provided and registers the instance under the
     /// `name` provided if successful.
     fn module(&mut self, name: Option<&str>, module: &ModuleKind) -> Result<()> {
+        #[cfg(feature = "component-model")]
+        self.drop_component()?;
         match module {
             ModuleKind::Core(module) => {
                 let instance = match self.instantiate_module(&module)? {
@@ -739,8 +747,28 @@ impl WastContext {
             Ok::<(), Error>(())
         })?;
 
+        #[cfg(feature = "component-model")]
+        self.drop_component()?;
         #[cfg(feature = "rr")]
-        self.replay()?;
+        if self.replay_engine.is_some() {
+            let next = Store::new(self.engine(), ());
+            let mut store = std::mem::replace(&mut self.core_store, next);
+            self.replay(&mut store)?;
+        }
+        Ok(())
+    }
+
+    /// Drops the current instance and its store, if it is of a component, and
+    /// replays its execution if that is enabled.
+    #[cfg(feature = "component-model")]
+    fn drop_component(&mut self) -> Result<()> {
+        match self.current.take() {
+            #[cfg(feature = "rr")]
+            Some(InstanceKind::Component(mut store, _)) => self.replay(&mut store)?,
+            #[cfg(not(feature = "rr"))]
+            Some(InstanceKind::Component(..)) => {}
+            current => self.current = current,
+        }
         Ok(())
     }
 

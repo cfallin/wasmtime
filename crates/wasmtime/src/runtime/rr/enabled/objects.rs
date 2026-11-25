@@ -61,6 +61,8 @@ pub(super) struct Objects {
     globals_by_key: TryHashMap<GlobalHashKey, RecordedGlobal>,
     pub tables: TryPrimaryMap<RecordedTable, crate::Table>,
     tables_by_key: TryHashMap<TableHashKey, RecordedTable>,
+    /// The globals that are flags of component instances.
+    pub flags: TryVec<RecordedGlobal>,
     pub modules: TryPrimaryMap<RecordedModule, crate::Module>,
 }
 
@@ -114,6 +116,10 @@ impl Objects {
         let host = match magic {
             wasmtime_environ::VMCONTEXT_MAGIC => false,
             wasmtime_environ::VM_ARRAY_CALL_HOST_FUNC_MAGIC => true,
+            // Component trampolines and intrinsics are host functions to the
+            // core Wasm that imports them.
+            #[cfg(feature = "component-model")]
+            wasmtime_environ::component::VMCOMPONENT_MAGIC => true,
             _ => bail!("unsupported function context in record/replay"),
         };
         let ty = func.load_ty(store);
@@ -165,6 +171,15 @@ impl Objects {
 
     pub fn find_memory(&self, store: &StoreOpaque, memory: Memory) -> Option<RecordedMemory> {
         self.memories_by_key.get(&memory.hash_key(store)).copied()
+    }
+
+    #[cfg(feature = "component-model")]
+    pub fn find_memory_definition(
+        &self,
+        definition: NonNull<crate::runtime::vm::VMMemoryDefinition>,
+    ) -> Option<Memory> {
+        let id = self.memories_by_key.get(&MemoryHashKey::new(definition))?;
+        Some(self.memories[*id])
     }
 
     pub fn add_global(

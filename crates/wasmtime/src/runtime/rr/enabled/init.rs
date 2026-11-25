@@ -52,6 +52,12 @@ impl Session {
             _ => unreachable!(),
         };
         let id = self.objects.add_global(store, global)?;
+        if global.is_component_flag() {
+            self.objects.flags.push(id)?;
+            if let Mode::Recording(recording) = &mut self.mode {
+                recording.flags.push(global._get(store).unwrap_i32())?;
+            }
+        }
         let mut body = TryVec::new();
         body.extend_from_slice(&id.as_u32().to_le_bytes())?;
         kind.encode(&mut body)?;
@@ -216,6 +222,46 @@ impl StoreOpaque {
             body.extend_from_slice(&func.to_le_bytes())?;
             session.append(codec::TABLE, &body)
         })
+    }
+
+    /// Notes the values of component instance flags as Wasm passes control to
+    /// the host.
+    ///
+    /// To core Wasm these are imported mutable globals. Adapters write them, as
+    /// does the host's implementation of the canonical ABI.
+    pub(super) fn rr_note_flags(&mut self) -> Result<()> {
+        let session = self.rr.session.as_ref().unwrap();
+        for i in 0..session.objects.flags.len() {
+            let value = self.rr_flag(i).1;
+            self.rr_session().mode.recording().flags[i] = value;
+        }
+        Ok(())
+    }
+
+    /// Records the component instance flags that the host changed since
+    /// `rr_note_flags`.
+    pub(super) fn rr_flush_flags(&mut self) -> Result<()> {
+        for i in 0..self.rr_objects().flags.len() {
+            let (id, value) = self.rr_flag(i);
+            let session = self.rr_session();
+            let noted = &mut session.mode.recording().flags[i];
+            if *noted == value {
+                continue;
+            }
+            *noted = value;
+            let mut body = [0; 8];
+            body[..4].copy_from_slice(&id.as_u32().to_le_bytes());
+            body[4..].copy_from_slice(&value.to_le_bytes());
+            session.append(codec::GLOBAL_WRITE, &body)?;
+        }
+        Ok(())
+    }
+
+    fn rr_flag(&mut self, i: usize) -> (RecordedGlobal, i32) {
+        let objects = self.rr_objects();
+        let id = objects.flags[i];
+        let global = objects.globals[id];
+        (id, global._get(self).unwrap_i32())
     }
 
     pub(crate) fn rr_created_instance(

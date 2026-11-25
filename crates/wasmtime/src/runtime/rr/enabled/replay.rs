@@ -5,9 +5,10 @@
 //! beneath a host function. Activations may complete in any order.
 
 use super::*;
-use crate::{AsContext, Extern, Instance, StoreContext, StoreContextMut};
+use crate::{AsContext, Extern, Instance, StoreContext, StoreContextMut, Val};
 use alloc::collections::BTreeMap;
 use core::task::Poll;
+use objects::RecordedGlobal;
 
 mod activation;
 mod init;
@@ -132,10 +133,11 @@ impl Replayer {
     /// Provides the bytecode of modules that the trace instantiates, which
     /// traces identify only by checksum (see [`Trace::module_checksums`]).
     ///
-    /// `wasm` is a core module in the binary or (with the `wat` feature) text
-    /// format. Modules that the trace does not instantiate are ignored. Replay
-    /// fails if it reaches the first instantiation of a module whose bytecode
-    /// has not been provided.
+    /// `wasm` is a core module or a component, in the binary or (with the `wat`
+    /// feature) text format; a component provides the modules that
+    /// [`core_modules`] finds in it. Modules that the trace does not instantiate
+    /// are ignored. Replay fails if it reaches the first instantiation of a
+    /// module whose bytecode has not been provided.
     pub fn add_bytecode(&mut self, wasm: &[u8]) -> Result<()> {
         self.bytecode
             .0
@@ -169,7 +171,8 @@ impl Replayer {
         .await
     }
 
-    /// The instances that have been created so far, in order.
+    /// The instances that have been created so far, in order. Components replay
+    /// as the core instances that they instantiate.
     pub fn instances(&self) -> &[Instance] {
         &self.instances
     }
@@ -219,7 +222,8 @@ impl Replayer {
 
     fn replay_record(&mut self, tag: u8, body: &mut Reader<'_>) -> Result<()> {
         ensure!(
-            self.pending_startup.is_none() || matches!(tag, codec::ENTER_WASM | codec::WRITE),
+            self.pending_startup.is_none()
+                || matches!(tag, codec::ENTER_WASM | codec::WRITE | codec::GLOBAL_WRITE),
             "instance startup missing from trace"
         );
         match tag {
@@ -243,6 +247,7 @@ impl Replayer {
                         Ok(())
                     }
                     codec::WRITE => self.write(body),
+                    codec::GLOBAL_WRITE => self.global_write(body),
                     codec::RESIZE => self.resize(body),
                     codec::END => {
                         // Activations may remain parked at host calls if the
@@ -409,6 +414,21 @@ impl Replayer {
             .ok_or_else(|| format_err!("out-of-bounds memory write in trace"))?
             .copy_from_slice(bytes);
         Ok(())
+    }
+
+    /// Replays the host's write to a component instance flag.
+    fn global_write(&mut self, body: &mut Reader<'_>) -> Result<()> {
+        let id = RecordedGlobal::from_u32(body.u32()?);
+        let value = Val::I32(body.u32()?.cast_signed());
+        body.end()?;
+        let store = self.store.as_context_mut().0;
+        let global = store.rr_objects().globals.get(id).copied();
+        let global = global.ok_or_else(|| format_err!("invalid global ID in trace"))?;
+        ensure!(
+            global._ty(store).mutability().is_var(),
+            "write to an immutable global in trace"
+        );
+        global._set(store, value)
     }
 
     /// Replays a memory's growth by the host.

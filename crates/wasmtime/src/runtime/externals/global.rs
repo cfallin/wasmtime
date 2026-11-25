@@ -386,6 +386,15 @@ impl Global {
         }
     }
 
+    #[cfg(feature = "rr")]
+    pub(crate) fn is_component_flag(&self) -> bool {
+        #[cfg(feature = "component-model")]
+        if matches!(self.kind, VMGlobalKind::ComponentFlags(_)) {
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Global {
         self.store.assert_belongs_to(store.id());
         match self.kind {

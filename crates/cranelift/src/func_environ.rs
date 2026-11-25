@@ -40,10 +40,10 @@ use wasmtime_environ::{
     FrameStateSlotBuilder, FrameValType, FuncIndex, FuncKey, GlobalConstValue, GlobalIndex,
     IndexType, KnownFunc, KnownGlobal, Memory, MemoryIndex, MemoryInit, MemorySegmentOffset,
     MemoryTunables, Module, ModuleInternedTypeIndex, ModuleTranslation, ModuleTypesBuilder,
-    PassiveElemIndex, RuntimeDataIndex, Table, TableIndex, TableInitialValue, TableSegment,
-    TableSegmentElements, TableSegmentInit, TagIndex, Tunables, TypeConvert, TypeIndex, VMOffsets,
-    WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType, WasmRefType, WasmResult,
-    WasmStorageType, WasmValType,
+    PassiveElemIndex, RrConfig, RuntimeDataIndex, Table, TableIndex, TableInitialValue,
+    TableSegment, TableSegmentElements, TableSegmentInit, TagIndex, Tunables, TypeConvert,
+    TypeIndex, VMOffsets, WasmCompositeInnerType, WasmFuncType, WasmHeapTopType, WasmHeapType,
+    WasmRefType, WasmResult, WasmStorageType, WasmValType,
 };
 use wasmtime_environ::{FUNCREF_INIT_BIT, FUNCREF_MASK};
 
@@ -2360,7 +2360,17 @@ impl<'a, 'func, 'module_env> Call<'a, 'func, 'module_env> {
         // If we statically know the imported function (e.g. this is a
         // component-to-component call where we statically know both components)
         // then we can avoid doing an indirect call.
-        match self.env.translation.known_imported_functions[callee_index].as_ref() {
+        //
+        // Component builtins record their calls in their trampolines, which
+        // lowering them inline would bypass, so only guest-to-guest calls are
+        // known when recording.
+        let known = self.env.translation.known_imported_functions[callee_index]
+            .as_ref()
+            .filter(|known| {
+                self.env.tunables.rr != Some(RrConfig::Recording)
+                    || matches!(known, KnownFunc::FuncKey(FuncKey::DefinedWasmFunction(..)))
+            });
+        match known {
             // The import is always a compile-time builtin intrinsic. Make a
             // direct call to that function (presumably it will eventually be
             // inlined).

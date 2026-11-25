@@ -1,6 +1,6 @@
 use crate::prelude::*;
-use crate::runtime::vm::VMFuncRef;
-use crate::store::{StoreInner, StoreOpaque};
+use crate::runtime::vm::{VMFuncRef, VMFuncRefHashKey};
+use crate::store::{InstanceId, StoreInner, StoreOpaque};
 use crate::{AsContextMut, Engine, Func, Memory, Store, ValRaw};
 use alloc::sync::Arc;
 use core::ops::Range;
@@ -8,12 +8,16 @@ use core::ptr::NonNull;
 use wasmtime_environ::RrCallKind;
 
 mod codec;
+#[cfg(feature = "component-model")]
+mod component;
 mod growth;
 mod init;
 mod objects;
 mod replay;
 
 use codec::{Kind, Reader};
+#[cfg(feature = "component-model")]
+pub(crate) use component::wrap_destructor;
 use growth::GrowthFailure;
 use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
 pub use replay::{ReplayStop, Replayer};
@@ -26,8 +30,12 @@ const NOT_RECORDED: u32 = u32::MAX;
 pub type Checksum = [u8; 32];
 
 /// Returns the core modules that `engine` compiles from `wasm`, with their
-/// checksums. `wasm` is a core module, in the binary or (with the `wat`
-/// feature) text format, which is returned as is.
+/// checksums. `wasm` is a core module or a component, in the binary or (with
+/// the `wat` feature) text format.
+///
+/// A core module is returned as is. A component's modules are those nested in
+/// it, at any depth, and the adapter modules that Wasmtime generates for it,
+/// which depend on the engine's configuration.
 ///
 /// A trace refers to the modules it instantiates by these checksums, so this
 /// can be used to find or package the bytecode that replaying it requires.
@@ -40,8 +48,43 @@ pub fn core_modules(engine: &crate::Engine, wasm: &[u8]) -> Result<Vec<(Checksum
     if !wasmparser::Parser::is_component(wasm) {
         return Ok(vec![(checksum(wasm), wasm.to_vec())]);
     }
-    let _ = engine;
-    bail!("record/replay does not support components")
+    component_modules(engine, wasm, checksum)
+}
+
+#[cfg(all(
+    feature = "component-model",
+    any(feature = "cranelift", feature = "winch")
+))]
+fn component_modules(
+    engine: &Engine,
+    wasm: &[u8],
+    checksum: impl Fn(&[u8]) -> Checksum,
+) -> Result<Vec<(Checksum, Vec<u8>)>> {
+    use wasmtime_environ::ScopeVec;
+    use wasmtime_environ::component::{ComponentTypesBuilder, Translator};
+    // Translate the component as compilation would, which generates its adapter
+    // modules, without compiling it.
+    let scope = ScopeVec::new();
+    let mut validator = wasmparser::Validator::new_with_features(engine.features());
+    let mut types = ComponentTypesBuilder::new(&validator);
+    let (_, translations) =
+        Translator::new(engine.tunables(), &mut validator, &mut types, &scope).translate(wasm)?;
+    Ok(translations
+        .values()
+        .map(|t| (checksum(t.wasm), t.wasm.to_vec()))
+        .collect())
+}
+
+#[cfg(not(all(
+    feature = "component-model",
+    any(feature = "cranelift", feature = "winch")
+)))]
+fn component_modules(
+    _engine: &Engine,
+    _wasm: &[u8],
+    _checksum: impl Fn(&[u8]) -> Checksum,
+) -> Result<Vec<(Checksum, Vec<u8>)>> {
+    bail!("finding the core modules of a component requires component-model and a compiler")
 }
 
 /// Formats a checksum as hexadecimal, as in file names and messages.
@@ -130,6 +173,12 @@ struct DirtyRange {
     bytes: Range<usize>,
 }
 
+/// The direction of a call or return between the host and Wasm.
+enum Direction {
+    ToWasm,
+    ToHost,
+}
+
 enum Mode {
     Recording(Recording),
     Replaying(Replaying),
@@ -139,11 +188,30 @@ enum Mode {
 #[derive(Default)]
 struct Recording {
     bytes: TryVec<u8>,
-    /// Calls, and the called functions, that have not yet returned.
-    outstanding: TryVec<(RecordedCall, RecordedFunc)>,
+    /// Calls that have not yet returned.
+    outstanding: TryVec<Outstanding>,
     next_call: u32,
     /// Memory ranges that the host may have written since the last flush.
     dirty_ranges: TryVec<DirtyRange>,
+    /// The values of component instance flags when Wasm last called or returned
+    /// to the host, parallel to `Objects::flags`.
+    flags: TryVec<i32>,
+    /// The host functions that wrap resource destructors; see `component`.
+    destructors: TryHashSet<VMFuncRefHashKey>,
+}
+
+/// A call that has not yet returned.
+struct Outstanding {
+    call: RecordedCall,
+    callee: Callee,
+}
+
+#[derive(Clone, Copy)]
+enum Callee {
+    Func(RecordedFunc),
+    /// A wrapper of a resource destructor, called within the given call of a
+    /// `resource.drop` trampoline.
+    Destructor(RecordedCall),
 }
 
 /// The state of a store that is replaying that the rest of the runtime needs;
@@ -273,8 +341,9 @@ impl<T: 'static> Store<T> {
     /// for a poisoned recording; such a trace cannot be replayed. A failed
     /// recording is discarded and recording is disabled on the store.
     ///
-    /// A recording may end while guest calls are unfinished, for example
-    /// after a host panic; replay then ends with them suspended.
+    /// A recording may end while guest calls are unfinished, for example with
+    /// component-model tasks suspended in host calls or after a host panic;
+    /// replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
@@ -354,19 +423,30 @@ impl StoreOpaque {
         Ok(())
     }
 
-    /// Records the contents of the memory ranges that the host may have
-    /// written since the last flush (including through forgotten guards).
+    /// Records the guest state that the host may have written since the last
+    /// flush (including through forgotten guards).
     ///
     /// This runs while the store is exclusively borrowed and before the guest
-    /// can observe memory again: at every call or return between the host and
+    /// can observe its state again: at every call or return from the host to
     /// Wasm, and when the recording finishes.
     pub(crate) fn rr_flush(&mut self) -> Result<()> {
         self.rr_check()?;
         if !self.rr.recording() {
             return Ok(());
         }
-        let result = self.rr_flush_writes();
+        let result = self.rr_flush_flags().and_then(|()| self.rr_flush_writes());
         self.rr_poison_on_err(result)
+    }
+
+    /// Prepares to record a call or return between the host and Wasm.
+    fn rr_cross_boundary(&mut self, direction: Direction) -> Result<()> {
+        match direction {
+            Direction::ToWasm => self.rr_flush(),
+            Direction::ToHost => {
+                self.rr_check()?;
+                self.rr_note_flags()
+            }
+        }
     }
 
     fn rr_flush_writes(&mut self) -> Result<()> {
@@ -480,8 +560,8 @@ impl StoreOpaque {
     }
 
     /// The `rr_enter` builtin, which the trampolines of record/replay engines
-    /// call while the store records. Returns the call's ID, or
-    /// [`NOT_RECORDED`].
+    /// call while the store records, where `caller` is the calling instance.
+    /// Returns the call's ID, or [`NOT_RECORDED`].
     ///
     /// # Safety
     ///
@@ -490,11 +570,15 @@ impl StoreOpaque {
     /// function references this store owns.
     pub(crate) unsafe fn rr_enter(
         &mut self,
+        caller: InstanceId,
         func: NonNull<VMFuncRef>,
         raw: *const ValRaw,
         kind: RrCallKind,
     ) -> Result<u32> {
-        if !self.rr.recording() {
+        // The host calls component functions with the store's dummy instance
+        // as their caller, which is not a call by Wasm.
+        let host_to_host = kind == RrCallKind::WasmToHost && self.instance_is_dummy(caller);
+        if !self.rr.recording() || host_to_host {
             return Ok(NOT_RECORDED);
         }
         // SAFETY: inherited from this function's contract.
@@ -511,10 +595,31 @@ impl StoreOpaque {
         raw: *const ValRaw,
         kind: RrCallKind,
     ) -> Result<u32> {
-        self.rr_flush()?;
+        self.rr_check()?;
         // SAFETY: inherited from this function's contract.
         let func = unsafe { func.as_ref() };
-        let id = self.rr_session().objects.find_func_ref(func)?;
+        let recording = self.rr_session().mode.recording();
+        let call = recording.next_call;
+        recording.next_call = call
+            .checked_add(1)
+            .filter(|c| *c != NOT_RECORDED)
+            .ok_or_else(|| format_err!("too many recorded calls"))?;
+        if kind == RrCallKind::WasmToHost && recording.destructors.contains(&func.hash_key()) {
+            // The trampoline's own call was the last thing to be recorded.
+            let drop = recording.outstanding.last();
+            let drop = drop.ok_or_else(|| format_err!("destructor called outside of a drop"))?;
+            let callee = Callee::Destructor(drop.call);
+            recording.outstanding.push(Outstanding {
+                call: RecordedCall::from_u32(call),
+                callee,
+            })?;
+            return Ok(call);
+        }
+        self.rr_cross_boundary(match kind {
+            RrCallKind::HostToWasm => Direction::ToWasm,
+            RrCallKind::WasmToHost => Direction::ToHost,
+        })?;
+        let id = self.rr_objects().find_func_ref(func)?;
         // SAFETY: inherited from this function's contract.
         unsafe {
             self.rr_boundary_refs(id, raw, false)?;
@@ -522,11 +627,6 @@ impl StoreOpaque {
         let session = self.rr_session();
         let bound = &session.objects.funcs[id];
         let recording = session.mode.recording();
-        let call = recording.next_call;
-        recording.next_call = call
-            .checked_add(1)
-            .filter(|c| *c != NOT_RECORDED)
-            .ok_or_else(|| format_err!("too many recorded calls"))?;
         let tag = match kind {
             RrCallKind::WasmToHost => codec::ENTER_HOST,
             RrCallKind::HostToWasm => codec::ENTER_WASM,
@@ -541,9 +641,10 @@ impl StoreOpaque {
                 session.objects.encode_ref(ptr)
             })?
         };
-        recording
-            .outstanding
-            .push((RecordedCall::from_u32(call), id))?;
+        recording.outstanding.push(Outstanding {
+            call: RecordedCall::from_u32(call),
+            callee: Callee::Func(id),
+        })?;
         Ok(call)
     }
 
@@ -601,13 +702,21 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return Ok(());
         }
-        self.rr_flush()?;
-        let outstanding = &self.rr_session().mode.recording().outstanding;
-        let position = outstanding
-            .iter()
-            .position(|(c, _)| *c == call)
-            .ok_or_else(|| format_err!("return without recorded call"))?;
-        let func = outstanding[position].1;
+        self.rr_cross_boundary(match kind {
+            RrCallKind::HostToWasm => Direction::ToHost,
+            RrCallKind::WasmToHost => Direction::ToWasm,
+        })?;
+        let (mut call, mut callee) = (call, self.rr_take_outstanding(call)?);
+        if let Callee::Destructor(drop) = callee {
+            if result.is_ok() {
+                return Ok(());
+            }
+            // The error unwinds past the trampoline, which does not record it.
+            (call, callee) = (drop, self.rr_take_outstanding(drop)?);
+        }
+        let Callee::Func(func) = callee else {
+            bail!("unexpected nested destructor")
+        };
         if result.is_ok() {
             // SAFETY: inherited from this function's contract, as `func` is
             // the function that was passed to `rr_enter`.
@@ -634,7 +743,15 @@ impl StoreOpaque {
                 |ptr| session.objects.encode_ref(ptr),
             )?;
         }
-        recording.outstanding.swap_remove(position);
         Ok(())
+    }
+
+    fn rr_take_outstanding(&mut self, call: RecordedCall) -> Result<Callee> {
+        let outstanding = &mut self.rr_session().mode.recording().outstanding;
+        let position = outstanding
+            .iter()
+            .position(|o| o.call == call)
+            .ok_or_else(|| format_err!("return without recorded call"))?;
+        Ok(outstanding.swap_remove(position).callee)
     }
 }

@@ -1886,6 +1886,11 @@ impl StoreOpaque {
         )
     }
 
+    #[cfg(feature = "rr")]
+    pub(crate) fn instance_is_dummy(&self, id: InstanceId) -> bool {
+        matches!(self.instances[id].kind, StoreInstanceKind::Dummy)
+    }
+
     /// Get all instances (ignoring dummy instances) within this store.
     pub fn all_instances<'a>(&'a self) -> impl ExactSizeIterator<Item = Instance> + 'a {
         let instances = self
