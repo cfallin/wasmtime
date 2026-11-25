@@ -38,6 +38,11 @@ pub struct WastContext {
     modules_by_filename: Arc<HashMap<String, Vec<u8>>>,
     configure_store: Arc<dyn Fn(&mut Store<()>) + Send + Sync>,
     ignore_error_messages: bool,
+
+    /// The engine that replays recordings, if [`WastContext::record_replay`]
+    /// was called.
+    #[cfg(feature = "rr")]
+    replay_engine: Option<Engine>,
 }
 
 enum Outcome<T = Results> {
@@ -101,6 +106,15 @@ pub enum Async {
     No,
 }
 
+/// Creates a store, which records its execution if `engine` is configured to.
+fn new_store(engine: &Engine) -> Store<()> {
+    #[cfg(feature = "rr")]
+    if engine.is_recording() {
+        return Store::new_recording(engine, ()).expect("engine does not support recording");
+    }
+    Store::new(engine, ())
+}
+
 impl WastContext {
     /// Construct a new instance of `WastContext`.
     ///
@@ -129,7 +143,7 @@ impl WastContext {
                 linker
             },
             core_store: {
-                let mut store = Store::new(engine, ());
+                let mut store = new_store(engine);
                 configure(&mut store);
                 store
             },
@@ -149,6 +163,39 @@ impl WastContext {
             modules_by_filename: Arc::default(),
             configure_store: Arc::new(configure),
             ignore_error_messages: false,
+            #[cfg(feature = "rr")]
+            replay_engine: None,
+        }
+    }
+
+    /// Replays the execution of a script, after running it, with
+    /// `replay_engine`, checking that it behaves as it did when recorded.
+    ///
+    /// This context's engine must be configured for recording, and it can only
+    /// run one script.
+    #[cfg(feature = "rr")]
+    pub fn record_replay(&mut self, replay_engine: Engine) -> &mut Self {
+        self.replay_engine = Some(replay_engine);
+        self
+    }
+
+    /// Replays what the core store recorded.
+    #[cfg(feature = "rr")]
+    fn replay(&mut self) -> Result<()> {
+        let Some(engine) = &self.replay_engine else {
+            return Ok(());
+        };
+        let trace = self.core_store.finish_recording()?;
+        let mut replayer = rr::Replayer::new(engine, trace)?;
+        for wasm in self.modules_by_filename.values() {
+            // Scripts contain invalid modules too. Replay fails if this is a
+            // module that it needs.
+            let _ = replayer.add_bytecode(wasm);
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().build()?;
+        match rt.block_on(replayer.run()).context("replay failed")? {
+            rr::ReplayStop::Finished => Ok(()),
+            stop => bail!("unexpected replay stop {stop:?}"),
         }
     }
 
@@ -689,8 +736,12 @@ impl WastContext {
                 self.run_directive(directive, filename, &scope, &mut threads)
                     .with_context(|| format!("failed directive on {filename}:{line}"))?;
             }
-            Ok(())
-        })
+            Ok::<(), Error>(())
+        })?;
+
+        #[cfg(feature = "rr")]
+        self.replay()?;
+        Ok(())
     }
 
     fn run_directive<'a>(
@@ -842,7 +893,7 @@ impl WastContext {
                     #[cfg(feature = "component-model")]
                     component_linker: component::Linker::new(self.engine()),
                     core_store: {
-                        let mut store = Store::new(self.engine(), ());
+                        let mut store = new_store(self.engine());
                         (self.configure_store)(&mut store);
                         store
                     },
@@ -858,6 +909,8 @@ impl WastContext {
                     precompile_save: self.precompile_save.clone(),
                     configure_store: self.configure_store.clone(),
                     ignore_error_messages: self.ignore_error_messages,
+                    #[cfg(feature = "rr")]
+                    replay_engine: self.replay_engine.clone(),
                 };
                 let child = scope.spawn(move || child_cx.run_directives(commands, filename));
                 threads.insert(name.to_string(), child);

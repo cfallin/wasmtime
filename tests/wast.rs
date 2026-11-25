@@ -1,6 +1,8 @@
 use libtest_mimic::{Arguments, FormatSetting, Trial};
 use std::sync::{Condvar, LazyLock, Mutex};
 use wasmtime::{Enabled, Engine, bail, error::Context as _};
+#[cfg(feature = "rr")]
+use wasmtime::{RrConfig, Store};
 use wasmtime_test_util::wast::{Compiler, WastConfig, WastTest, limits};
 use wasmtime_wast::{Async, SpectestConfig, WastContext};
 
@@ -63,10 +65,25 @@ fn main() {
 
             let trial = Trial::test(name.to_string(), {
                 let test = test.clone();
-                move || run_wast(&test, config).map_err(|e| format!("{e:?}").into())
+                move || run_wast(&test, config, false).map_err(|e| format!("{e:?}").into())
             });
 
             trials.push(trial);
+        }
+
+        // Also record each test and replay its recording.
+        if cfg!(feature = "rr")
+            && compilers.contains(&Compiler::CraneliftNative)
+            && supports_record_replay(&test)
+        {
+            let config = WastConfig {
+                compiler: Compiler::CraneliftNative,
+                pooling: false,
+            };
+            trials.push(Trial::test(format!("RecordReplay/{name}"), {
+                let test = test.clone();
+                move || run_wast(&test, config, true).map_err(|e| format!("{e:?}").into())
+            }));
         }
     }
 
@@ -79,10 +96,20 @@ fn main() {
     libtest_mimic::run(&args, trials).exit()
 }
 
+// Whether to record and replay a test. Other tests that can't be recorded are
+// detected as they run.
+fn supports_record_replay(test: &WastTest) -> bool {
+    !test.config.legacy_exceptions()
+        // These expect exact costs, which recording changes.
+        && !test.path.to_str().unwrap().contains("misc_testsuite/fuel/")
+}
+
 // Each of the tests included from `wast_testsuite_tests` will call this
 // function which actually executes the `wast` test suite given the `strategy`
 // to compile it.
-fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
+//
+// With `record_replay` the test's execution is also recorded and replayed.
+fn run_wast(test: &WastTest, config: WastConfig, record_replay: bool) -> wasmtime::Result<()> {
     let test_config = &test.config;
 
     // Determine whether this test is expected to fail or pass. Regardless the
@@ -210,6 +237,20 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
     test_config.apply(&mut opts)?;
     let mut cfg = opts.config(None)?;
 
+    // Replay runs without the recording's fuel or epoch interruption.
+    #[cfg(feature = "rr")]
+    let replay_engine = if record_replay {
+        let mut replay = cfg.clone();
+        replay
+            .rr(Some(RrConfig::Replaying))
+            .consume_fuel(false)
+            .epoch_interruption(false);
+        cfg.rr(Some(RrConfig::Recording));
+        Some(Engine::new(&replay)?)
+    } else {
+        None
+    };
+
     let mut engines = vec![(Engine::new(&cfg), "default")];
 
     // For tests that use relaxed-simd test both the default engine and the
@@ -224,11 +265,20 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
 
     for (engine, desc) in engines {
         let result = engine.and_then(|engine| {
+            #[cfg(feature = "rr")]
+            if record_replay {
+                // Check that the test's configuration can be recorded.
+                Store::new_recording(&engine, ())?;
+            }
             let opts = opts.clone();
             let mut wast_context = WastContext::new(&engine, Async::Yes, move |store| {
                 opts.configure_store(store).unwrap();
             });
             wast_context.generate_dwarf(true);
+            #[cfg(feature = "rr")]
+            if let Some(engine) = &replay_engine {
+                wast_context.record_replay(engine.clone());
+            }
             wast_context.register_spectest(&SpectestConfig {
                 use_shared_memory: true,
                 suppress_prints: true,
@@ -250,6 +300,14 @@ fn run_wast(test: &WastTest, config: WastConfig) -> wasmtime::Result<()> {
                 .run_wast(test.path.to_str().unwrap(), test.contents.as_bytes())
                 .with_context(|| format!("failed to run spec test with {desc} engine"))
         });
+
+        // Many tests use features that can't be recorded.
+        if record_replay
+            && let Err(e) = &result
+            && format!("{e:#}").contains("record/replay does not support")
+        {
+            return Ok(());
+        }
 
         if should_fail {
             if result.is_ok() {

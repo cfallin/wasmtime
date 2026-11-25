@@ -2321,7 +2321,8 @@ impl Config {
     ///
     /// ## Default
     ///
-    /// This value defaults to `true`.
+    /// This value defaults to `true`. Engines that replay traces (see
+    /// [`Config::rr`]) ignore it and always initialize tables eagerly.
     pub fn table_lazy_init(&mut self, table_lazy_init: bool) -> &mut Self {
         self.tunables.table_lazy_init = Some(table_lazy_init);
         self
@@ -2835,6 +2836,11 @@ impl Config {
             }
             self.validate_rr_determinism_conflicts()?;
         }
+        // Replay suspends guest code on raw fibers that contain only generated
+        // code; the Pulley interpreter is Rust code.
+        if rr == Some(RrConfig::Replaying) && self.compiler_target().is_pulley() {
+            bail!("replay requires a native compilation target");
+        }
 
         let mut tunables = Tunables::default_for_target(&self.compiler_target())?;
 
@@ -2907,6 +2913,11 @@ impl Config {
 
         // Debuggers set watchpoints through linear memories' shadows.
         tunables.memory_watchpoints = tunables.debug_guest;
+        if rr == Some(RrConfig::Replaying) {
+            // A replay's store is read-only to the embedder, so reading a
+            // table must not have to initialize its elements.
+            tunables.table_lazy_init = false;
+        }
 
         // If no GC heap tunables are explicitly configured, copy the memory
         // tunables' configured values so that GC heaps default to the same
@@ -3680,8 +3691,8 @@ impl Config {
         Ok(())
     }
 
-    /// Enables recording (`Store::new_recording`) or replay, or with `None`
-    /// (the default) neither.
+    /// Enables recording (`Store::new_recording`) or replay (`rr::Replayer`),
+    /// or with `None` (the default) neither.
     ///
     /// Compiled artifacts are specific to this setting: for example, a module
     /// that was compiled for recording cannot be loaded for replay.
@@ -3690,6 +3701,7 @@ impl Config {
     /// Unless explicitly configured otherwise,
     /// this enables NaN canonicalization and deterministic relaxed SIMD;
     /// explicitly disabling either makes engine creation fail.
+    /// [`RrConfig::Replaying`] requires a native (non-Pulley) target.
     #[inline]
     pub fn rr(&mut self, cfg: Option<RrConfig>) -> &mut Self {
         self.tunables.rr = Some(cfg);

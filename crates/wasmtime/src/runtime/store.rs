@@ -1984,6 +1984,9 @@ impl StoreOpaque {
     ///   has its own `EpochState`, separate from `wasm_state`, because
     ///   the host API can also mutate it.)
     ///
+    /// Replay runs Wasm without going through the points above, so
+    /// `Replayer::run` calls this itself.
+    ///
     /// NB: there is intentionally no corresponding hook for transfers
     /// of control from the host to Wasm (calls into Wasm, returns from
     /// host functions or libcalls back to Wasm, or resumption of Wasm at

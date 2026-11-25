@@ -1,17 +1,22 @@
 use crate::prelude::*;
 use crate::runtime::vm::VMFuncRef;
-use crate::store::StoreOpaque;
+use crate::store::{StoreInner, StoreOpaque};
 use crate::{AsContextMut, Engine, Func, Memory, Store, ValRaw};
+use alloc::sync::Arc;
 use core::ops::Range;
 use core::ptr::NonNull;
 use wasmtime_environ::RrCallKind;
 
 mod codec;
+mod growth;
 mod init;
 mod objects;
+mod replay;
 
 use codec::{Kind, Reader};
+use growth::GrowthFailure;
 use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
+pub use replay::{ReplayStop, Replayer};
 
 /// The call ID with which `rr_enter` reports a call that is not recorded.
 const NOT_RECORDED: u32 = u32::MAX;
@@ -48,6 +53,7 @@ pub fn checksum_hex(checksum: &Checksum) -> String {
 ///
 /// Traces refer to the modules they instantiate only by [`Checksum`]; see
 /// [`Trace::module_checksums`].
+#[derive(Clone)]
 pub struct Trace {
     bytes: Vec<u8>,
 }
@@ -108,8 +114,6 @@ pub(crate) struct State {
 struct Session {
     objects: Objects,
     mode: Mode,
-    /// Memory ranges that the host may have written since the last flush.
-    dirty_ranges: TryVec<DirtyRange>,
     failure: Option<Error>,
 }
 
@@ -127,12 +131,44 @@ struct DirtyRange {
 }
 
 enum Mode {
-    Recording {
-        bytes: TryVec<u8>,
-        // Calls, and the called functions, that have not yet returned.
-        outstanding: TryVec<(RecordedCall, RecordedFunc)>,
-        next_call: u32,
-    },
+    Recording(Recording),
+    Replaying(Replaying),
+}
+
+/// The state of a store that is recording.
+#[derive(Default)]
+struct Recording {
+    bytes: TryVec<u8>,
+    /// Calls, and the called functions, that have not yet returned.
+    outstanding: TryVec<(RecordedCall, RecordedFunc)>,
+    next_call: u32,
+    /// Memory ranges that the host may have written since the last flush.
+    dirty_ranges: TryVec<DirtyRange>,
+}
+
+/// The state of a store that is replaying that the rest of the runtime needs;
+/// the [`Replayer`] owns everything else.
+#[derive(Default)]
+struct Replaying {
+    /// The guest growth failures that the running activation has yet to
+    /// reproduce, last first.
+    growth_failures: TryVec<GrowthFailure>,
+}
+
+impl Mode {
+    fn recording(&mut self) -> &mut Recording {
+        match self {
+            Mode::Recording(recording) => recording,
+            Mode::Replaying(_) => unreachable!("the store is not recording"),
+        }
+    }
+
+    fn replaying(&mut self) -> &mut Replaying {
+        match self {
+            Mode::Replaying(replaying) => replaying,
+            Mode::Recording(_) => unreachable!("the store is not replaying"),
+        }
+    }
 }
 
 impl State {
@@ -143,8 +179,12 @@ impl State {
     pub(crate) fn recording(&self) -> bool {
         matches!(
             self.session.as_deref().map(|s| &s.mode),
-            Some(Mode::Recording { .. })
+            Some(Mode::Recording(_))
         )
+    }
+
+    pub(crate) fn replaying(&self) -> bool {
+        self.active() && !self.recording()
     }
 
     /// Records that an active session cannot represent `operation`, which
@@ -173,9 +213,11 @@ impl Session {
 
     /// Appends a complete record when recording.
     fn append(&mut self, tag: u8, body: &[u8]) -> Result<()> {
-        let Mode::Recording { bytes, .. } = &mut self.mode;
-        codec::record(bytes, tag, body.len())?;
-        bytes.extend_from_slice(body)?;
+        let Mode::Recording(recording) = &mut self.mode else {
+            return Ok(());
+        };
+        codec::record(&mut recording.bytes, tag, body.len())?;
+        recording.bytes.extend_from_slice(body)?;
         Ok(())
     }
 }
@@ -213,16 +255,11 @@ impl<T: 'static> Store<T> {
     /// with recording, or on allocation failure.
     pub fn new_recording(engine: &Engine, data: T) -> Result<Self> {
         validate_recording_engine(engine)?;
-        let mut bytes = TryVec::new();
-        bytes.extend_from_slice(codec::MAGIC)?;
+        let mut recording = Recording::default();
+        recording.bytes.extend_from_slice(codec::MAGIC)?;
         let session = try_new::<Box<_>>(Session {
             objects: Objects::default(),
-            mode: Mode::Recording {
-                bytes,
-                outstanding: TryVec::new(),
-                next_call: 0,
-            },
-            dirty_ranges: TryVec::new(),
+            mode: Mode::Recording(recording),
             failure: None,
         })?;
         let mut this = Store::try_new(engine, data)?;
@@ -237,18 +274,18 @@ impl<T: 'static> Store<T> {
     /// recording is discarded and recording is disabled on the store.
     ///
     /// A recording may end while guest calls are unfinished, for example
-    /// after a host panic.
+    /// after a host panic; replay then ends with them suspended.
     pub fn finish_recording(&mut self) -> Result<Trace> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
         let flushed = store.rr_flush();
-        let session = store.rr.session.take().unwrap();
+        let mut session = store.rr.session.take().unwrap();
         store.vm_store_context_mut().recording = 0;
         if let Some(e) = session.failure {
             return Err(e);
         }
         flushed?;
-        let Mode::Recording { mut bytes, .. } = session.mode;
+        let mut bytes = core::mem::take(&mut session.mode.recording().bytes);
         codec::record(&mut bytes, codec::END, 0)?;
         Ok(Trace {
             bytes: bytes.into(),
@@ -259,6 +296,10 @@ impl<T: 'static> Store<T> {
 impl StoreOpaque {
     fn rr_session(&mut self) -> &mut Session {
         self.rr.session.as_deref_mut().unwrap()
+    }
+
+    fn rr_objects(&self) -> &Objects {
+        &self.rr.session.as_deref().unwrap().objects
     }
 
     /// Poisons an active session if recording failed, so that the trace can
@@ -306,10 +347,9 @@ impl StoreOpaque {
 
     fn rr_check(&self) -> Result<()> {
         if let Some(session) = &self.rr.session {
-            ensure!(
-                session.failure.is_none(),
-                "recording has failed; discard it with finish_recording"
-            );
+            if let Some(e) = &session.failure {
+                bail!("recording has failed; discard it with finish_recording: {e}");
+            }
         }
         Ok(())
     }
@@ -332,10 +372,9 @@ impl StoreOpaque {
     fn rr_flush_writes(&mut self) -> Result<()> {
         // Detach the dirty ranges and the trace while reading memories; this
         // never runs guest or embedder code.
-        let session = self.rr_session();
-        let mut dirty = core::mem::take(&mut session.dirty_ranges);
-        let Mode::Recording { bytes, .. } = &mut session.mode;
-        let mut bytes = core::mem::take(bytes);
+        let recording = self.rr_session().mode.recording();
+        let mut dirty = core::mem::take(&mut recording.dirty_ranges);
+        let mut bytes = core::mem::take(&mut recording.bytes);
         // Merge overlapping and adjacent ranges, so that each byte is recorded
         // once. Sorting enables the merge and does not change the trace's
         // meaning: the merged ranges are disjoint, and each record carries the
@@ -370,10 +409,9 @@ impl StoreOpaque {
             Ok(())
         })();
         dirty.clear();
-        let session = self.rr_session();
-        session.dirty_ranges = dirty;
-        let Mode::Recording { bytes: trace, .. } = &mut session.mode;
-        *trace = bytes;
+        let recording = self.rr_session().mode.recording();
+        recording.dirty_ranges = dirty;
+        recording.bytes = bytes;
         result
     }
 
@@ -384,10 +422,10 @@ impl StoreOpaque {
         let Some(id) = self.rr_memory_id(memory) else {
             return;
         };
-        let session = self.rr_session();
+        let dirty_ranges = &mut self.rr_session().mode.recording().dirty_ranges;
         // Writes are usually sequential, so coalesce with the previous range
         // here, in constant time; the flush merges any other overlaps.
-        if let Some(last) = session.dirty_ranges.last_mut()
+        if let Some(last) = dirty_ranges.last_mut()
             && last.memory == id
             && range.start <= last.bytes.end
             && last.bytes.start <= range.end
@@ -396,11 +434,11 @@ impl StoreOpaque {
             last.bytes.end = last.bytes.end.max(range.end);
             return;
         }
-        if let Err(oom) = session.dirty_ranges.push(DirtyRange {
+        if let Err(oom) = dirty_ranges.push(DirtyRange {
             memory: id,
             bytes: range,
         }) {
-            session.fail(oom.into());
+            self.rr_session().fail(oom.into());
         }
     }
 
@@ -483,13 +521,9 @@ impl StoreOpaque {
         }
         let session = self.rr_session();
         let bound = &session.objects.funcs[id];
-        let Mode::Recording {
-            bytes,
-            outstanding,
-            next_call,
-        } = &mut session.mode;
-        let call = *next_call;
-        *next_call = next_call
+        let recording = session.mode.recording();
+        let call = recording.next_call;
+        recording.next_call = call
             .checked_add(1)
             .filter(|c| *c != NOT_RECORDED)
             .ok_or_else(|| format_err!("too many recorded calls"))?;
@@ -497,6 +531,7 @@ impl StoreOpaque {
             RrCallKind::WasmToHost => codec::ENTER_HOST,
             RrCallKind::HostToWasm => codec::ENTER_WASM,
         };
+        let bytes = &mut recording.bytes;
         codec::record(bytes, tag, 8 + codec::values_len(&bound.params))?;
         bytes.extend_from_slice(&id.as_u32().to_le_bytes())?;
         bytes.extend_from_slice(&call.to_le_bytes())?;
@@ -506,7 +541,9 @@ impl StoreOpaque {
                 session.objects.encode_ref(ptr)
             })?
         };
-        outstanding.push((RecordedCall::from_u32(call), id))?;
+        recording
+            .outstanding
+            .push((RecordedCall::from_u32(call), id))?;
         Ok(call)
     }
 
@@ -565,7 +602,7 @@ impl StoreOpaque {
             return Ok(());
         }
         self.rr_flush()?;
-        let Mode::Recording { outstanding, .. } = &self.rr_session().mode;
+        let outstanding = &self.rr_session().mode.recording().outstanding;
         let position = outstanding
             .iter()
             .position(|(c, _)| *c == call)
@@ -579,9 +616,7 @@ impl StoreOpaque {
             }
         }
         let session = self.rr_session();
-        let Mode::Recording {
-            bytes, outstanding, ..
-        } = &mut session.mode;
+        let recording = session.mode.recording();
         let tag = match kind {
             RrCallKind::WasmToHost => codec::LEAVE_HOST,
             RrCallKind::HostToWasm => codec::LEAVE_WASM,
@@ -589,11 +624,17 @@ impl StoreOpaque {
         let results = &session.objects.funcs[func].results;
         // SAFETY: inherited from this function's contract.
         unsafe {
-            codec::outcome(bytes, tag, call, result, results, raw, |ptr| {
-                session.objects.encode_ref(ptr)
-            })?;
+            codec::outcome(
+                &mut recording.bytes,
+                tag,
+                call,
+                result,
+                results,
+                raw,
+                |ptr| session.objects.encode_ref(ptr),
+            )?;
         }
-        outstanding.swap_remove(position);
+        recording.outstanding.swap_remove(position);
         Ok(())
     }
 }

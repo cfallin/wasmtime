@@ -3,11 +3,13 @@
 //! Each record has a one-byte tag and a four-byte payload length. The format is
 //! versioned independently of Wasmtime: changing it requires changing MAGIC.
 
-use super::RecordedCall;
+use super::{Objects, RecordedCall};
 use crate::prelude::*;
-use crate::{Trap, ValRaw, ValType};
+use crate::store::StoreOpaque;
+use crate::{HeapType, RefType, Trap, ValRaw, ValType};
+use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0a";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0b";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -24,6 +26,8 @@ pub(super) const INSTANCE: u8 = 9;
 pub(super) const GLOBAL: u8 = 10;
 pub(super) const MEMORY: u8 = 11;
 pub(super) const TABLE: u8 = 12;
+/// A guest's failed `memory.grow` or `table.grow`; see `GrowthFailure`.
+pub(super) const GROWTH_FAILED: u8 = 13;
 
 pub(super) const UNSUPPORTED: &str =
     "record/replay does not support GC or typed reference boundaries";
@@ -75,6 +79,28 @@ impl Kind {
         };
         bytes.extend_from_slice(encoded)?;
         Ok(())
+    }
+
+    /// Decodes a list of types from [`Kind::encode`].
+    pub fn decode_list(bytes: &[u8]) -> Result<TryVec<Self>> {
+        let mut reader = Reader::new(bytes);
+        let mut kinds = TryVec::new();
+        while reader.end().is_err() {
+            kinds.push(reader.kind()?)?;
+        }
+        Ok(kinds)
+    }
+
+    pub fn ty(self) -> Result<ValType> {
+        Ok(match self {
+            Self::I32 => ValType::I32,
+            Self::I64 => ValType::I64,
+            Self::F32 => ValType::F32,
+            Self::F64 => ValType::F64,
+            Self::V128 => ValType::V128,
+            Self::FuncRef { nullable } => ValType::Ref(RefType::new(nullable, HeapType::Func)),
+            Self::Unsupported => bail!(UNSUPPORTED),
+        })
     }
 
     /// The size of a value of this type in a trace. Function references are
@@ -187,6 +213,7 @@ pub(super) unsafe fn outcome(
     Ok(())
 }
 
+/// A cursor over the bytes of a trace or of a record.
 pub(super) struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,
@@ -194,7 +221,32 @@ pub(super) struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+        Self::at(bytes, 0)
+    }
+
+    pub fn at(bytes: &'a [u8], position: usize) -> Self {
+        Self { bytes, position }
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// All bytes, regardless of what has been read.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Reads all remaining bytes.
+    pub fn rest(&mut self) -> &'a [u8] {
+        let rest = &self.bytes[self.position..];
+        self.position = self.bytes.len();
+        rest
+    }
+
+    /// The tag of the next record, if any.
+    pub fn peek_tag(&self) -> Option<u8> {
+        self.bytes.get(self.position).copied()
     }
 
     pub fn take(&mut self, len: usize) -> Result<&'a [u8]> {
@@ -214,6 +266,18 @@ impl<'a> Reader<'a> {
     }
     pub fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    pub fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
+    pub fn bool(&mut self) -> Result<bool> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => bail!("invalid boolean in trace"),
+        }
     }
 
     pub fn blob(&mut self) -> Result<&'a [u8]> {
@@ -237,6 +301,76 @@ impl<'a> Reader<'a> {
             "unexpected trailing trace data"
         );
         Ok(())
+    }
+
+    /// Reads a type from [`Kind::encode`].
+    pub fn kind(&mut self) -> Result<Kind> {
+        Ok(match self.u8()? {
+            0x7f => Kind::I32,
+            0x7e => Kind::I64,
+            0x7d => Kind::F32,
+            0x7c => Kind::F64,
+            0x7b => Kind::V128,
+            0x70 => Kind::FuncRef { nullable: true },
+            0x64 if self.u8()? == 0x70 => Kind::FuncRef { nullable: false },
+            _ => bail!("invalid value type in trace"),
+        })
+    }
+
+    pub fn value(&mut self, kind: Kind, store: &StoreOpaque, objects: &Objects) -> Result<ValRaw> {
+        Ok(match kind {
+            Kind::I32 => ValRaw::u32(self.u32()?),
+            Kind::I64 => ValRaw::u64(self.u64()?),
+            Kind::F32 => ValRaw::f32(self.u32()?),
+            Kind::F64 => ValRaw::f64(self.u64()?),
+            Kind::V128 => ValRaw::v128(u128::from_le_bytes(self.take(16)?.try_into().unwrap())),
+            Kind::FuncRef { nullable } => {
+                ValRaw::funcref(match objects.decode_ref(self.u32()?)? {
+                    Some(func) => func.vm_func_ref(store).as_ptr().cast(),
+                    None => {
+                        ensure!(nullable, "null value of non-nullable type in trace");
+                        core::ptr::null_mut()
+                    }
+                })
+            }
+            Kind::Unsupported => bail!(UNSUPPORTED),
+        })
+    }
+
+    /// Reads values into the first of `slots`.
+    pub fn values(
+        &mut self,
+        kinds: &[Kind],
+        slots: &mut [MaybeUninit<ValRaw>],
+        store: &StoreOpaque,
+        objects: &Objects,
+    ) -> Result<()> {
+        ensure!(slots.len() >= kinds.len(), "not enough value slots");
+        for (kind, slot) in kinds.iter().zip(slots) {
+            slot.write(self.value(*kind, store, objects)?);
+        }
+        Ok(())
+    }
+
+    /// Reads how a call returned, from [`outcome`], after its call ID. If it
+    /// succeeded, its results are written to the first of `slots`.
+    pub fn outcome(
+        &mut self,
+        kinds: &[Kind],
+        slots: &mut [MaybeUninit<ValRaw>],
+        store: &StoreOpaque,
+        objects: &Objects,
+    ) -> Result<Result<()>> {
+        let result = match self.u8()? {
+            0 => Ok(self.values(kinds, slots, store, objects)?),
+            1 => Err(Trap::from_u8(self.u8()?)
+                .ok_or_else(|| format_err!("invalid trap code in trace"))?
+                .into()),
+            2 => Err(format_err!("{}", core::str::from_utf8(self.rest())?)),
+            _ => bail!("invalid outcome in trace"),
+        };
+        self.end()?;
+        Ok(result)
     }
 }
 
@@ -262,6 +396,7 @@ mod tests {
         ] {
             let mut bytes = TryVec::new();
             kind.encode(&mut bytes)?;
+            assert_eq!(*Kind::decode_list(&bytes)?, [kind]);
             let mut reader = wasmparser::BinaryReader::new(&bytes, 0);
             assert_eq!(reader.read::<ValType>()?, ty);
             assert!(reader.eof());

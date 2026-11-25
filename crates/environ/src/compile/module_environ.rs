@@ -914,10 +914,12 @@ impl<'a, 'data> ModuleEnvironment<'a, 'data> {
                             params: sig.params().into(),
                         });
                 }
-                if self.tunables.debug_guest {
+                if self.tunables.debug_guest || self.tunables.rr.is_some() {
                     // All functions are potentially reachable and
                     // callable by the guest debugger, so they must
-                    // all be flagged as escaping.
+                    // all be flagged as escaping. Record/replay also
+                    // requires this, so that the IDs of functions in
+                    // traces do not depend on the engine's configuration.
                     self.flag_func_escaped(func_index);
                 }
                 self.result

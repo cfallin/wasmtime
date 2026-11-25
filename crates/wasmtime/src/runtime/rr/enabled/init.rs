@@ -1,4 +1,4 @@
-//! Core object construction. Modules are recorded as the checksums of their
+//! Recording core object construction. Modules are recorded as the checksums of their
 //! Wasm bytecode, and host functions as their signatures.
 
 use super::*;
@@ -123,7 +123,7 @@ impl Session {
                     let global = store[instance.id].get_exported_global(store.id(), index);
                     self.import_global(store, global)?.as_u32()
                 }
-                _ => bail!("unsupported record/replay import"),
+                _ => bail!("record/replay does not support importing tags"),
             };
             body.extend_from_slice(&object.to_le_bytes())?;
         }
@@ -141,8 +141,8 @@ impl StoreOpaque {
         self.rr_flush()?;
         let mut session = self.rr.session.take().unwrap();
         let result = f(self, &mut session);
-        if result.is_err() {
-            session.fail(format_err!("failed to record object construction"));
+        if let Err(e) = &result {
+            session.fail(format_err!("failed to record object construction: {e}"));
         }
         self.rr.session = Some(session);
         result
@@ -198,12 +198,12 @@ impl StoreOpaque {
             let kind = Kind::new(&crate::ValType::Ref(ty.element().clone()));
             ensure!(
                 matches!(kind, Kind::FuncRef { .. }),
-                "record/replay requires a function table"
+                "record/replay does not support tables of GC or typed references"
             );
             let func = match init {
                 crate::Ref::Func(None) => 0,
                 crate::Ref::Func(Some(func)) => 1 + session.import_func(store, func)?.as_u32(),
-                _ => bail!("unsupported initial table element"),
+                _ => bail!("record/replay does not support tables of GC or typed references"),
             };
             let id = session.objects.add_table(store, table)?;
             let mut body = TryVec::new();
@@ -224,7 +224,9 @@ impl StoreOpaque {
         module: &Module,
     ) -> Result<()> {
         self.rr_register(|store, session| {
-            session.record_instance(store, instance, module)?;
+            if matches!(session.mode, Mode::Recording(_)) {
+                session.record_instance(store, instance, module)?;
+            }
             session.objects.register_instance(store, instance)?;
             Ok(())
         })
@@ -251,7 +253,8 @@ impl Objects {
         let (inst, registry) = id.get_mut_and_module_registry(store);
         // SAFETY: this instance belongs to store.
         if let Some(startup) = unsafe { inst.get_startup_func(registry, store_id) } {
-            self.add_func(store, startup)?;
+            let id = self.add_func(store, startup)?;
+            self.funcs[id].startup = true;
         }
         for i in 0..store[id].env_module().num_defined_memories() {
             // SAFETY: shared memories have been rejected before allocation.

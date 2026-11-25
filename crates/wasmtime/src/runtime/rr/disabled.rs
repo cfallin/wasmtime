@@ -2,6 +2,7 @@
 //! records.
 
 use crate::prelude::*;
+use crate::rr::Growable;
 use crate::runtime::vm::VMFuncRef;
 use crate::store::StoreOpaque;
 use crate::{Global, Instance, Memory, Module, Ref, Table, ValRaw, bail_bug};
@@ -57,6 +58,20 @@ impl StoreOpaque {
         _instance: Instance,
         _module: &Module,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn rr_replay_growth_fails(
+        &mut self,
+        _object: Growable,
+        _delta: u64,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    #[inline]
+    pub(crate) fn rr_growth_failed(&mut self, _object: Growable, _delta: u64) -> Result<()> {
         Ok(())
     }
 

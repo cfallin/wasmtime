@@ -56,6 +56,7 @@
 
 use crate::bail_bug;
 use crate::prelude::*;
+use crate::rr::Growable;
 use crate::runtime::store::{Asyncness, InstanceId, StoreOpaque};
 #[cfg(feature = "gc")]
 use crate::runtime::vm::VMGcRef;
@@ -250,9 +251,13 @@ fn memory_grow(
     memory_index: u32,
 ) -> Result<Option<AllocationSize>> {
     let memory_index = DefinedMemoryIndex::from_u32(memory_index);
+    let object = Growable::Memory(instance, memory_index);
     let (mut limiter, store) = store.resource_limiter_and_store_opaque();
     let limiter = limiter.as_mut();
-    block_on!(store, async |store, _| {
+    if store.rr_replay_growth_fails(object, delta)? {
+        return Ok(None);
+    }
+    let result = block_on!(store, async |store, _| {
         let instance = store.instance_mut(instance);
         let module = instance.env_module();
         let page_size_log2 = module.memories[module.memory_index(memory_index)].page_size_log2;
@@ -262,14 +267,27 @@ fn memory_grow(
             .await?
             .map(|size_in_bytes| AllocationSize(size_in_bytes >> page_size_log2));
 
-        // Whether growth fails depends on the host, so replay must reproduce
-        // the failure, but the trace does not represent it yet.
-        if result.is_none() {
-            store.rr.poison("failed guest memory growth");
-        }
-
         Ok(result)
-    })?
+    });
+    record_growth(store, object, delta, result.and_then(|r| r))
+}
+
+/// Records the result of guest growth, if it did not succeed.
+fn record_growth(
+    store: &mut StoreOpaque,
+    object: Growable,
+    delta: u64,
+    result: Result<Option<AllocationSize>>,
+) -> Result<Option<AllocationSize>> {
+    match result {
+        Ok(Some(_)) => {}
+        Ok(None) => store.rr_growth_failed(object, delta)?,
+        // The host stops the guest, by trapping or by being cancelled, at a
+        // point between two of its calls to or returns from the host, which
+        // the trace cannot represent.
+        Err(_) => store.rr.poison("guest execution stopping at growth"),
+    }
+    result
 }
 
 /// A helper structure to represent the return value of a memory or table growth
@@ -317,21 +335,21 @@ unsafe fn table_grow(
     delta: u64,
 ) -> Result<Option<AllocationSize>> {
     let defined_table_index = DefinedTableIndex::from_u32(defined_table_index);
+    let object = Growable::Table(instance, defined_table_index);
     let (mut limiter, store) = store.resource_limiter_and_store_opaque();
     let limiter = limiter.as_mut();
-    block_on!(store, async |store, _| unsafe {
+    if store.rr_replay_growth_fails(object, delta)? {
+        return Ok(None);
+    }
+    let result = block_on!(store, async |store, _| unsafe {
         let result = store
             .instance_mut(instance)
             .defined_table_grow(defined_table_index, limiter, delta)
             .await?
             .map(AllocationSize);
-        // Whether growth fails depends on the host, so replay must reproduce
-        // the failure, but the trace does not represent it yet.
-        if result.is_none() {
-            store.rr.poison("failed guest table growth");
-        }
         Ok(result)
-    })?
+    });
+    record_growth(store, object, delta, result.and_then(|r| r))
 }
 
 fn passive_elem_segment_len(

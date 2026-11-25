@@ -500,3 +500,27 @@ impl RrCallKind {
         }
     }
 }
+
+/// Why a replay activation yielded, in `VMReplayControl::reason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum RrYield {
+    /// It called a host function.
+    HostCall = 1,
+    /// Its entry function returned.
+    Returned = 2,
+    /// Its entry function trapped.
+    Trapped = 3,
+}
+
+impl RrYield {
+    /// Returns the variant with the given discriminant, if any.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::HostCall),
+            2 => Some(Self::Returned),
+            3 => Some(Self::Trapped),
+            _ => None,
+        }
+    }
+}

@@ -25,3 +25,4 @@ serde_json = { workspace = true }
 [features]
 component-model = ['wasmtime/component-model']
 component-model-async = ['wasmtime/component-model-async']
+rr = ['wasmtime/rr']

@@ -42,7 +42,11 @@ define_ids! {
 }
 
 pub(super) struct FuncInfo {
+    pub func: Func,
     pub host: bool,
+    /// Whether this is an instance's startup function, which is not a function
+    /// of its module and so cannot be referred to.
+    pub startup: bool,
     pub params: TryVec<Kind>,
     pub results: TryVec<Kind>,
 }
@@ -53,9 +57,9 @@ pub(super) struct Objects {
     funcs_by_key: TryHashMap<VMFuncRefHashKey, RecordedFunc>,
     pub memories: TryPrimaryMap<RecordedMemory, Memory>,
     memories_by_key: TryHashMap<MemoryHashKey, RecordedMemory>,
-    globals: TryPrimaryMap<RecordedGlobal, crate::Global>,
+    pub globals: TryPrimaryMap<RecordedGlobal, crate::Global>,
     globals_by_key: TryHashMap<GlobalHashKey, RecordedGlobal>,
-    tables: TryPrimaryMap<RecordedTable, crate::Table>,
+    pub tables: TryPrimaryMap<RecordedTable, crate::Table>,
     tables_by_key: TryHashMap<TableHashKey, RecordedTable>,
     pub modules: TryPrimaryMap<RecordedModule, crate::Module>,
 }
@@ -75,6 +79,26 @@ impl Objects {
         let func = unsafe { ptr.as_ref() };
         // Cannot overflow: `u32::MAX` is not a valid ID.
         Ok(1 + self.find_func_ref(func)?.as_u32())
+    }
+
+    /// The function that `id` refers to in a trace.
+    pub fn referable_func(&self, id: RecordedFunc) -> Result<Func> {
+        let func = self
+            .funcs
+            .get(id)
+            .ok_or_else(|| format_err!("invalid function ID in trace"))?;
+        ensure!(
+            !func.startup,
+            "instance startup cannot be used as a function reference"
+        );
+        Ok(func.func)
+    }
+
+    /// Decodes a function reference from [`Objects::encode_ref`].
+    pub fn decode_ref(&self, id: u32) -> Result<Option<Func>> {
+        id.checked_sub(1)
+            .map(|id| self.referable_func(RecordedFunc::from_u32(id)))
+            .transpose()
     }
 
     pub fn add_func(&mut self, store: &StoreOpaque, func: Func) -> Result<RecordedFunc> {
@@ -111,7 +135,9 @@ impl Objects {
             bail!(codec::UNSUPPORTED);
         }
         let id = self.funcs.push(FuncInfo {
+            func,
             host,
+            startup: false,
             params,
             results,
         })?;

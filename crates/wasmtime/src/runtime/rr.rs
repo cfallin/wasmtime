@@ -6,6 +6,12 @@
 //! Traces identify core modules only by the checksums of their bytecode, so
 //! that they stay small.
 //!
+//! A `Replayer` replays a trace: it compiles each module from bytecode that the
+//! embedder provides, and executes guest code without invoking the original
+//! host functions. It requires a compiler and a native (non-Pulley) target, and
+//! is unsupported under Miri, with AddressSanitizer, and with hardware-enforced
+//! shadow stacks.
+//!
 //! Core function boundaries support numbers, vectors, and abstract function
 //! references. Modules that use GC or exceptions are unsupported.
 //! Shared memory, host table/global mutation, call hooks,
@@ -24,6 +30,9 @@
 //! host-supplied data and can be large; applications should impose their own
 //! storage limits.
 
+use crate::store::InstanceId;
+use wasmtime_environ::{DefinedMemoryIndex, DefinedTableIndex};
+
 // The rest of the runtime uses record/replay through the crate-private API that
 // both of these modules provide, which does nothing when the feature is
 // disabled.
@@ -37,3 +46,11 @@ pub use enabled::*;
 mod disabled;
 #[cfg(not(feature = "rr"))]
 pub(crate) use disabled::*;
+
+/// An object that guest code can grow.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "rr"), expect(dead_code, reason = "never recorded"))]
+pub(crate) enum Growable {
+    Memory(InstanceId, DefinedMemoryIndex),
+    Table(InstanceId, DefinedTableIndex),
+}

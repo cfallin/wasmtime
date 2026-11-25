@@ -489,7 +489,7 @@ impl Memory {
     /// Like [`Memory::data_mut`], but does not note that the memory may be
     /// written if `store` is recording; the caller must do so for any range
     /// that it writes.
-    fn data_mut_untracked<'a>(&self, store: &'a mut StoreOpaque) -> &'a mut [u8] {
+    pub(crate) fn data_mut_untracked<'a>(&self, store: &'a mut StoreOpaque) -> &'a mut [u8] {
         let definition = store[self.instance].memory(self.index);
         debug_assert!(!self.wasmtime_ty(store).shared);
         // SAFETY: the store, which owns this non-shared memory, is exclusively
