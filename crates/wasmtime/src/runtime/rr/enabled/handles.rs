@@ -1,16 +1,17 @@
 //! References to GC objects in traces.
 //!
-//! A trace refers to GC objects by *handle*. A handle is created when a
-//! reference to an object that has none passes from the guest to the host, or
-//! when the host creates an `externref`, which are both recorded, so replay
-//! creates the same handles at the same points. The host can then pass the
-//! object to the guest.
+//! A trace refers to GC objects by *handle*. A handle is created when the
+//! host first has a reference to an object: when one passes from the guest to
+//! the host, or the host allocates the object or reads a reference to it (see
+//! `host_gc`). All of these are recorded, so replay creates the same handles at
+//! the same points. The host can then pass the object to the guest, or write to
+//! it.
 //!
 //! Handles are not identities, so nothing needs to be known of objects that do
-//! not cross the boundary, or after the host is done with them. A handle keeps
+//! the host does not see, or after the host is done with them. A handle keeps
 //! its object alive, in recordings and replays alike, until a recording notices
 //! that the host has no roots for it, and records that it is released. If the
-//! object later crosses the boundary again then it has a new handle.
+//! host later sees the object again then it has a new handle.
 
 use super::*;
 use crate::runtime::vm::VMGcRef;
@@ -18,6 +19,10 @@ use crate::{HeapTopType, Ref, ValType};
 use alloc::collections::BTreeMap;
 #[cfg(feature = "gc")]
 use wasmtime_environ::VMGcKind;
+
+/// Why an object has no handle.
+pub(super) const NO_HANDLE: &str =
+    "record/replay does not support GC objects that the host got from a frame's locals or stack";
 
 /// The number of handles to create before first looking for those to release.
 const FIRST_PRUNE: usize = 1024;
@@ -45,6 +50,24 @@ impl Handles {
             .get_or_insert_with(|| refs.iter().map(|(h, r)| (r.as_raw_u32(), *h)).collect())
     }
 
+    /// The handle of the object of a raw reference.
+    pub fn find(&self, raw: u32) -> Option<u32> {
+        match &self.by_raw {
+            Some(by_raw) => by_raw.get(&raw).copied(),
+            None => self
+                .refs
+                .iter()
+                .find_map(|(h, r)| (r.as_raw_u32() == raw).then_some(*h)),
+        }
+    }
+
+    /// The object of a handle.
+    pub fn get(&self, handle: u32) -> Result<VMGcRef> {
+        let gc_ref = self.refs.get(&handle);
+        let gc_ref = gc_ref.ok_or_else(|| format_err!("invalid GC handle in trace"))?;
+        Ok(gc_ref.unchecked_copy())
+    }
+
     /// Encodes a raw reference, whose object must have a handle.
     pub fn encode(&self, raw: u32) -> Result<u64> {
         let Some(gc_ref) = VMGcRef::from_raw_u32(raw) else {
@@ -53,19 +76,7 @@ impl Handles {
         if let Some(i31) = gc_ref.as_i31() {
             return Ok(I31 | u64::from(i31.get_u32()));
         }
-        let handle = match &self.by_raw {
-            Some(by_raw) => by_raw.get(&raw).copied(),
-            None => self
-                .refs
-                .iter()
-                .find_map(|(h, r)| (r.as_raw_u32() == raw).then_some(*h)),
-        };
-        let handle = handle.ok_or_else(|| {
-            format_err!(
-                "record/replay does not support passing the guest GC objects that the host \
-                 allocated, or that it read from the guest's state"
-            )
-        })?;
+        let handle = self.find(raw).ok_or_else(|| format_err!(NO_HANDLE))?;
         Ok(HANDLE | u64::from(handle))
     }
 
@@ -79,11 +90,7 @@ impl Handles {
                 let i31 = i31.ok_or_else(|| format_err!("invalid i31ref in trace"))?;
                 Ok(Some(VMGcRef::from_i31(i31)))
             }
-            HANDLE => {
-                let gc_ref = self.refs.get(&low);
-                let gc_ref = gc_ref.ok_or_else(|| format_err!("invalid GC handle in trace"))?;
-                Ok(Some(gc_ref.unchecked_copy()))
-            }
+            HANDLE => Ok(Some(self.get(low)?)),
             _ => bail!("invalid GC reference in trace"),
         }
     }
@@ -216,19 +223,38 @@ impl StoreOpaque {
         Ok(())
     }
 
-    /// Records the creation of an `externref` by the host.
-    #[cfg(feature = "gc")]
-    pub(crate) fn rr_created_externref(&mut self, gc_ref: &VMGcRef) -> Result<()> {
-        if !self.rr.recording() {
-            return Ok(());
-        }
-        let raw = gc_ref.as_raw_u32();
-        let result = (|| {
-            self.rr_flush()?;
-            self.rr_create_handle(raw)?;
-            self.rr_session().append(codec::EXTERNREF, &[])
-        })();
-        self.rr_poison_on_err(result)
+    /// The raw representation of a value, without exposing it to Wasm.
+    pub(super) fn rr_val_raw(&self, val: &crate::Val) -> Result<(Kind, ValRaw)> {
+        let gc_ref = Kind::GcRef { nullable: true };
+        let func_ref = Kind::FuncRef { nullable: true };
+        Ok(match val {
+            crate::Val::I32(v) => (Kind::I32, ValRaw::i32(*v)),
+            crate::Val::I64(v) => (Kind::I64, ValRaw::i64(*v)),
+            crate::Val::F32(v) => (Kind::F32, ValRaw::f32(*v)),
+            crate::Val::F64(v) => (Kind::F64, ValRaw::f64(*v)),
+            crate::Val::V128(v) => (Kind::V128, ValRaw::v128(v.as_u128())),
+            crate::Val::FuncRef(None) => (func_ref, ValRaw::funcref(core::ptr::null_mut())),
+            crate::Val::FuncRef(Some(func)) => {
+                let raw = func.vm_func_ref(self).as_ptr().cast();
+                (func_ref, ValRaw::funcref(raw))
+            }
+            crate::Val::ExternRef(None) | crate::Val::AnyRef(None) | crate::Val::ExnRef(None) => {
+                (gc_ref, ValRaw::anyref(0))
+            }
+            crate::Val::ExternRef(Some(r)) => {
+                let raw = r.try_gc_ref(self)?.as_raw_u32();
+                (gc_ref, ValRaw::anyref(raw))
+            }
+            crate::Val::AnyRef(Some(r)) => {
+                let raw = r.try_gc_ref(self)?.as_raw_u32();
+                (gc_ref, ValRaw::anyref(raw))
+            }
+            crate::Val::ExnRef(Some(r)) => {
+                let raw = r.try_gc_ref(self)?.as_raw_u32();
+                (gc_ref, ValRaw::anyref(raw))
+            }
+            crate::Val::ContRef(_) => bail!(codec::UNSUPPORTED),
+        })
     }
 
     /// Checks that a decoded reference, if it is one, is of type `ty`.
@@ -312,4 +338,9 @@ impl StoreOpaque {
             unsafe { roots.add_vmgcref_root(gc_ref.into(), "record/replay handle") }
         }
     }
+}
+
+#[cfg(not(feature = "gc"))]
+impl StoreOpaque {
+    pub(crate) fn rr_note_read(&self, _gc_ref: Option<&VMGcRef>, _source: crate::rr::GcSource) {}
 }

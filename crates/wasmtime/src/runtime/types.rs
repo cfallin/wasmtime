@@ -2301,7 +2301,7 @@ impl ArrayType {
         Engine::same(self.registered_type.engine(), engine)
     }
 
-    #[cfg(feature = "gc")]
+    #[cfg(any(feature = "gc", feature = "rr"))]
     pub(crate) fn registered_type(&self) -> &RegisteredType {
         &self.registered_type
     }
@@ -2407,6 +2407,11 @@ impl Display for FuncType {
 }
 
 impl FuncType {
+    #[cfg(feature = "rr")]
+    pub(crate) fn registered_type(&self) -> &RegisteredType {
+        &self.registered_type
+    }
+
     /// Creates a new function type from the given parameters and results.
     ///
     /// The function type returned will represent a function which takes

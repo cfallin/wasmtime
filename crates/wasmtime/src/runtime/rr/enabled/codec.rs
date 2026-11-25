@@ -6,10 +6,12 @@
 use super::{Handles, Objects, RecordedCall};
 use crate::prelude::*;
 use crate::store::StoreOpaque;
-use crate::{HeapTopType, HeapType, RefType, Trap, ValRaw, ValType};
+use crate::{
+    FieldType, HeapTopType, HeapType, Mutability, RefType, StorageType, Trap, ValRaw, ValType,
+};
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0f";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x10";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -32,13 +34,50 @@ pub(super) const GROWTH_FAILED: u8 = 13;
 pub(super) const GLOBAL_WRITE: u8 = 14;
 /// An embedder-defined event: `[tag, postcard payload]`.
 pub(super) const EVENT: u8 = 15;
-/// A type of GC object or function: `[id, module, index of a type in it]`.
+/// A type of GC object or function: `[id, kind]` and
+/// - `TYPE_MODULE`: `[module, index of a type in it]`
+/// - `TYPE_FUNC`: `[finality and supertype, params, results]`
+/// - `TYPE_STRUCT` and `TYPE_ARRAY`: `[finality and supertype, fields]`
 pub(super) const TYPE: u8 = 16;
-/// The host's creation of an `externref`, for the next handle.
-#[cfg(feature = "gc")]
-pub(super) const EXTERNREF: u8 = 17;
+pub(super) const TYPE_MODULE: u8 = 0;
+pub(super) const TYPE_FUNC: u8 = 1;
+pub(super) const TYPE_STRUCT: u8 = 2;
+pub(super) const TYPE_ARRAY: u8 = 3;
 /// The release of a GC handle: `[handle]`.
 pub(super) const RELEASE: u8 = 18;
+/// A tag that the host created: `[id, type]`.
+pub(super) const TAG: u8 = 19;
+
+/// The host's allocation of an object, for the next handle: `[kind]` and
+/// - `ALLOC_EXTERN`: nothing, as the guest can't observe host data
+/// - `ALLOC_STRUCT`: `[type, fields]`
+/// - `ALLOC_ARRAY`: `[type, length, value of all elements or of each]`
+/// - `ALLOC_BYTES`: `[type, bytes]`
+/// - `ALLOC_EXN`: `[tag, fields]`
+#[cfg(feature = "gc")]
+pub(super) const ALLOC: u8 = 17;
+/// The host's read of a reference to an object, for the next handle:
+/// `[kind, global, table, or handle, index]`.
+#[cfg(feature = "gc")]
+pub(super) const READ: u8 = 20;
+/// The host's write to a field or element: `[handle, index, value]`.
+#[cfg(feature = "gc")]
+pub(super) const OBJECT_WRITE: u8 = 21;
+
+#[cfg(feature = "gc")]
+mod host_gc {
+    pub const ALLOC_EXTERN: u8 = 0;
+    pub const ALLOC_STRUCT: u8 = 1;
+    pub const ALLOC_ARRAY: u8 = 2;
+    pub const ALLOC_BYTES: u8 = 3;
+    pub const ALLOC_EXN: u8 = 4;
+
+    pub const READ_GLOBAL: u8 = 0;
+    pub const READ_TABLE: u8 = 1;
+    pub const READ_OBJECT: u8 = 2;
+}
+#[cfg(feature = "gc")]
+pub(super) use host_gc::*;
 
 pub(super) const UNSUPPORTED: &str =
     "record/replay does not support continuation references at boundaries";
@@ -143,6 +182,17 @@ pub(super) fn val_type(bytes: &mut TryVec<u8>, ty: &ValType, objects: &Objects) 
         id >>= 7;
     }
     bytes.push(u8::try_from(id)?)?;
+    Ok(())
+}
+
+/// Appends a type in the encoding of a `fieldtype` in the Wasm binary format.
+pub(super) fn field_type(bytes: &mut TryVec<u8>, ty: &FieldType, objects: &Objects) -> Result<()> {
+    match ty.element_type() {
+        StorageType::I8 => bytes.push(0x78)?,
+        StorageType::I16 => bytes.push(0x77)?,
+        StorageType::ValType(ty) => val_type(bytes, ty, objects)?,
+    }
+    bytes.push(u8::from(ty.mutability().is_var()))?;
     Ok(())
 }
 
@@ -400,6 +450,27 @@ impl<'a> Reader<'a> {
                 None => bail!("invalid value type in trace"),
             },
         })
+    }
+
+    /// Reads a type from [`field_type`].
+    pub fn field_type(&mut self, objects: &Objects) -> Result<FieldType> {
+        let storage = match self.peek_tag() {
+            Some(code @ (0x78 | 0x77)) => {
+                self.u8()?;
+                if code == 0x78 {
+                    StorageType::I8
+                } else {
+                    StorageType::I16
+                }
+            }
+            _ => StorageType::ValType(self.val_type(objects)?),
+        };
+        let mutability = if self.bool()? {
+            Mutability::Var
+        } else {
+            Mutability::Const
+        };
+        Ok(FieldType::new(mutability, storage))
     }
 
     /// Reads a list of types that fills the rest of these bytes.

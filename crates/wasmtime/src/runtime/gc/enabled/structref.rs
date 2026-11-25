@@ -1,6 +1,7 @@
 //! Working with GC `struct` objects.
 #![cfg(feature = "gc")]
 
+use crate::rr::Allocation;
 use crate::runtime::vm::VMGcRef;
 use crate::store::{Asyncness, StoreId};
 #[cfg(feature = "async")]
@@ -248,13 +249,15 @@ impl StructRef {
             .as_context_mut()
             .0
             .validate_sync_resource_limiter_and_store_opaque()?;
-        vm::assert_ready(Self::_new_async(
+        let object = vm::assert_ready(Self::_new_async(
             store,
             limiter.as_mut(),
             allocator,
             fields,
             Asyncness::No,
-        ))
+        ))?;
+        store.rr_allocated(&object, Allocation::Struct(&allocator.ty, fields))?;
+        Ok(object)
     }
 
     /// Asynchronously allocate a new `struct` and get a reference to it.
@@ -290,7 +293,10 @@ impl StructRef {
         fields: &[Val],
     ) -> Result<Rooted<StructRef>> {
         let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
-        Self::_new_async(store, limiter.as_mut(), allocator, fields, Asyncness::Yes).await
+        let object =
+            Self::_new_async(store, limiter.as_mut(), allocator, fields, Asyncness::Yes).await?;
+        store.rr_allocated(&object, Allocation::Struct(&allocator.ty, fields))?;
+        Ok(object)
     }
 
     pub(crate) async fn _new_async(
@@ -613,13 +619,10 @@ impl StructRef {
     ///
     /// Panics if this reference is associated with a different store.
     pub fn set_field(&self, mut store: impl AsContextMut, index: usize, value: Val) -> Result<()> {
-        // The trace does not represent writes to GC objects by the host.
-        store
-            .as_context_mut()
-            .0
-            .rr
-            .reject("host mutation of GC objects")?;
-        self._set_field(store.as_context_mut().0, index, value)
+        let store = store.as_context_mut().0;
+        self._set_field(store, index, value)?;
+        let object = self.inner.try_gc_ref(store)?.as_raw_u32();
+        store.rr_object_written(object, u32::try_from(index)?, &value)
     }
 
     pub(crate) fn _set_field(

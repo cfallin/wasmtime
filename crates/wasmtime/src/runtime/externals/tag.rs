@@ -7,10 +7,15 @@ use crate::{
 };
 use wasmtime_environ::DefinedTagIndex;
 
-#[cfg(feature = "gc")]
+#[cfg(any(feature = "gc", feature = "rr"))]
 use crate::store::InstanceId;
 #[cfg(feature = "gc")]
 use wasmtime_environ::EntityRef;
+
+/// Identifies a tag within its store.
+#[cfg(feature = "rr")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TagHashKey(InstanceId, DefinedTagIndex);
 
 /// A WebAssembly `tag`.
 #[derive(Copy, Clone, Debug)]
@@ -36,7 +41,10 @@ impl Tag {
     /// memory allocation fails. See the `OutOfMemory` type's documentation for
     /// details on Wasmtime's out-of-memory handling.
     pub fn new(mut store: impl AsContextMut, ty: &TagType) -> Result<Tag> {
-        generate_tag_export(store.as_context_mut().0, ty)
+        let store = store.as_context_mut().0;
+        let tag = generate_tag_export(store, ty)?;
+        store.rr_created_tag(tag)?;
+        Ok(tag)
     }
 
     /// Returns the underlying type of this `tag`.
@@ -69,6 +77,11 @@ impl Tag {
 
     pub(crate) fn comes_from_same_store(&self, store: &StoreOpaque) -> bool {
         store.id() == self.instance.store_id()
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn hash_key(&self) -> TagHashKey {
+        TagHashKey(self.instance.instance(), self.index)
     }
 
     /// Returns a stable identifier for this tag within its store.

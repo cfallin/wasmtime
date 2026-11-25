@@ -18,11 +18,9 @@
 //! single steps, with guest debugging enabled on the replaying engine, and be
 //! rewound to checkpoints.
 //!
-//! Core function boundaries support numbers, vectors, and abstract function
-//! references. Guest code may use GC and typed function references, but they may
-//! not cross the host boundary, and the host may not write to GC objects. It may
-//! throw and catch exceptions, including those that reach the host, but host
-//! functions may not throw them. Importing tags is unsupported.
+//! Values of any type but continuation references can cross core function
+//! boundaries. The host's allocation of, reads of references from, and writes to
+//! GC objects are recorded, as are the exceptions that it throws.
 //! Shared memory, host table/global mutation, call hooks,
 //! custom signal handlers, Wasm stack switching, epoch deadline callbacks, and
 //! guest debugging are unsupported. Fuel and epoch interruption may yield to
@@ -55,6 +53,36 @@ pub use enabled::*;
 mod disabled;
 #[cfg(not(feature = "rr"))]
 pub(crate) use disabled::*;
+
+/// Where a reference to a GC object was read from.
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(all(feature = "rr", feature = "gc")),
+    expect(dead_code, reason = "never recorded")
+)]
+pub(crate) enum GcSource {
+    Global(crate::Global),
+    Table(crate::Table, u64),
+    /// The contents of an object, at an offset.
+    Object {
+        object: u32,
+        offset: u32,
+    },
+}
+
+/// The host's allocation of a GC object.
+#[cfg(feature = "gc")]
+#[cfg_attr(not(feature = "rr"), expect(dead_code, reason = "never recorded"))]
+pub(crate) enum Allocation<'a> {
+    Extern,
+    Struct(&'a crate::StructType, &'a [crate::Val]),
+    /// An array of some length, and either one value that all its elements
+    /// have, or each of their values.
+    Array(&'a crate::ArrayType, u32, &'a [crate::Val]),
+    /// An array of `i8`s.
+    Bytes(&'a crate::ArrayType, &'a [u8]),
+    Exn(&'a crate::Tag, &'a [crate::Val]),
+}
 
 /// An object that guest code can grow.
 #[derive(Clone, Copy)]

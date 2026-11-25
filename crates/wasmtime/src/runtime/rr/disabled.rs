@@ -2,10 +2,10 @@
 //! records.
 
 use crate::prelude::*;
-use crate::rr::Growable;
-use crate::runtime::vm::VMFuncRef;
+use crate::rr::{GcSource, Growable};
+use crate::runtime::vm::{VMFuncRef, VMGcRef};
 use crate::store::{InstanceId, StoreOpaque};
-use crate::{Global, Instance, Memory, Module, Ref, Table, ValRaw, bail_bug};
+use crate::{Global, Instance, Memory, Module, Ref, Table, Tag, ValRaw, bail_bug};
 use core::ops::Range;
 use core::ptr::NonNull;
 use wasmtime_environ::RrCallKind;
@@ -64,7 +64,39 @@ impl StoreOpaque {
 
     #[inline]
     #[cfg(feature = "gc")]
-    pub(crate) fn rr_created_externref(&mut self, _gc_ref: &crate::vm::VMGcRef) -> Result<()> {
+    pub(crate) fn rr_rooting(
+        &mut self,
+        _raw: u32,
+        _heap: crate::runtime::epoch_state::EpochStateHandle<Box<dyn crate::vm::GcHeap>>,
+    ) {
+    }
+
+    #[inline]
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_allocated<T: crate::GcRef>(
+        &mut self,
+        _object: &crate::Rooted<T>,
+        _allocation: crate::rr::Allocation<'_>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_object_written(
+        &mut self,
+        _object: u32,
+        _index: u32,
+        _value: &crate::Val,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn rr_note_read(&self, _gc_ref: Option<&VMGcRef>, _source: GcSource) {}
+
+    #[inline]
+    pub(crate) fn rr_created_tag(&mut self, _tag: Tag) -> Result<()> {
         Ok(())
     }
 

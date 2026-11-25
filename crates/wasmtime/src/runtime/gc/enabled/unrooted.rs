@@ -320,10 +320,17 @@ impl<T: GcRef> Unrooted<T> {
         }
     }
 
+    fn rr_rooting(&self, store: &mut StoreOpaque) {
+        if let Repr::Object { heap, raw } = self.repr {
+            store.rr_rooting(raw.get(), heap);
+        }
+    }
+
     /// Root this reference in the current LIFO rooting scope, after the caller
     /// has checked that it is valid; see `unchecked_gc_ref` for the
     /// conditions.
     pub(crate) fn to_rooted_unchecked(&self, store: &mut AutoAssertNoGc<'_>) -> Rooted<T> {
+        self.rr_rooting(store);
         let gc_ref = store.clone_gc_ref(&self.unchecked_gc_ref());
         Rooted::new(store, gc_ref)
     }
@@ -335,6 +342,7 @@ impl<T: GcRef> Unrooted<T> {
         &self,
         store: &mut AutoAssertNoGc<'_>,
     ) -> Result<OwnedRooted<T>> {
+        self.rr_rooting(store);
         let gc_ref = store.clone_gc_ref(&self.unchecked_gc_ref());
         Ok(OwnedRooted::new(store, gc_ref)?)
     }

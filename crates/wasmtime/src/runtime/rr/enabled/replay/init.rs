@@ -4,12 +4,13 @@
 use super::super::*;
 use super::Trampolines;
 use crate::runtime::vm;
+use crate::store::AutoAssertNoGc;
 use crate::{
-    ArrayType, Extern, FuncType, Global, GlobalType, HeapType, Instance, MemoryType, Module,
-    Mutability, Ref, StoreContextMut, StructType, Table, TableType, Val, ValType,
+    ArrayType, Extern, Finality, FuncType, Global, GlobalType, HeapType, Instance, MemoryType,
+    Module, Mutability, StoreContextMut, StructType, Table, TableType, Tag, TagType, Val, ValType,
 };
 use core::mem::MaybeUninit;
-use objects::{RecordedGlobal, RecordedModule, RecordedTable, RecordedType};
+use objects::{RecordedGlobal, RecordedModule, RecordedTable, RecordedTag, RecordedType};
 use wasmtime_environ::{EntityIndex, Initializer, TypeIndex, VMSharedTypeIndex};
 
 /// Replays a record of the construction of an object other than a module or an
@@ -35,15 +36,8 @@ pub(super) fn replay_object(
             check_id(RecordedFunc::from_u32(id), added?)?;
         }
         codec::TYPE => {
-            let module = RecordedModule::from_u32(body.u32()?);
-            let index = TypeIndex::from_u32(body.u32()?);
+            let ty = replay_type(store, body)?;
             body.end()?;
-            let modules = &store.rr_objects().modules;
-            let ty = modules
-                .get(module)
-                .and_then(|module| super::super::init::module_type(module, index))
-                .and_then(|index| heap_type(store.engine(), index))
-                .ok_or_else(|| format_err!("invalid type in trace"))?;
             let added = store.rr_session().objects.types.push(ty)?;
             check_id(RecordedType::from_u32(id), added)?;
         }
@@ -56,29 +50,8 @@ pub(super) fn replay_object(
             };
             let objects = store.rr_objects();
             check_id(RecordedGlobal::from_u32(id), objects.globals.next_key())?;
-            let mut raw = [MaybeUninit::uninit()];
-            body.values(core::slice::from_ref(&ty), &mut raw, store)?;
+            let value = value(store, body, &ty)?;
             body.end()?;
-            // SAFETY: `values` initialized this.
-            let raw = unsafe { raw[0].assume_init() };
-            let value = match Kind::new(&ty) {
-                Kind::I32 => Val::I32(raw.get_i32()),
-                Kind::I64 => Val::I64(raw.get_i64()),
-                Kind::F32 => Val::F32(raw.get_f32()),
-                Kind::F64 => Val::F64(raw.get_f64()),
-                Kind::V128 => Val::V128(raw.get_v128().into()),
-                // SAFETY: `values` decoded this store's function.
-                Kind::FuncRef { .. } => Val::FuncRef(unsafe {
-                    NonNull::new(raw.get_funcref().cast())
-                        .map(|f| Func::from_vm_func_ref(store.id(), f))
-                }),
-                Kind::GcRef { .. } => {
-                    ensure!(raw.get_anyref() == 0, "invalid global in trace");
-                    ty.default_value()
-                        .ok_or_else(|| format_err!("invalid global in trace"))?
-                }
-                Kind::Unsupported => bail!(codec::UNSUPPORTED),
-            };
             Global::new(
                 StoreContextMut(store),
                 GlobalType::new(ty, mutability),
@@ -106,13 +79,12 @@ pub(super) fn replay_object(
             };
             let table64 = body.bool()?;
             let (min, max) = limits(body)?;
-            let objects = store.rr_objects();
-            let init = match objects.decode_ref(body.u32()?)? {
-                Some(func) => Ref::Func(Some(func)),
-                None => Ref::null(element.heap_type()),
-            };
+            let next = store.rr_objects().tables.next_key();
+            let element_type = ValType::Ref(element.clone());
+            let init = value(store, body, &element_type)?;
+            let init = init.ref_().unwrap();
             body.end()?;
-            check_id(RecordedTable::from_u32(id), objects.tables.next_key())?;
+            check_id(RecordedTable::from_u32(id), next)?;
             let ty = if table64 {
                 TableType::new64(element, min, max)?
             } else {
@@ -123,6 +95,17 @@ pub(super) fn replay_object(
                 )?
             };
             Table::new(StoreContextMut(store), ty, init)?;
+        }
+        codec::TAG => {
+            let ty = RecordedType::from_u32(body.u32()?);
+            body.end()?;
+            let objects = store.rr_objects();
+            check_id(RecordedTag::from_u32(id), objects.tags.next_key())?;
+            let Some(HeapType::ConcreteFunc(ty)) = objects.types.get(ty).cloned() else {
+                bail!("invalid tag type in trace");
+            };
+            ensure!(ty.results().len() == 0, "invalid tag type in trace");
+            Tag::new(StoreContextMut(store), &TagType::new(ty))?;
         }
         _ => unreachable!(),
     }
@@ -160,7 +143,7 @@ pub(super) fn replay_instance(
             EntityIndex::Global(_) => {
                 Extern::Global(find(objects.globals.get(RecordedGlobal::from_u32(id)))?)
             }
-            _ => bail!("unsupported import in trace"),
+            EntityIndex::Tag(_) => Extern::Tag(find(objects.tags.get(RecordedTag::from_u32(id)))?),
         })?;
     }
     body.end()?;
@@ -177,6 +160,80 @@ pub(super) fn replay_instance(
         .map(|func| store.rr_objects().find_func(store, func))
         .transpose()?;
     Ok((instance, startup))
+}
+
+/// Reads a value, which is rooted in the current scope.
+pub(super) fn value(store: &mut StoreOpaque, body: &mut Reader<'_>, ty: &ValType) -> Result<Val> {
+    let mut slot = [MaybeUninit::uninit()];
+    body.values(core::slice::from_ref(ty), &mut slot, store)?;
+    let mut store = AutoAssertNoGc::new(store);
+    // SAFETY: `values` initialized this with a value of this store and type.
+    Ok(unsafe { Val::_from_raw(&mut store, slot[0].assume_init(), ty) })
+}
+
+fn replay_type(store: &StoreOpaque, body: &mut Reader<'_>) -> Result<HeapType> {
+    let engine = store.engine();
+    let objects = store.rr_objects();
+    let kind = body.u8()?;
+    if kind == codec::TYPE_MODULE {
+        let module = RecordedModule::from_u32(body.u32()?);
+        let index = TypeIndex::from_u32(body.u32()?);
+        return objects
+            .modules
+            .get(module)
+            .and_then(|module| super::super::init::module_type(module, index))
+            .and_then(|index| heap_type(engine, index))
+            .ok_or_else(|| format_err!("invalid type in trace"));
+    }
+    let finality = if body.bool()? {
+        Finality::Final
+    } else {
+        Finality::NonFinal
+    };
+    let supertype = body.u32()?.checked_sub(1).map(|id| {
+        let ty = objects.types.get(RecordedType::from_u32(id));
+        ty.ok_or_else(|| format_err!("invalid type ID in trace"))
+    });
+    let supertype = supertype.transpose()?;
+    Ok(match kind {
+        codec::TYPE_FUNC => {
+            let params = Reader::new(body.blob()?).val_types(objects)?;
+            let results = Reader::new(body.blob()?).val_types(objects)?;
+            let supertype = match supertype {
+                None => None,
+                Some(HeapType::ConcreteFunc(ty)) => Some(ty),
+                Some(_) => bail!("invalid supertype in trace"),
+            };
+            let ty = FuncType::with_finality_and_supertype(
+                engine, finality, supertype, params, results,
+            )?;
+            HeapType::ConcreteFunc(ty)
+        }
+        codec::TYPE_STRUCT => {
+            let mut fields = Vec::new();
+            while body.end().is_err() {
+                fields.push(body.field_type(objects)?);
+            }
+            let supertype = match supertype {
+                None => None,
+                Some(HeapType::ConcreteStruct(ty)) => Some(ty),
+                Some(_) => bail!("invalid supertype in trace"),
+            };
+            let ty = StructType::with_finality_and_supertype(engine, finality, supertype, fields)?;
+            HeapType::ConcreteStruct(ty)
+        }
+        codec::TYPE_ARRAY => {
+            let field = body.field_type(objects)?;
+            let supertype = match supertype {
+                None => None,
+                Some(HeapType::ConcreteArray(ty)) => Some(ty),
+                Some(_) => bail!("invalid supertype in trace"),
+            };
+            let ty = ArrayType::with_finality_and_supertype(engine, finality, supertype, field)?;
+            HeapType::ConcreteArray(ty)
+        }
+        _ => bail!("invalid type in trace"),
+    })
 }
 
 fn heap_type(engine: &Engine, index: VMSharedTypeIndex) -> Option<HeapType> {

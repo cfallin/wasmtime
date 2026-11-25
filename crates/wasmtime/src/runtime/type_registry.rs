@@ -429,6 +429,12 @@ impl RegisteredType {
         ))
     }
 
+    /// Whether this is the only type in its recursion group.
+    #[cfg(feature = "rr")]
+    pub fn is_only_type_in_rec_group(&self) -> bool {
+        self.entry.0.shared_type_indices.len() == 1
+    }
+
     /// Create an owning handle to the given index's associated type, if that
     /// index names a registered type.
     ///

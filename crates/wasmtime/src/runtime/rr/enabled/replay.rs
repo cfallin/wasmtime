@@ -16,6 +16,8 @@ mod activation;
 mod checkpoint;
 #[cfg(feature = "debug")]
 mod count;
+#[cfg(feature = "gc")]
+mod host_gc;
 mod image;
 mod init;
 #[cfg(feature = "debug")]
@@ -179,6 +181,8 @@ impl Replayer {
         store.as_context_mut().0.rr.session = Some(try_new::<Box<_>>(Session {
             objects: Objects::default(),
             handles: Handles::default(),
+            #[cfg(feature = "gc")]
+            reads: Default::default(),
             mode: Mode::Replaying(Replaying::default()),
             failure: None,
         })?);
@@ -550,9 +554,17 @@ impl Replayer {
             _ => {
                 self.require_idle()?;
                 match tag {
-                    codec::HOST | codec::TYPE | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
+                    codec::HOST
+                    | codec::TYPE
+                    | codec::GLOBAL
+                    | codec::MEMORY
+                    | codec::TABLE
+                    | codec::TAG => {
                         let store = self.store.as_context_mut().0;
-                        init::replay_object(store, &self.trampolines, tag, body)?;
+                        let scope = store.enter_gc_lifo_scope();
+                        let result = init::replay_object(store, &self.trampolines, tag, body);
+                        store.exit_gc_lifo_scope(scope);
+                        result?;
                         self.note_defined();
                         Ok(())
                     }
@@ -572,7 +584,11 @@ impl Replayer {
                     codec::RESIZE => self.resize(body),
                     codec::EVENT => self.event(body),
                     #[cfg(feature = "gc")]
-                    codec::EXTERNREF => self.create_externref(body),
+                    codec::ALLOC => self.allocate(body),
+                    #[cfg(feature = "gc")]
+                    codec::READ => self.read_ref(body),
+                    #[cfg(feature = "gc")]
+                    codec::OBJECT_WRITE => self.object_write(body),
                     codec::END => {
                         // Activations may remain parked at host calls if the
                         // recording ended while they were unfinished.
@@ -830,19 +846,6 @@ impl Replayer {
             .ok_or_else(|| format_err!("invalid memory size in trace"))?;
         memory.grow(StoreContextMut(store), delta / page_size)?;
         Ok(())
-    }
-
-    /// Replays the host's creation of an `externref`.
-    #[cfg(feature = "gc")]
-    fn create_externref(&mut self, body: &mut Reader<'_>) -> Result<()> {
-        body.end()?;
-        // This may collect garbage.
-        self.publish_parked(None)?;
-        let mut scope = crate::RootScope::new(&mut self.store);
-        let externref = crate::ExternRef::new(&mut scope, ())?;
-        let store = scope.as_context_mut().0;
-        let raw = externref.try_gc_ref(store)?.as_raw_u32();
-        store.rr_create_handle(raw)
     }
 
     /// Replays an embedder event.

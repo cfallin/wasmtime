@@ -409,6 +409,7 @@ impl Replayer {
                     | codec::GLOBAL
                     | codec::MEMORY
                     | codec::TABLE
+                    | codec::TAG
             )
         )
     }

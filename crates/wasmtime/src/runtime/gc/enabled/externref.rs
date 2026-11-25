@@ -2,6 +2,7 @@
 
 use super::AnyRef;
 use crate::prelude::*;
+use crate::rr::Allocation;
 use crate::runtime::vm::{self, VMGcRef};
 use crate::store::Asyncness;
 #[cfg(feature = "async")]
@@ -344,10 +345,10 @@ impl ExternRef {
                 },
             )?;
 
-        let gc_ref = gc_ref.into();
-        store.rr_created_externref(&gc_ref)?;
         let mut ctx = AutoAssertNoGc::new(store);
-        Ok(Self::from_cloned_gc_ref(&mut ctx, gc_ref))
+        let externref = Self::from_cloned_gc_ref(&mut ctx, gc_ref.into());
+        ctx.rr_allocated(&externref, Allocation::Extern)?;
+        Ok(externref)
     }
 
     /// Convert an `anyref` into an `externref`.

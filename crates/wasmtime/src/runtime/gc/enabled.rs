@@ -39,7 +39,10 @@ fn gc_layout(engine: &Engine, type_index: VMSharedTypeIndex) -> Result<GcLayout>
 /// Get the struct layout registered for `type_index`.
 ///
 /// See `gc_layout`.
-fn gc_struct_layout(engine: &Engine, type_index: VMSharedTypeIndex) -> Result<Arc<GcStructLayout>> {
+pub(crate) fn gc_struct_layout(
+    engine: &Engine,
+    type_index: VMSharedTypeIndex,
+) -> Result<Arc<GcStructLayout>> {
     match gc_layout(engine, type_index)? {
         GcLayout::Struct(s) => Ok(s),
         GcLayout::Array(_) => bail_bug!("expected a struct GC layout for {type_index:?}"),
@@ -49,7 +52,10 @@ fn gc_struct_layout(engine: &Engine, type_index: VMSharedTypeIndex) -> Result<Ar
 /// Get the array layout registered for `type_index`.
 ///
 /// See `gc_layout`.
-fn gc_array_layout(engine: &Engine, type_index: VMSharedTypeIndex) -> Result<GcArrayLayout> {
+pub(crate) fn gc_array_layout(
+    engine: &Engine,
+    type_index: VMSharedTypeIndex,
+) -> Result<GcArrayLayout> {
     match gc_layout(engine, type_index)? {
         GcLayout::Array(a) => Ok(a),
         GcLayout::Struct(_) => bail_bug!("expected an array GC layout for {type_index:?}"),

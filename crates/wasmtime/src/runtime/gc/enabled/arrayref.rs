@@ -1,5 +1,6 @@
 //! Working with GC `array` objects.
 
+use crate::rr::Allocation;
 use crate::runtime::vm::VMGcRef;
 use crate::store::{Asyncness, StoreId, StoreResourceLimiter};
 #[cfg(feature = "async")]
@@ -312,14 +313,19 @@ impl ArrayRef {
             .as_context_mut()
             .0
             .validate_sync_resource_limiter_and_store_opaque()?;
-        vm::assert_ready(Self::_new_async(
+        let object = vm::assert_ready(Self::_new_async(
             store,
             limiter.as_mut(),
             allocator,
             elem,
             len,
             Asyncness::No,
-        ))
+        ))?;
+        store.rr_allocated(
+            &object,
+            Allocation::Array(&allocator.ty, len, core::slice::from_ref(elem)),
+        )?;
+        Ok(object)
     }
 
     /// Asynchronously allocate a new `array` of the given length, with every
@@ -366,7 +372,7 @@ impl ArrayRef {
         len: u32,
     ) -> Result<Rooted<ArrayRef>> {
         let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
-        Self::_new_async(
+        let object = Self::_new_async(
             store,
             limiter.as_mut(),
             allocator,
@@ -374,7 +380,12 @@ impl ArrayRef {
             len,
             Asyncness::Yes,
         )
-        .await
+        .await?;
+        store.rr_allocated(
+            &object,
+            Allocation::Array(&allocator.ty, len, core::slice::from_ref(elem)),
+        )?;
+        Ok(object)
     }
 
     pub(crate) async fn _new_async(
@@ -493,13 +504,18 @@ impl ArrayRef {
             .as_context_mut()
             .0
             .validate_sync_resource_limiter_and_store_opaque()?;
-        vm::assert_ready(Self::_new_fixed_async(
+        let object = vm::assert_ready(Self::_new_fixed_async(
             store,
             limiter.as_mut(),
             allocator,
             elems,
             Asyncness::No,
-        ))
+        ))?;
+        store.rr_allocated(
+            &object,
+            Allocation::Array(&allocator.ty, u32::try_from(elems.len())?, elems),
+        )?;
+        Ok(object)
     }
 
     /// Asynchronously allocate a new `array` containing the given elements.
@@ -548,7 +564,14 @@ impl ArrayRef {
         elems: &[Val],
     ) -> Result<Rooted<ArrayRef>> {
         let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
-        Self::_new_fixed_async(store, limiter.as_mut(), allocator, elems, Asyncness::Yes).await
+        let object =
+            Self::_new_fixed_async(store, limiter.as_mut(), allocator, elems, Asyncness::Yes)
+                .await?;
+        store.rr_allocated(
+            &object,
+            Allocation::Array(&allocator.ty, u32::try_from(elems.len())?, elems),
+        )?;
+        Ok(object)
     }
 
     pub(crate) async fn _new_fixed_async(
@@ -609,13 +632,15 @@ impl ArrayRef {
             .as_context_mut()
             .0
             .validate_sync_resource_limiter_and_store_opaque()?;
-        vm::assert_ready(Self::_new_from_i8_slice_async(
+        let object = vm::assert_ready(Self::_new_from_i8_slice_async(
             store,
             limiter.as_mut(),
             allocator,
             elems,
             Asyncness::No,
-        ))
+        ))?;
+        store.rr_allocated(&object, Allocation::Bytes(&allocator.ty, elems))?;
+        Ok(object)
     }
 
     /// Asynchronously allocate a new `i8` array initialized from the given
@@ -655,8 +680,16 @@ impl ArrayRef {
         elems: &[u8],
     ) -> Result<Rooted<ArrayRef>> {
         let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
-        Self::_new_from_i8_slice_async(store, limiter.as_mut(), allocator, elems, Asyncness::Yes)
-            .await
+        let object = Self::_new_from_i8_slice_async(
+            store,
+            limiter.as_mut(),
+            allocator,
+            elems,
+            Asyncness::Yes,
+        )
+        .await?;
+        store.rr_allocated(&object, Allocation::Bytes(&allocator.ty, elems))?;
+        Ok(object)
     }
 
     pub(crate) async fn _new_from_i8_slice_async(
@@ -1020,13 +1053,10 @@ impl ArrayRef {
     /// Panics if either this reference or the given `value` is associated with
     /// a different store.
     pub fn set(&self, mut store: impl AsContextMut, index: u32, value: Val) -> Result<()> {
-        // The trace does not represent writes to GC objects by the host.
-        store
-            .as_context_mut()
-            .0
-            .rr
-            .reject("host mutation of GC objects")?;
-        self._set(store.as_context_mut().0, index, value)
+        let store = store.as_context_mut().0;
+        self._set(store, index, value)?;
+        let object = self.inner.try_gc_ref(store)?.as_raw_u32();
+        store.rr_object_written(object, index, &value)
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, index: u32, value: Val) -> Result<()> {

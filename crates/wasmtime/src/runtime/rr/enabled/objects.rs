@@ -10,7 +10,7 @@
 //! versions of Wasmtime.
 
 use super::*;
-use crate::runtime::externals::{GlobalHashKey, TableHashKey};
+use crate::runtime::externals::{GlobalHashKey, TableHashKey, TagHashKey};
 use crate::runtime::memory::MemoryHashKey;
 use crate::runtime::vm::VMFuncRefHashKey;
 use wasmtime_environ::collections::TryPrimaryMap;
@@ -35,6 +35,8 @@ define_ids! {
     RecordedGlobal;
     /// The ID of a table in a trace.
     RecordedTable;
+    /// The ID of a tag in a trace.
+    RecordedTag;
     /// The ID of a module in a trace.
     RecordedModule;
     /// The ID of a concrete type in a trace.
@@ -63,6 +65,8 @@ pub(super) struct Objects {
     globals_by_key: TryHashMap<GlobalHashKey, RecordedGlobal>,
     pub tables: TryPrimaryMap<RecordedTable, crate::Table>,
     tables_by_key: TryHashMap<TableHashKey, RecordedTable>,
+    pub tags: TryPrimaryMap<RecordedTag, crate::Tag>,
+    tags_by_key: TryHashMap<TagHashKey, RecordedTag>,
     /// The globals that are flags of component instances.
     pub flags: TryVec<RecordedGlobal>,
     /// Concrete types.
@@ -92,7 +96,10 @@ impl Objects {
             .iter()
             .find_map(|(id, t)| crate::HeapType::eq(t, ty).then_some(id))
             .ok_or_else(|| {
-                format_err!("record/replay does not support types that are not in a module")
+                format_err!(
+                    "record/replay does not support types of modules that have not been \
+                     instantiated"
+                )
             })
     }
 
@@ -211,6 +218,16 @@ impl Objects {
         global: crate::Global,
     ) -> Option<RecordedGlobal> {
         self.globals_by_key.get(&global.hash_key(store)).copied()
+    }
+
+    pub fn add_tag(&mut self, tag: crate::Tag) -> Result<RecordedTag> {
+        let id = self.tags.push(tag)?;
+        self.tags_by_key.insert(tag.hash_key(), id)?;
+        Ok(id)
+    }
+
+    pub fn find_tag(&self, tag: &crate::Tag) -> Option<RecordedTag> {
+        self.tags_by_key.get(&tag.hash_key()).copied()
     }
 
     pub fn add_table(&mut self, store: &StoreOpaque, table: crate::Table) -> Result<RecordedTable> {

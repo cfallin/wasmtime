@@ -2,12 +2,12 @@
 //! Wasm bytecode, and host functions as their signatures.
 
 use super::*;
-use crate::{Global, HeapType, Instance, Module, ValType};
+use crate::{Global, HeapType, Instance, Module, Tag, ValType};
 use objects::RecordedGlobal;
 use wasmtime_environ::packed_option::ReservedValue;
 use wasmtime_environ::{
-    DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, EngineOrModuleTypeIndex,
-    EntityIndex, TypeIndex, VMSharedTypeIndex,
+    DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, DefinedTagIndex,
+    EngineOrModuleTypeIndex, EntityIndex, TypeIndex, VMSharedTypeIndex,
 };
 
 /// The type at `index` in a module's type section.
@@ -20,13 +20,16 @@ pub(super) fn module_type(module: &Module, index: TypeIndex) -> Option<VMSharedT
 }
 
 impl Session {
-    /// Records a type's definition if it is a reference to a concrete type that
-    /// has not been recorded.
+    /// Records the definition of a concrete type that a value type refers to.
     fn record_type(&mut self, ty: &ValType) -> Result<()> {
-        let ValType::Ref(ty) = ty else {
-            return Ok(());
-        };
-        let ty = ty.heap_type();
+        match ty {
+            ValType::Ref(ty) => self.record_heap_type(ty.heap_type()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Records a concrete type's definition, if it has not been recorded.
+    pub(super) fn record_heap_type(&mut self, ty: &HeapType) -> Result<()> {
         let target = match ty {
             HeapType::ConcreteFunc(t) => t.type_index(),
             HeapType::ConcreteStruct(t) => t.type_index(),
@@ -42,13 +45,105 @@ impl Session {
                     let id = self.objects.types.push(ty.clone())?;
                     let mut body = TryVec::new();
                     body.extend_from_slice(&id.as_u32().to_le_bytes())?;
+                    body.push(codec::TYPE_MODULE)?;
                     body.extend_from_slice(&module_id.as_u32().to_le_bytes())?;
                     body.extend_from_slice(&index.as_u32().to_le_bytes())?;
                     return self.append(codec::TYPE, &body);
                 }
             }
         }
-        bail!("record/replay does not support types that are not in a module")
+        self.record_host_type(ty)
+    }
+
+    /// Records the definition of a type that the host created. The host can
+    /// only create types that are the only ones in their recursion groups, and
+    /// so do not refer to themselves.
+    fn record_host_type(&mut self, ty: &HeapType) -> Result<()> {
+        let (registered, finality, supertype) = match ty {
+            HeapType::ConcreteFunc(t) => (
+                t.registered_type(),
+                t.finality(),
+                t.supertype().map(HeapType::ConcreteFunc),
+            ),
+            HeapType::ConcreteStruct(t) => (
+                t.registered_type(),
+                t.finality(),
+                t.supertype().map(HeapType::ConcreteStruct),
+            ),
+            HeapType::ConcreteArray(t) => (
+                t.registered_type(),
+                t.finality(),
+                t.supertype().map(HeapType::ConcreteArray),
+            ),
+            _ => unreachable!("not a concrete type"),
+        };
+        let fields = match ty {
+            HeapType::ConcreteStruct(t) => t.fields().collect::<Vec<_>>(),
+            HeapType::ConcreteArray(t) => vec![t.field_type()],
+            _ => Vec::new(),
+        };
+        let (params, results) = match ty {
+            HeapType::ConcreteFunc(t) => (t.params().collect(), t.results().collect()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let values = fields.iter().filter_map(|f| f.element_type().as_val_type());
+        let values = values.chain(&params).chain(&results);
+        let refers_to_itself = values
+            .clone()
+            .any(|v| v.as_ref().is_some_and(|r| HeapType::eq(r.heap_type(), ty)));
+        ensure!(
+            registered.is_only_type_in_rec_group() && !refers_to_itself,
+            "record/replay does not support types of modules that have not been instantiated"
+        );
+        // The types that this one refers to come first.
+        for value in values {
+            self.record_type(value)?;
+        }
+        if let Some(supertype) = &supertype {
+            self.record_heap_type(supertype)?;
+        }
+
+        let mut body = TryVec::new();
+        let id = self.objects.types.next_key();
+        body.extend_from_slice(&id.as_u32().to_le_bytes())?;
+        body.push(match ty {
+            HeapType::ConcreteFunc(_) => codec::TYPE_FUNC,
+            HeapType::ConcreteStruct(_) => codec::TYPE_STRUCT,
+            _ => codec::TYPE_ARRAY,
+        })?;
+        body.push(u8::from(finality.is_final()))?;
+        let supertype = match &supertype {
+            Some(ty) => 1 + self.objects.find_type(ty)?.as_u32(),
+            None => 0,
+        };
+        body.extend_from_slice(&supertype.to_le_bytes())?;
+        if let HeapType::ConcreteFunc(_) = ty {
+            for types in [&params, &results] {
+                let mut encoded = TryVec::new();
+                for ty in types {
+                    codec::val_type(&mut encoded, ty, &self.objects)?;
+                }
+                codec::blob(&mut body, &encoded)?;
+            }
+        }
+        for field in &fields {
+            codec::field_type(&mut body, field, &self.objects)?;
+        }
+        self.objects.types.push(ty.clone())?;
+        self.append(codec::TYPE, &body)
+    }
+
+    fn import_tag(&mut self, store: &StoreOpaque, tag: Tag) -> Result<()> {
+        let ty = HeapType::ConcreteFunc(tag._ty(store).ty().clone());
+        self.record_heap_type(&ty)?;
+        let id = self.objects.add_tag(tag)?;
+        let mut body = TryVec::new();
+        body.extend_from_slice(&id.as_u32().to_le_bytes())?;
+        if let Mode::Recording(_) = self.mode {
+            let ty = self.objects.find_type(&ty)?;
+            body.extend_from_slice(&ty.as_u32().to_le_bytes())?;
+        }
+        self.append(codec::TAG, &body)
     }
 
     fn import_func(&mut self, store: &StoreOpaque, func: Func) -> Result<RecordedFunc> {
@@ -100,7 +195,7 @@ impl Session {
             crate::Val::ExternRef(None) | crate::Val::AnyRef(None) | crate::Val::ExnRef(None) => {
                 ValRaw::anyref(0)
             }
-            _ => bail!("record/replay does not support host globals that refer to GC objects"),
+            _ => global.rr_raw_gc_ref(store),
         };
         let id = self.objects.add_global(store, global)?;
         if global.is_component_flag() {
@@ -180,7 +275,13 @@ impl Session {
                     let global = store[instance.id].get_exported_global(store.id(), index);
                     self.import_global(store, global)?.as_u32()
                 }
-                _ => bail!("record/replay does not support importing tags"),
+                EntityIndex::Tag(index) => {
+                    let tag = store[instance.id].get_exported_tag(store.id(), index);
+                    self.objects
+                        .find_tag(&tag)
+                        .ok_or_else(|| format_err!("unregistered imported tag"))?
+                        .as_u32()
+                }
             };
             body.extend_from_slice(&object.to_le_bytes())?;
         }
@@ -191,7 +292,10 @@ impl Session {
 impl StoreOpaque {
     // Detach metadata while enumerating runtime objects; no guest code or
     // embedder callbacks run in these closures. Always restore it on error.
-    fn rr_register(&mut self, f: impl FnOnce(&mut Self, &mut Session) -> Result<()>) -> Result<()> {
+    pub(super) fn rr_register(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut Session) -> Result<()>,
+    ) -> Result<()> {
         if !self.rr.active() {
             return Ok(());
         }
@@ -234,6 +338,10 @@ impl StoreOpaque {
         })
     }
 
+    pub(crate) fn rr_created_tag(&mut self, tag: Tag) -> Result<()> {
+        self.rr_register(|store, session| session.import_tag(store, tag))
+    }
+
     pub(crate) fn rr_created_memory(&mut self, memory: Memory) -> Result<()> {
         self.rr_register(|store, session| {
             let ty = memory.wasmtime_ty(store);
@@ -254,12 +362,10 @@ impl StoreOpaque {
             let ty = table.ty_(store);
             let element = ValType::Ref(ty.element().clone());
             session.record_type(&element)?;
-            let func = match init {
-                crate::Ref::Func(None) => 0,
-                crate::Ref::Func(Some(func)) => 1 + session.import_func(store, func)?.as_u32(),
-                init if init.is_null() => 0,
-                _ => bail!("record/replay does not support host tables that refer to GC objects"),
-            };
+            if let crate::Ref::Func(Some(func)) = init {
+                session.import_func(store, func)?;
+            }
+            let (kind, raw) = store.rr_val_raw(&init.into())?;
             let id = session.objects.add_table(store, table)?;
             let mut body = TryVec::new();
             body.extend_from_slice(&id.as_u32().to_le_bytes())?;
@@ -268,7 +374,8 @@ impl StoreOpaque {
             body.extend_from_slice(&ty.minimum().to_le_bytes())?;
             body.push(u8::from(ty.maximum().is_some()))?;
             body.extend_from_slice(&ty.maximum().unwrap_or_default().to_le_bytes())?;
-            body.extend_from_slice(&func.to_le_bytes())?;
+            // SAFETY: the store owns the value.
+            unsafe { codec::values(&mut body, &[kind], &raw, session.refs())? };
             session.append(codec::TABLE, &body)
         })
     }
@@ -368,6 +475,10 @@ impl Objects {
                 DefinedGlobalIndex::from_u32(u32::try_from(i)?),
             );
             self.add_global(store, global)?;
+        }
+        for i in 0..store[id].env_module().num_defined_tags() {
+            let index = DefinedTagIndex::from_u32(u32::try_from(i)?);
+            self.add_tag(Tag::from_raw(id, index))?;
         }
         Ok(())
     }

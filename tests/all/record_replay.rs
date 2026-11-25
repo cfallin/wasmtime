@@ -2394,26 +2394,6 @@ async fn gc_heaps_are_replayed() -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "gc")]
-#[test]
-fn host_mutation_of_gc_objects_poisons_the_recording() -> Result<()> {
-    let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
-    let mut store = Store::new_recording(&recording, ())?;
-    let report = Func::wrap(&mut store, |_: i32| ());
-    let module = new_module(&recording, GC_LIST)?;
-    let instance = Instance::new(&mut store, &module, &[report.into()])?;
-    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
-    step.call(&mut store, 1)?;
-    let list = instance.get_global(&mut store, "list").unwrap();
-    let head = unrooted_anyref(list.get(&store)).unwrap();
-    let head = head.to_rooted(&mut store)?;
-    let head = head.as_struct(&store)?.unwrap();
-    assert!(head.set_field(&mut store, 0, Val::I32(7)).is_err());
-    let err = store.finish_recording().err().unwrap().to_string();
-    assert!(err.contains("host mutation of GC objects"), "{err}");
-    Ok(())
-}
-
 /// Program output, as a WASI implementation could record it.
 #[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 struct Output {
@@ -4152,29 +4132,6 @@ async fn invalid_gc_references_in_traces_are_rejected() -> Result<()> {
 }
 
 #[cfg(feature = "gc")]
-#[test]
-fn gc_references_without_handles_poison_the_recording() -> Result<()> {
-    let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
-    let mut store = Store::new_recording(&recording, ())?;
-    let module = new_module(
-        &recording,
-        r#"(module
-        (type $s (struct))
-        (global (export "g") (ref $s) (struct.new $s))
-        (func (export "f") (param anyref)))"#,
-    )?;
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let g = instance.get_global(&mut store, "g").unwrap();
-    let f = instance.get_func(&mut store, "f").unwrap();
-    let mut value = g.get(&store);
-    value.ensure_rooted(&mut store)?;
-    assert!(f.call(&mut store, &[value], &mut []).is_err());
-    let err = store.finish_recording().err().unwrap().to_string();
-    assert!(err.contains("read from the guest's state"), "{err}");
-    Ok(())
-}
-
-#[cfg(feature = "gc")]
 #[tokio::test]
 async fn host_functions_rethrow_exceptions() -> Result<()> {
     for collector in COLLECTORS {
@@ -4245,5 +4202,392 @@ async fn exception_handles_are_not_other_references() -> Result<()> {
         let error = format!("{:#}", error.unwrap());
         assert!(error.contains("wrong type"), "{error}");
     }
+    Ok(())
+}
+
+/// The module of `record_host_gc`.
+#[cfg(feature = "gc")]
+const HOST_GC: &str = r#"
+(module
+  (rec
+    (type $node (struct (field (mut i32)) (field (mut (ref null $node)))))
+    (type $unused (struct (field (ref null $node)))))
+  (type $bytes (array (mut i8)))
+  (type $nodes (array (mut (ref null $node))))
+  (type $funcs (array (mut funcref)))
+  (type $pair (struct (field i16) (field i64)))
+  (import "" "host" (func $host))
+  (import "" "log" (func $log (param i32)))
+  (import "" "global" (global $imported (ref $node)))
+  (import "" "table" (table $imported_table 2 (ref null $node)))
+  (global $head (export "head") (mut (ref null $node)) (ref.null $node))
+  (table (export "table") 4 (ref null $node))
+  (func $forty (export "forty") (result i32) (i32.const 40))
+  (func (export "churn") (local $i i32)
+    loop
+      (drop (struct.new $node (local.get $i) (ref.null $node)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if 0 (i32.lt_u (local.get $i) (i32.const 1000)))
+    end)
+  (func (export "check_node") (param $n (ref null $node))
+    (call $log (struct.get $node 0 (local.get $n)))
+    (call $log (ref.eq (local.get $n) (global.get $head))))
+  (func (export "check_bytes") (param $b (ref $bytes))
+    (call $log (array.get_u $bytes (local.get $b) (i32.const 1)))
+    (call $log (array.len (local.get $b))))
+  (func (export "check_nodes") (param $n (ref $nodes))
+    (call $log (ref.eq (array.get $nodes (local.get $n) (i32.const 0))
+                       (array.get $nodes (local.get $n) (i32.const 1))))
+    (call $log (struct.get $node 0 (array.get $nodes (local.get $n) (i32.const 1)))))
+  (func (export "check_funcs") (param $f (ref $funcs))
+    (call $log (call_ref $i (ref.cast (ref $i) (array.get $funcs (local.get $f) (i32.const 0))))))
+  (type $i (func (result i32)))
+  (func (export "check_pair") (param $a anyref)
+    (call $log (struct.get_u $pair 0 (ref.cast (ref $pair) (local.get $a)))))
+  (func (export "run")
+    (global.set $head
+      (struct.new $node (i32.const 1)
+        (struct.new $node (i32.const 2)
+          (struct.new $node (i32.const 3) (ref.null $node)))))
+    (table.set 1 (i32.const 2) (struct.new $node (i32.const 30) (global.get $head)))
+    (call $host)
+    ;; What the host wrote.
+    (call $log (struct.get $node 0 (struct.get $node 1 (struct.get $node 1 (global.get $head)))))
+    (call $log (struct.get $node 0 (struct.get $node 1
+      (struct.get $node 1 (struct.get $node 1 (global.get $head))))))
+    (call $log (struct.get $node 0 (global.get $imported)))
+    (call $log (struct.get $node 0 (table.get $imported_table (i32.const 1))))))
+"#;
+
+/// Records a host function that operates on GC objects in all the ways that it
+/// can.
+#[cfg(feature = "gc")]
+fn record_host_gc(collector: Collector, calls: usize) -> Result<(Trace, Vec<i32>)> {
+    let recording = gc_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, Vec::new())?;
+    let module = new_module(&recording, HOST_GC)?;
+
+    // An instance whose only purpose is for its module's types to be in the
+    // trace, so that the host can allocate objects for the imports.
+    let types = new_module(
+        &recording,
+        r#"(module
+        (rec
+          (type $node (struct (field (mut i32)) (field (mut (ref null $node)))))
+          (type $unused (struct (field (ref null $node)))))
+        (global (export "node") (mut (ref null $node)) (ref.null $node)))"#,
+    )?;
+    let types = Instance::new(&mut store, &types, &[])?;
+    let node_ref = types.get_global(&mut store, "node").unwrap().ty(&store);
+    let node_ref = node_ref.content().unwrap_ref().clone();
+    let node = node_ref.heap_type().unwrap_concrete_struct().clone();
+
+    let (global, table) = {
+        let mut scope = RootScope::new(&mut store);
+        let pre = StructRefPre::new(&mut scope, node.clone());
+        let object = StructRef::new(&mut scope, &pre, &[Val::I32(77), Val::AnyRef(None)])?;
+        let ty = ValType::Ref(RefType::new(false, node_ref.heap_type().clone()));
+        let value = Val::from(object.to_anyref());
+        let global = Global::new(&mut scope, GlobalType::new(ty, Mutability::Const), value)?;
+        let ty = TableType::new(node_ref.clone(), 2, None)?;
+        let table = Table::new(&mut scope, ty, Ref::from(object.to_anyref()))?;
+        (global, table)
+    };
+
+    let host = Func::wrap(&mut store, move |mut caller: Caller<'_, Vec<i32>>| {
+        let head = caller.get_export("head").unwrap().into_global().unwrap();
+        let table = caller.get_export("table").unwrap().into_table().unwrap();
+        let func = |caller: &mut Caller<'_, Vec<i32>>, name: &str| {
+            caller.get_export(name).unwrap().into_func().unwrap()
+        };
+        let check_node = func(&mut caller, "check_node");
+        let churn = func(&mut caller, "churn");
+        let check_bytes = func(&mut caller, "check_bytes");
+        let check_nodes = func(&mut caller, "check_nodes");
+        let check_funcs = func(&mut caller, "check_funcs");
+        let check_pair = func(&mut caller, "check_pair");
+        let forty = func(&mut caller, "forty");
+        let mut scope = RootScope::new(&mut caller);
+
+        // Read the list without rooting anything but the end of it.
+        let unrooted = |v: &Val| *v.unwrap_anyref().unwrap();
+        let first = unrooted(&head.get(&scope)).unwrap_unrooted();
+        let first = first.as_struct(&scope)?.unwrap();
+        let second = unrooted(&first.field(&scope, 1)?).unwrap_unrooted();
+        let second = second.as_struct(&scope)?.unwrap();
+        // Read this in a cycle, too.
+        let _ = head.get(&scope);
+        let _ = first.field(&scope, 1)?;
+        let last = unrooted(&second.field(&scope, 1)?).to_rooted(&mut scope)?;
+        check_node.call(&mut scope, &[Val::from(last)], &mut [])?;
+
+        // The same object, by another path, is still the same.
+        let mut in_table = table.get(&mut scope, 2).unwrap();
+        in_table.ensure_rooted(&mut scope)?;
+        let in_table = in_table.unwrap_any().unwrap().unwrap_rooted();
+        let in_table = in_table.unwrap_struct(&scope)?;
+        let mut vals = [in_table.field(&scope, 1)?, head.get(&scope)];
+        Val::ensure_all_rooted(&mut scope, &mut vals)?;
+        check_node.call(&mut scope, &vals[..1], &mut [])?;
+        check_node.call(&mut scope, &vals[1..], &mut [])?;
+
+        churn.call(&mut scope, &[], &mut [])?;
+        scope.as_context_mut().gc(None)?;
+        rr::record_event(&mut scope, &Step(0))?;
+
+        // Write to objects.
+        let pre = StructRefPre::new(&mut scope, node.clone());
+        let new = StructRef::new(&mut scope, &pre, &[Val::I32(4), Val::AnyRef(None)])?;
+        let last = last.unwrap_struct(&scope)?;
+        last.set_field(&mut scope, 0, Val::I32(33))?;
+        last.set_field(&mut scope, 1, Val::from(new.to_anyref()))?;
+        churn.call(&mut scope, &[], &mut [])?;
+
+        // Allocate arrays.
+        let check = check_bytes;
+        let ty = check.ty(&scope).param(0).unwrap();
+        let ty = ty.unwrap_ref().heap_type().unwrap_concrete_array().clone();
+        let pre = ArrayRefPre::new(&mut scope, ty);
+        let bytes = ArrayRef::new_from_i8_slice(&mut scope, &pre, &[1, 200, 3])?;
+        check.call(&mut scope, &[Val::from(bytes.to_anyref())], &mut [])?;
+        bytes.set(&mut scope, 1, Val::I32(99))?;
+        check.call(&mut scope, &[Val::from(bytes.to_anyref())], &mut [])?;
+        let bytes = ArrayRef::new(&mut scope, &pre, &Val::I32(5), 100)?;
+        check.call(&mut scope, &[Val::from(bytes.to_anyref())], &mut [])?;
+
+        let check = check_nodes;
+        let ty = check.ty(&scope).param(0).unwrap();
+        let ty = ty.unwrap_ref().heap_type().unwrap_concrete_array().clone();
+        let pre = ArrayRefPre::new(&mut scope, ty);
+        let elems = [Val::from(new.to_anyref()), Val::from(last.to_anyref())];
+        let nodes = ArrayRef::new_fixed(&mut scope, &pre, &elems)?;
+        check.call(&mut scope, &[Val::from(nodes.to_anyref())], &mut [])?;
+        let mut elem = nodes.get(&scope, 1)?;
+        elem.ensure_rooted(&mut scope)?;
+        nodes.set(&mut scope, 0, elem)?;
+        check.call(&mut scope, &[Val::from(nodes.to_anyref())], &mut [])?;
+
+        let check = check_funcs;
+        let ty = check.ty(&scope).param(0).unwrap();
+        let ty = ty.unwrap_ref().heap_type().unwrap_concrete_array().clone();
+        let pre = ArrayRefPre::new(&mut scope, ty);
+        let funcs = ArrayRef::new_fixed(&mut scope, &pre, &[Val::from(forty)])?;
+        check.call(&mut scope, &[Val::from(funcs.to_anyref())], &mut [])?;
+
+        // A type that the host defines, the same as one of the guest's.
+        let field = |ty| FieldType::new(Mutability::Const, ty);
+        let fields = [field(StorageType::I16), field(ValType::I64.into())];
+        let ty = StructType::new(scope.as_context().engine(), fields)?;
+        let pre = StructRefPre::new(&mut scope, ty);
+        let pair = StructRef::new(&mut scope, &pre, &[Val::I32(0x12345), Val::I64(6)])?;
+        let check = check_pair;
+        check.call(&mut scope, &[Val::from(pair.to_anyref())], &mut [])?;
+
+        // Types that only the host has.
+        let engine = scope.as_context().engine().clone();
+        let array = ArrayType::with_finality_and_supertype(
+            &engine,
+            Finality::NonFinal,
+            None,
+            field(ValType::Ref(RefType::new(true, HeapType::Any)).into()),
+        )?;
+        let of_array = HeapType::ConcreteArray(array.clone());
+        let sub = ArrayType::with_finality_and_supertype(
+            &engine,
+            Finality::Final,
+            Some(&array),
+            field(ValType::Ref(RefType::new(true, of_array)).into()),
+        )?;
+        let pre = ArrayRefPre::new(&mut scope, sub);
+        ArrayRef::new(&mut scope, &pre, &Val::AnyRef(None), 2)?;
+        Ok(())
+    });
+    let log = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, Vec<i32>>, value: i32| {
+            caller.data_mut().push(value);
+        },
+    );
+    let imports = [host.into(), log.into(), global.into(), table.into()];
+    let instance = Instance::new(&mut store, &module, &imports)?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    for _ in 0..calls {
+        run.call(&mut store, ())?;
+    }
+    let log = store.data().clone();
+    Ok((store.finish_recording()?, log))
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn host_gc_operations() -> Result<()> {
+    let expected = [
+        3, 0, 1, 1, 1, 1, 200, 3, 99, 3, 5, 100, 0, 33, 1, 33, 40, 0x2345, 33, 4, 77, 77,
+    ];
+    for collector in COLLECTORS {
+        let (trace, log) = record_host_gc(collector, 2)?;
+        assert_eq!(log, [expected, expected].concat());
+        for replay_collector in COLLECTORS {
+            let engine = gc_engine(RrConfig::Replaying, replay_collector)?;
+            replay_with(&engine, &trace).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn rewinding_host_gc_operations() -> Result<()> {
+    for collector in [Collector::DeferredReferenceCounting, Collector::Copying] {
+        let (trace, _) = record_host_gc(collector, 3)?;
+        let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = vec![replayer.checkpoint()?];
+        while let ReplayStop::Event(_) = replayer.run().await? {
+            checkpoints.push(replayer.checkpoint()?);
+        }
+        replayer.stop_at_events(false);
+        for i in [3, 1, 0, 2, 0] {
+            replayer.restore(&checkpoints[i])?;
+            assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        }
+    }
+    Ok(())
+}
+
+/// Corrupted records of the host's GC operations may be rejected or not, but
+/// replay must not panic.
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn corrupt_host_gc_operations() -> Result<()> {
+    const TYPE: u8 = 16;
+    const ALLOC: u8 = 17;
+    const TAG: u8 = 19;
+    const READ: u8 = 20;
+    const OBJECT_WRITE: u8 = 21;
+    let collector = Collector::DeferredReferenceCounting;
+    let traces = [
+        (
+            record_host_gc(collector, 1)?.0,
+            gc_engine(RrConfig::Replaying, collector)?,
+        ),
+        (
+            record_host_exceptions(collector)?,
+            exceptions_engine(RrConfig::Replaying, collector)?,
+        ),
+    ];
+    for (trace, engine) in traces {
+        let frames = frames(trace.as_bytes());
+        let mut rejected = 0;
+        for (i, (tag, body)) in frames.iter().enumerate() {
+            if ![TYPE, ALLOC, TAG, READ, OBJECT_WRITE].contains(tag) {
+                continue;
+            }
+            for at in *body..frames[i + 1].1 - 5 {
+                // Large arrays are valid, but slow.
+                if (*tag, trace.as_bytes()[*body]) == (ALLOC, 2) && at - body >= 7 && at - body < 9
+                {
+                    continue;
+                }
+                let mut bytes = trace.as_bytes().to_vec();
+                bytes[at] ^= [0x01, 0x03, 0xff][at % 3];
+                let result = replay_with(&engine, &Trace::from_bytes(bytes)?).await;
+                rejected += usize::from(result.is_err());
+            }
+        }
+        assert!(rejected > 0);
+    }
+    Ok(())
+}
+
+/// Records host functions that throw new exceptions.
+#[cfg(feature = "gc")]
+fn record_host_exceptions(collector: Collector) -> Result<Trace> {
+    let recording = exceptions_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let ty = FuncType::new(&recording, [ValType::I32, ValType::EXTERNREF], []);
+    let host_tag = Tag::new(&mut store, &TagType::new(ty))?;
+    let throw = Func::wrap(
+        &mut store,
+        move |mut caller: Caller<'_, ()>, host: i32| -> Result<()> {
+            let mut tag = host_tag;
+            if host == 0 {
+                tag = caller.get_export("tag").unwrap().into_tag().unwrap();
+            }
+            let payload = ExternRef::new(&mut caller, "payload")?;
+            let ty = ExnType::from_tag_type(&tag.ty(&caller))?;
+            let pre = ExnRefPre::new(&mut caller, ty);
+            let fields = [Val::I32(42 + host), Val::from(payload)];
+            let exn = ExnRef::new(&mut caller, &pre, &tag, &fields)?;
+            caller.as_context_mut().throw(exn)
+        },
+    );
+    let module = new_module(
+        &recording,
+        r#"(module
+        (import "" "tag" (tag $host (param i32 externref)))
+        (import "" "throw" (func $throw (param i32)))
+        (import "" "got" (func $got (param i32 externref)))
+        (tag $guest (export "tag") (param i32 externref))
+        (func (export "run") (param i32)
+          (block $g (result i32 externref)
+            (block $h (result i32 externref)
+              (try_table (catch $host $h) (catch $guest $g) (call $throw (local.get 0)))
+              (unreachable))
+            (call $got)
+            (return))
+          (call $got)))"#,
+    )?;
+    let got = Func::wrap(
+        &mut store,
+        |caller: Caller<'_, ()>, value: i32, payload: Option<Rooted<ExternRef>>| -> Result<()> {
+            assert!(value == 42 || value == 43);
+            let payload = payload.unwrap().data(&caller)?.unwrap();
+            assert_eq!(payload.downcast_ref::<&str>(), Some(&"payload"));
+            Ok(())
+        },
+    );
+    let imports = [host_tag.into(), throw.into(), got.into()];
+    let instance = Instance::new(&mut store, &module, &imports)?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    run.call(&mut store, 0)?;
+    run.call(&mut store, 1)?;
+    store.finish_recording()
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn host_functions_throw_new_exceptions() -> Result<()> {
+    for collector in COLLECTORS {
+        let trace = record_host_exceptions(collector)?;
+        replay_with(&exceptions_engine(RrConfig::Replaying, collector)?, &trace).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[test]
+fn types_of_uninstantiated_modules_poison_the_recording() -> Result<()> {
+    let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let module = new_module(
+        &recording,
+        r#"(module
+        (rec (type $a (struct (field (ref null $b)))) (type $b (struct)))
+        (func (export "f") (param (ref null $a))))"#,
+    )?;
+    let ty = module
+        .exports()
+        .next()
+        .unwrap()
+        .ty()
+        .unwrap_func()
+        .param(0)
+        .unwrap();
+    let ty = ty.unwrap_ref().heap_type().unwrap_concrete_struct().clone();
+    let pre = StructRefPre::new(&mut store, ty);
+    assert!(StructRef::new(&mut store, &pre, &[Val::AnyRef(None)]).is_err());
+    let err = store.finish_recording().err().unwrap().to_string();
+    assert!(err.contains("have not been instantiated"), "{err}");
     Ok(())
 }

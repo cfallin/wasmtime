@@ -1,5 +1,6 @@
 //! Implementation of `exnref` in Wasmtime.
 
+use crate::rr::Allocation;
 use crate::runtime::vm::VMGcRef;
 use crate::store::{Asyncness, StoreId, StoreResourceLimiter};
 #[cfg(feature = "async")]
@@ -220,14 +221,16 @@ impl ExnRef {
             .as_context_mut()
             .0
             .validate_sync_resource_limiter_and_store_opaque()?;
-        vm::assert_ready(Self::_new_async(
+        let object = vm::assert_ready(Self::_new_async(
             store,
             limiter.as_mut(),
             allocator,
             tag,
             fields,
             Asyncness::No,
-        ))
+        ))?;
+        store.rr_allocated(&object, Allocation::Exn(tag, fields))?;
+        Ok(object)
     }
 
     /// Asynchronously allocate a new exception object and get a
@@ -266,7 +269,7 @@ impl ExnRef {
         fields: &[Val],
     ) -> Result<Rooted<ExnRef>> {
         let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
-        Self::_new_async(
+        let object = Self::_new_async(
             store,
             limiter.as_mut(),
             allocator,
@@ -274,7 +277,9 @@ impl ExnRef {
             fields,
             Asyncness::Yes,
         )
-        .await
+        .await?;
+        store.rr_allocated(&object, Allocation::Exn(tag, fields))?;
+        Ok(object)
     }
 
     pub(crate) async fn _new_async(

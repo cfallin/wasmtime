@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::rr::GcSource;
 use crate::runtime::vm::{self, VMGlobalDefinition, VMGlobalKind, VMOpaqueContext};
 use crate::{
     AnyRef, AsContext, AsContextMut, ExnRef, ExternRef, Func, GlobalType, HeapType, Mutability,
@@ -198,6 +199,11 @@ impl Global {
                     ._get_numeric(store)
                     .expect("numeric globals always have a numeric value"),
                 ValType::Ref(ref_ty) => {
+                    let gc_ref = || {
+                        let gc_ref = definition.as_gc_ref();
+                        store.rr_note_read(gc_ref, GcSource::Global(*self));
+                        gc_ref
+                    };
                     let reference: Ref = match ref_ty.heap_type() {
                         HeapType::Func | HeapType::ConcreteFunc(_) => Ref::Func(
                             definition
@@ -207,8 +213,7 @@ impl Global {
 
                         HeapType::NoFunc => Ref::Func(None),
 
-                        HeapType::Extern => definition
-                            .as_gc_ref()
+                        HeapType::Extern => gc_ref()
                             .map(|r| Unrooted::<ExternRef>::new(store, r))
                             .into(),
 
@@ -219,10 +224,7 @@ impl Global {
 
                         HeapType::NoExtern => Ref::Extern(None),
 
-                        HeapType::Exn => definition
-                            .as_gc_ref()
-                            .map(|r| Unrooted::<ExnRef>::new(store, r))
-                            .into(),
+                        HeapType::Exn => gc_ref().map(|r| Unrooted::<ExnRef>::new(store, r)).into(),
 
                         HeapType::Any
                         | HeapType::Eq
@@ -230,10 +232,9 @@ impl Global {
                         | HeapType::Struct
                         | HeapType::ConcreteStruct(_)
                         | HeapType::Array
-                        | HeapType::ConcreteArray(_) => definition
-                            .as_gc_ref()
-                            .map(|r| Unrooted::<AnyRef>::new(store, r))
-                            .into(),
+                        | HeapType::ConcreteArray(_) => {
+                            gc_ref().map(|r| Unrooted::<AnyRef>::new(store, r)).into()
+                        }
 
                         HeapType::NoExn => Ref::Exn(None),
 
@@ -247,6 +248,14 @@ impl Global {
                 }
             }
         }
+    }
+
+    /// The raw GC reference that this global, of GC reference type, holds.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_raw_gc_ref(&self, store: &StoreOpaque) -> crate::ValRaw {
+        // SAFETY: the store owns this global, whose type the caller checked.
+        let gc_ref = unsafe { self.definition(store).as_ref().as_gc_ref() };
+        crate::ValRaw::anyref(gc_ref.map_or(0, |r| r.as_raw_u32()))
     }
 
     /// Attempts to set the current value of this global to [`Val`].

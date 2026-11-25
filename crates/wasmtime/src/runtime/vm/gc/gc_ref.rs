@@ -1,3 +1,4 @@
+use crate::rr::GcSource;
 use crate::runtime::vm::{FuncRefTableId, GcHeap, GcStore, I31, SendSyncPtr};
 use crate::store::{AutoAssertNoGc, StoreOpaque};
 use crate::{
@@ -442,6 +443,13 @@ impl VMGcRef {
             StorageType::ValType(ValType::V128) => Val::V128(data.read_v128(offset)?),
             StorageType::ValType(ValType::Ref(r)) => {
                 let raw = data.read_u32(offset)?;
+                if !matches!(r.heap_type().top(), HeapTopType::Func | HeapTopType::Cont) {
+                    let object = self.as_raw_u32();
+                    store.rr_note_read(
+                        VMGcRef::from_raw_u32(raw).as_ref(),
+                        GcSource::Object { object, offset },
+                    );
+                }
                 match r.heap_type().top() {
                     HeapTopType::Extern => {
                         Val::from(Unrooted::<ExternRef>::from_raw_u32(store, raw))

@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::rr::GcSource;
 use crate::runtime::vm::{self, GcStore, TableElementType, VMFuncRef, VMGcRef, VMStore};
 use crate::store::{AutoAssertNoGc, StoreInstanceId, StoreOpaque, StoreResourceLimiter};
 use crate::trampoline::generate_table_export;
@@ -245,7 +246,7 @@ impl Table {
         self._get_if_initialized(store.as_context().0, index)
     }
 
-    fn _get_if_initialized(&self, store: &StoreOpaque, index: u64) -> Option<Ref> {
+    pub(crate) fn _get_if_initialized(&self, store: &StoreOpaque, index: u64) -> Option<Ref> {
         self.instance.assert_belongs_to(store.id());
         let table = store[self.instance].defined_table(self.index);
         match table.element_type() {
@@ -259,6 +260,7 @@ impl Table {
             }
             TableElementType::GcRef => {
                 let gc_ref = table.get_gc_ref(index).ok()?;
+                store.rr_note_read(gc_ref, GcSource::Table(*self, index));
                 Some(match self.ty_(store).element().heap_type().top() {
                     HeapTopType::Extern => {
                         Ref::from(gc_ref.map(|r| Unrooted::<ExternRef>::new(store, r)))

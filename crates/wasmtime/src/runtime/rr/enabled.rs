@@ -13,6 +13,8 @@ mod component;
 mod events;
 mod growth;
 mod handles;
+#[cfg(feature = "gc")]
+mod host_gc;
 mod init;
 mod objects;
 mod replay;
@@ -167,6 +169,8 @@ pub(crate) struct State {
 struct Session {
     objects: Objects,
     handles: Handles,
+    #[cfg(feature = "gc")]
+    reads: crate::sync::RwLock<host_gc::Reads>,
     mode: Mode,
     failure: Option<Error>,
 }
@@ -382,6 +386,8 @@ impl<T: 'static> Store<T> {
         let session = try_new::<Box<_>>(Session {
             objects: Objects::default(),
             handles: Handles::default(),
+            #[cfg(feature = "gc")]
+            reads: Default::default(),
             mode: Mode::Recording(recording),
             failure: None,
         })?;

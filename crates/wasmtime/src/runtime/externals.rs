@@ -12,6 +12,8 @@ pub use table::Table;
 #[cfg(feature = "rr")]
 pub(crate) use table::TableHashKey;
 pub use tag::Tag;
+#[cfg(feature = "rr")]
+pub(crate) use tag::TagHashKey;
 
 // Externals
 
