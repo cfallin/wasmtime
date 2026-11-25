@@ -16,6 +16,10 @@ use wasmtime_environ::MemoryTunables;
 #[cfg(feature = "debug")]
 pub const WATCH_DEBUG: u8 = 1 << 0;
 
+/// A shadow bit set for each byte of a page that record/replay has not seen
+/// written since its last checkpoint.
+pub const WATCH_CLEAN: u8 = 1 << 1;
+
 /// The shadow of a linear memory: one byte per byte of the memory.
 ///
 /// The shadow is itself a linear memory, of the same type and allocated with
@@ -43,6 +47,8 @@ pub struct ShadowMemory {
     // The size of the memory, and so of the shadow. At most
     // `alloc.byte_size()`.
     len: usize,
+    // The value of the bytes added when the memory grows.
+    fill: u8,
 }
 
 impl ShadowMemory {
@@ -64,6 +70,7 @@ impl ShadowMemory {
             alloc,
             definition,
             may_move: ty.memory_may_move(memory_tunables),
+            fill: 0,
         })
     }
 
@@ -106,11 +113,36 @@ impl ShadowMemory {
         Ok(())
     }
 
+    /// Sets the value of the bytes added when the memory grows.
+    pub fn set_fill(&mut self, fill: u8) {
+        self.fill = fill;
+    }
+
+    /// Follows the memory's resizing to `len` bytes, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(super) fn resize(&mut self, len: usize) -> Result<()> {
+        if len >= self.byte_size() {
+            self.reserve_to(len)?;
+            self.set_byte_size(len);
+            return Ok(());
+        }
+        super::rr_shrink(&mut *self.alloc, len)?;
+        self.len = len;
+        *self.definition = self.vmmemory();
+        Ok(())
+    }
+
     /// Follows the memory's growth to `len` bytes, after a `reserve_to(len)`.
     pub(super) fn set_byte_size(&mut self, len: usize) {
         assert!(self.len <= len && len <= self.alloc.byte_size());
+        let old = self.len;
         self.len = len;
         *self.definition = self.vmmemory();
+        let fill = self.fill;
+        if fill != 0 {
+            self.bytes_mut()[old..].fill(fill);
+        }
     }
 
     /// The shadow's definition: its allocation's base, and the memory's size.

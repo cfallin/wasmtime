@@ -131,6 +131,8 @@ pub use self::async_::CallHookHandler;
 
 #[cfg(feature = "gc")]
 mod gc;
+#[cfg(all(feature = "gc", feature = "rr"))]
+pub(crate) use gc::RrGcImage;
 #[cfg(not(feature = "gc"))]
 mod gc_disabled;
 
@@ -2640,6 +2642,11 @@ unsafe impl<T> VMStore for StoreInner<T> {
             unreachable!()
         };
         callback(StoreHookState::new((&mut **store).as_context_mut()))
+    }
+
+    #[cfg(feature = "debug")]
+    fn has_debug_handler(&self) -> bool {
+        self.debug_handler.is_some()
     }
 
     #[cfg(feature = "debug")]

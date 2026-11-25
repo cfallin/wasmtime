@@ -24,7 +24,9 @@ pub use events::{
 };
 use growth::GrowthFailure;
 use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
-pub use replay::{ReplayStop, Replayer};
+#[cfg(feature = "gc")]
+pub(crate) use replay::PagedImage;
+pub use replay::{Checkpoint, ReplayStop, Replayer};
 
 /// The call ID with which `rr_enter` reports a call that is not recorded.
 const NOT_RECORDED: u32 = u32::MAX;
@@ -231,6 +233,7 @@ struct Replaying {
     /// Why the running activation stopped.
     stop: Option<replay::Stop>,
     epochs: replay::Epochs,
+    histories: replay::Histories,
 }
 
 /// The Wasm frames of a suspended activation, from its `VMStoreContext` state.

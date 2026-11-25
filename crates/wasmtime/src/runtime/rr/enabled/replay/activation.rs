@@ -26,7 +26,7 @@ use crate::runtime::vm::{
 };
 use core::mem::MaybeUninit;
 use wasmtime_environ::{FuncKey, RrYield};
-use wasmtime_fiber::{RawFiber, RawFiberEntry};
+use wasmtime_fiber::{RawFiber, RawFiberEntry, RawFiberSnapshot};
 
 /// The generated code that activations run.
 pub(super) struct Trampolines {
@@ -102,9 +102,13 @@ impl HostValues {
     }
 }
 
+/// Identifies an activation across checkpoints.
+pub(super) type Serial = u64;
+
 /// A guest activation and everything its suspended fiber refers to, which has a
 /// stable address until [`Activation::dispose`].
 pub(super) struct Activation {
+    pub serial: Serial,
     fiber: RawFiber,
     /// An owned allocation (from `Box`). The fiber's generated code writes to
     /// it while running, so it is only accessed through raw pointers, and no
@@ -148,6 +152,7 @@ impl Activation {
     pub fn new(
         store: &mut StoreOpaque,
         trampolines: &Trampolines,
+        serial: Serial,
         func: RecordedFunc,
         call: RecordedCall,
         mut values: TryVec<ValRaw>,
@@ -191,6 +196,7 @@ impl Activation {
         let context =
             EntryStoreContext::rr_initial(store, stack_limit, NonNull::from(&mut *stack_info));
         Ok(Activation {
+            serial,
             fiber,
             control,
             context,
@@ -229,6 +235,44 @@ impl Activation {
         store.deallocate_fiber_stack(self.fiber.into_stack());
         // SAFETY: the fiber that referred to the control block is gone.
         drop(unsafe { Box::from_raw(self.control.as_ptr()) });
+    }
+
+    /// Captures the state of this suspended activation.
+    pub fn snapshot(&self) -> Result<ActivationImage> {
+        let mut values = TryVec::with_capacity(self.values.len())?;
+        for value in &self.values {
+            values.push(*value)?;
+        }
+        Ok(ActivationImage {
+            serial: self.serial,
+            fiber: self.fiber.snapshot()?,
+            // SAFETY: the activation is not running, and the control block is
+            // plain data.
+            control: unsafe { core::ptr::read(self.control.as_ptr()) },
+            context: self.context.rr_clone(),
+            mpk: self.mpk,
+            host: self.host,
+            values,
+        })
+    }
+
+    /// Restores this activation's state, whether or not it has finished since.
+    ///
+    /// # Safety
+    ///
+    /// Everything that the stack refers to must still be at the same address.
+    pub unsafe fn restore(&mut self, image: &ActivationImage) -> Result<()> {
+        // SAFETY: inherited from this function's contract. The control block
+        // and value storage have not moved.
+        unsafe {
+            self.fiber.restore(&image.fiber)?;
+            core::ptr::copy_nonoverlapping(&image.control, self.control.as_ptr(), 1);
+        }
+        self.context = image.context.rr_clone();
+        self.mpk = image.mpk;
+        self.host = image.host;
+        self.values.copy_from_slice(&image.values);
+        Ok(())
     }
 
     /// The results of the entry function, once the activation has finished
@@ -339,6 +383,21 @@ impl Activation {
         }
     }
 }
+
+/// The state of a suspended activation at a checkpoint.
+pub(super) struct ActivationImage {
+    pub serial: Serial,
+    fiber: RawFiberSnapshot,
+    control: VMReplayControl,
+    context: core::mem::ManuallyDrop<EntryStoreContext>,
+    mpk: Option<ProtectionMask>,
+    host: Option<HostCall>,
+    values: TryVec<ValRaw>,
+}
+
+// SAFETY: the raw pointers are only used to restore the activation.
+unsafe impl Send for ActivationImage {}
+unsafe impl Sync for ActivationImage {}
 
 /// Asserts that a suspended activation's stack contains only generated code,
 /// beneath the switch routine and above the fiber's start routine, by walking

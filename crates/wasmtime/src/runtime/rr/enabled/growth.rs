@@ -8,9 +8,10 @@ use super::*;
 use crate::rr::Growable;
 use crate::store::StoreInstanceId;
 use objects::RecordedTable;
+use wasmtime_environ::collections::TryClone;
 
 /// A failed guest growth.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct GrowthFailure {
     object: RecordedGrowable,
     /// The object's size, in bytes or elements, which tells this apart from
@@ -20,10 +21,16 @@ pub(super) struct GrowthFailure {
     delta: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordedGrowable {
     Memory(RecordedMemory),
     Table(RecordedTable),
+}
+
+impl TryClone for GrowthFailure {
+    fn try_clone(&self) -> Result<Self, OutOfMemory> {
+        Ok(*self)
+    }
 }
 
 impl GrowthFailure {

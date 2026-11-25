@@ -105,6 +105,8 @@ pub use crate::runtime::vm::always_mut::*;
 pub use crate::runtime::vm::export::*;
 pub use crate::runtime::vm::gc::*;
 pub use crate::runtime::vm::imports::Imports;
+#[cfg(feature = "rr")]
+pub(crate) use crate::runtime::vm::instance::RrSegments;
 pub use crate::runtime::vm::instance::{
     GcHeapAllocationIndex, Instance, InstanceAllocationRequest, InstanceAllocator, InstanceHandle,
     MemoryAllocationIndex, OnDemandInstanceAllocator, TableAllocationIndex,
@@ -114,6 +116,7 @@ pub use crate::runtime::vm::instance::{
     PoolConcurrencyLimitError, PoolingAllocatorMetrics, PoolingInstanceAllocator,
 };
 pub use crate::runtime::vm::interpreter::*;
+pub use crate::runtime::vm::memory::WATCH_CLEAN;
 #[cfg(feature = "debug")]
 pub use crate::runtime::vm::memory::WATCH_DEBUG;
 pub use crate::runtime::vm::memory::{Memory, ShadowMemory, SharedMemory};
@@ -228,6 +231,10 @@ pub unsafe trait VMStore: 'static {
     /// Invoke a debug handler, if present, at a debug event.
     #[cfg(feature = "debug")]
     fn block_on_debug_handler(&mut self, event: crate::DebugEvent) -> crate::Result<()>;
+
+    /// Whether a debug handler is present.
+    #[cfg(feature = "debug")]
+    fn has_debug_handler(&self) -> bool;
 }
 
 impl Deref for dyn VMStore + '_ {

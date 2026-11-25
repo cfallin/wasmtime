@@ -797,6 +797,111 @@ impl Instance {
         result
     }
 
+    /// Resizes a defined memory, for record/replay checkpoints, updating
+    /// this instance's `VMMemoryDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize_memory(
+        mut self: Pin<&mut Self>,
+        idx: DefinedMemoryIndex,
+        len: usize,
+    ) -> Result<()> {
+        let memory = &mut self.as_mut().memories_mut()[idx].1;
+        memory.rr_resize(len)?;
+        let vmmemory = memory.vmmemory();
+        self.set_memory(idx, vmmemory);
+        Ok(())
+    }
+
+    /// Resizes a defined table to `len` bytes of elements, for record/replay
+    /// checkpoints, updating this instance's `VMTableDefinition`.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize_table(
+        mut self: Pin<&mut Self>,
+        idx: DefinedTableIndex,
+        len: usize,
+    ) -> Result<()> {
+        let table = self.as_mut().get_defined_table(idx);
+        table.rr_resize_slots(len)?;
+        let element = table.vmtable();
+        self.set_table(idx, element);
+        Ok(())
+    }
+
+    /// Captures which data and element segments have been dropped, and the
+    /// elements of passive element segments, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_save_segments(
+        mut self: Pin<&mut Self>,
+        prev: Option<&RrSegments>,
+    ) -> Result<RrSegments> {
+        let mut data_lengths = TryVec::new();
+        for i in self.env_module().runtime_data.keys() {
+            let offset = self.offsets().runtime_data_lengths().at(i);
+            // SAFETY: this is the length of a data segment.
+            data_lengths.push(unsafe { *self.vmctx_plus_offset::<u32>(offset) })?;
+        }
+        let mut elements = TryVec::new();
+        for (i, segment) in self.as_mut().passive_elements_mut().iter().enumerate() {
+            let prev = prev.and_then(|p| p.elements.get(i));
+            let same = |prev: &&alloc::sync::Arc<TryVec<ValRaw>>| {
+                let new = &segment.elements;
+                let mut pairs = prev.iter().zip(new.iter());
+                prev.len() == new.len() && pairs.all(|(a, b)| a.get_v128() == b.get_v128())
+            };
+            elements.push(match prev.filter(same) {
+                Some(prev) => prev.clone(),
+                None => {
+                    let mut copy = TryVec::with_capacity(segment.elements.len())?;
+                    for value in &segment.elements {
+                        copy.push(*value)?;
+                    }
+                    try_new::<alloc::sync::Arc<_>>(copy)?
+                }
+            })?;
+        }
+        Ok(RrSegments {
+            data_lengths,
+            elements,
+        })
+    }
+
+    /// Restores segments, without barriers for GC references: checkpoints also
+    /// restore the GC heap.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_restore_segments(
+        mut self: Pin<&mut Self>,
+        image: &RrSegments,
+    ) -> Result<(), OutOfMemory> {
+        for (i, len) in image.data_lengths.iter().enumerate() {
+            let offset = self
+                .offsets()
+                .runtime_data_lengths()
+                .at(RuntimeDataIndex::new(i));
+            // SAFETY: this is the length of a data segment, which was its
+            // length before.
+            unsafe { *self.as_mut().vmctx_plus_offset_mut::<u32>(offset) = *len };
+        }
+        let segments = self.passive_elements_mut().iter_mut();
+        for (segment, elements) in segments.zip(&image.elements) {
+            segment.elements.clear();
+            segment.elements.reserve(elements.len())?;
+            for value in elements.iter() {
+                segment.elements.push(*value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears passive element segments of GC references, without barriers.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_clear_gc_segments(self: Pin<&mut Self>) {
+        for segment in self.passive_elements_mut().iter_mut() {
+            if segment.needs_gc_rooting {
+                segment.elements.clear();
+            }
+        }
+    }
+
     /// Performs a grow operation on the `table_index` specified using `grow`.
     ///
     /// This will handle updating the VMTableDefinition internally as necessary.
@@ -1895,6 +2000,20 @@ impl<T: InstanceLayout> Drop for OwnedInstance<T> {
         }
     }
 }
+
+/// The state of an instance's segments at a record/replay checkpoint.
+#[cfg(feature = "rr")]
+pub(crate) struct RrSegments {
+    data_lengths: TryVec<u32>,
+    elements: TryVec<alloc::sync::Arc<TryVec<ValRaw>>>,
+}
+
+// SAFETY: the function references among the elements belong to the same store
+// as the replay that uses this.
+#[cfg(feature = "rr")]
+unsafe impl Send for RrSegments {}
+#[cfg(feature = "rr")]
+unsafe impl Sync for RrSegments {}
 
 #[derive(Debug)]
 pub(crate) struct PassiveElementSegment {

@@ -12,11 +12,18 @@ use core::task::Poll;
 use objects::{RecordedGlobal, RecordedModule};
 
 mod activation;
+mod checkpoint;
+mod image;
 mod init;
 mod stop;
+mod track;
 
-use activation::{Activation, HostCall, HostValues, Trampolines, Yield};
+use activation::{Activation, HostCall, HostValues, Serial, Trampolines, Yield};
+pub use checkpoint::Checkpoint;
+#[cfg(feature = "gc")]
+pub(crate) use image::PagedImage;
 pub(super) use stop::{Epochs, Stop};
+pub(super) use track::Histories;
 
 /// Replays a trace, one stop at a time, without calling the original host
 /// functions.
@@ -41,10 +48,20 @@ pub struct Replayer {
     /// The activation that stopped at a point that isn't in the trace, which
     /// resumes before anything else.
     paused: Option<RecordedCall>,
+    /// The write that the paused activation, which stopped at a watchpoint,
+    /// will perform.
+    #[cfg(feature = "debug")]
+    pending_write: Option<(Memory, Range<usize>)>,
     /// What guest code did when it last ran, until the trace's next record is
     /// checked against it.
     observed: Option<Observed>,
+    /// The instances, including those that have not been created at the
+    /// current point of a replay that was rewound.
     instances: TryVec<Instance>,
+    /// How many objects have been created at the current point.
+    defined: Defined,
+    next_serial: Serial,
+    checkpoints: checkpoint::Checkpoints,
     /// The startup function of a newly created instance, which must run before
     /// anything else.
     pending_startup: Option<RecordedFunc>,
@@ -85,6 +102,16 @@ pub enum ReplayStop {
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
+}
+
+/// How many of the objects in the store have been created at a point in the
+/// replay. A replay that is rewound keeps the rest.
+#[derive(Clone, Copy, Default)]
+struct Defined {
+    memories: usize,
+    tables: usize,
+    globals: usize,
+    instances: usize,
 }
 
 enum Observed {
@@ -151,8 +178,13 @@ impl Replayer {
             next_module: RecordedModule::from_u32(0),
             activations: TryVec::new(),
             paused: None,
+            #[cfg(feature = "debug")]
+            pending_write: None,
             observed: None,
             instances: TryVec::new(),
+            defined: Defined::default(),
+            next_serial: 0,
+            checkpoints: Default::default(),
             pending_startup: None,
             observers: Vec::new(),
             stop_at_events: false,
@@ -182,7 +214,7 @@ impl Replayer {
     }
 
     /// Calls `observer` with each recorded event of type `E` as replay reaches
-    /// it. Observers cannot affect the replay.
+    /// it, including again after replay is rewound. Observers cannot affect the replay.
     pub fn on_event<E: TraceEvent>(&mut self, mut observer: impl FnMut(E) + Send + 'static) {
         self.observers.push((
             E::TAG,
@@ -327,7 +359,7 @@ impl Replayer {
     /// The instances that have been created so far, in order. Components replay
     /// as the core instances that they instantiate.
     pub fn instances(&self) -> &[Instance] {
-        &self.instances
+        &self.instances[..self.defined.instances]
     }
 
     /// The store being replayed into, for inspection.
@@ -426,11 +458,23 @@ impl Replayer {
         ensure!(!self.failed, "replay cannot continue after it failed");
         self.failed = true;
         if let Some(paused) = self.paused.take() {
+            #[cfg(feature = "debug")]
+            {
+                self.pending_write = None;
+            }
             let index = self.activations.iter().position(|a| a.call == paused);
             self.resume_running(index.unwrap(), None)?;
             self.failed = false;
             return Ok(());
         }
+        if !self.replay_creations()? {
+            self.step_record()?;
+        }
+        self.failed = false;
+        Ok(())
+    }
+
+    fn step_record(&mut self) -> Result<()> {
         let trace = self.trace.clone();
         let mut reader = Reader::at(&trace.bytes, self.offset);
         let (tag, mut body) = reader.record()?;
@@ -439,7 +483,6 @@ impl Replayer {
         if tag == codec::END {
             reader.end()?;
         }
-        self.failed = false;
         Ok(())
     }
 
@@ -460,7 +503,9 @@ impl Replayer {
                 match tag {
                     codec::HOST | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
                         let store = self.store.as_context_mut().0;
-                        init::replay_object(store, &self.trampolines, tag, body)
+                        init::replay_object(store, &self.trampolines, tag, body)?;
+                        self.note_defined();
+                        Ok(())
                     }
                     codec::MODULE => self.module(body),
                     codec::INSTANCE => {
@@ -470,6 +515,7 @@ impl Replayer {
                         let (instance, startup) = init::replay_instance(store, body)?;
                         self.instances.push(instance)?;
                         self.pending_startup = startup;
+                        self.note_defined();
                         Ok(())
                     }
                     codec::WRITE => self.write(body),
@@ -487,6 +533,17 @@ impl Replayer {
                 }
             }
         }
+    }
+
+    /// Notes the objects that were just created.
+    fn note_defined(&mut self) {
+        let objects = self.store.as_context().0.rr_objects();
+        self.defined = Defined {
+            memories: objects.memories.len(),
+            tables: objects.tables.len(),
+            globals: objects.globals.len(),
+            instances: self.instances.len(),
+        };
     }
 
     /// Replays a module's first instantiation, which the instance's record
@@ -544,7 +601,9 @@ impl Replayer {
         }
         body.end()?;
         self.activations.reserve(1)?;
-        let activation = Activation::new(store, &self.trampolines, func, call, values)?;
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        let activation = Activation::new(store, &self.trampolines, serial, func, call, values)?;
         self.activations.push(activation)?;
         self.resume(self.activations.len() - 1, None)
     }
@@ -651,8 +710,7 @@ impl Replayer {
         );
         // Keep these in the order in which they started.
         let activation = self.activations.drain(index..=index).next().unwrap();
-        activation.dispose(self.store.as_context_mut().0);
-        Ok(())
+        self.retire(activation)
     }
 
     /// Replays a write to a memory by the host.
@@ -662,11 +720,13 @@ impl Replayer {
         let bytes = body.rest();
         let store = self.store.as_context_mut().0;
         let memory = store.rr_replayed_memory(id)?;
-        offset
+        let range = offset
             .checked_add(bytes.len())
-            .and_then(|end| memory.data_mut_untracked(store).get_mut(offset..end))
-            .ok_or_else(|| format_err!("out-of-bounds memory write in trace"))?
-            .copy_from_slice(bytes);
+            .filter(|end| *end <= memory.internal_data_size(store))
+            .map(|end| offset..end)
+            .ok_or_else(|| format_err!("out-of-bounds memory write in trace"))?;
+        store.rr_memory_written(memory, range.clone())?;
+        memory.data_mut_untracked(store)[range].copy_from_slice(bytes);
         Ok(())
     }
 
@@ -741,7 +801,12 @@ impl Replayer {
                 Some(Stop::Yield) => self.yield_now = true,
                 Some(Stop::Breakpoint) => self.stop = Some(ReplayStop::Breakpoint),
                 #[cfg(feature = "debug")]
-                Some(Stop::Watchpoint(hit)) => self.stop = Some(ReplayStop::Watchpoint(hit)),
+                Some(Stop::Watchpoint(hit)) => {
+                    let start = usize::try_from(hit.address).unwrap_or(usize::MAX);
+                    let len = usize::try_from(hit.len).unwrap_or(usize::MAX);
+                    self.pending_write = Some((hit.memory, start..start.saturating_add(len)));
+                    self.stop = Some(ReplayStop::Watchpoint(hit));
+                }
                 Some(Stop::Interrupt) => self.stop = Some(ReplayStop::Interrupted),
                 None => bail!("replay activation stopped for no reason"),
             }
@@ -795,6 +860,9 @@ impl Replayer {
 impl Drop for Replayer {
     fn drop(&mut self) {
         while let Some(activation) = self.activations.pop() {
+            activation.dispose(self.store.as_context_mut().0);
+        }
+        for activation in self.checkpoints.take_retired() {
             activation.dispose(self.store.as_context_mut().0);
         }
     }

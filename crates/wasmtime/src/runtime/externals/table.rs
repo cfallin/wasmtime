@@ -580,6 +580,25 @@ impl Table {
         Table { instance, index }
     }
 
+    /// The raw bytes of this table's elements, for record/replay
+    /// checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_slots<'a>(&self, store: &'a mut StoreOpaque) -> Result<&'a mut [u8]> {
+        self.instance
+            .get_mut(store)
+            .get_defined_table(self.index)
+            .rr_slots()
+    }
+
+    /// Resizes this table to `len` bytes of elements, for record/replay
+    /// checkpoints. Added elements are null.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_resize(&self, store: &mut StoreOpaque, len: usize) -> Result<()> {
+        self.instance
+            .get_mut(store)
+            .rr_resize_table(self.index, len)
+    }
+
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Table {
         let module = store[self.instance].env_module();
         let index = module.table_index(self.index);

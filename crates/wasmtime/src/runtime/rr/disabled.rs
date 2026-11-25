@@ -110,6 +110,15 @@ impl StoreOpaque {
     }
 
     #[inline]
+    pub(crate) fn rr_memory_written(
+        &mut self,
+        _memory: Memory,
+        _range: Range<usize>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
     pub(crate) fn rr_replay_growth_fails(
         &mut self,
         _object: Growable,

@@ -170,7 +170,8 @@ impl WastContext {
 
     /// Replays the execution of a script, after running it, with
     /// `replay_engine`, checking that it behaves as it did when recorded. If
-    /// that engine enables guest debugging then replay also single-steps.
+    /// that engine enables guest debugging then replay also single-steps and
+    /// rewinds.
     ///
     /// This context's engine must be configured for recording, and it can only
     /// run one script.

@@ -1369,6 +1369,9 @@ fn watched_write(
     let bits = shadow.bytes()[start..end]
         .iter()
         .fold(0, |bits, byte| bits | *byte);
+    if bits & crate::runtime::vm::WATCH_CLEAN != 0 {
+        opaque.rr_memory_written(memory, start..end)?;
+    }
     #[cfg(feature = "debug")]
     if bits & crate::runtime::vm::WATCH_DEBUG != 0 {
         let hit = crate::WatchpointHit {

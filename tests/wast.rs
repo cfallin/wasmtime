@@ -100,6 +100,10 @@ fn main() {
 // detected as they run.
 fn supports_record_replay(test: &WastTest) -> bool {
     !test.config.legacy_exceptions()
+        // Checkpoints go through all of the memory's shadow.
+        && !test.config.hogs_memory()
+        && !test.path.ends_with("misc_testsuite/big-memory-behavior.wast")
+        && !test.path.ends_with("misc_testsuite/component-model/big-strings.wast")
         // These expect exact costs, which recording changes.
         && !test.path.to_str().unwrap().contains("misc_testsuite/fuel/")
 }

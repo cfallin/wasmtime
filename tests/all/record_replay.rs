@@ -1857,6 +1857,8 @@ async fn concurrent_component_activations_can_finish_out_of_order() -> Result<()
         })
         .await??;
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(Some(RrConfig::Replaying));
     replay_with(&Engine::new(&config)?, &trace).await?;
     Ok(())
@@ -1903,6 +1905,8 @@ async fn component_async_adapter_callbacks() -> Result<()> {
     let run = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, (41,)).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(Some(RrConfig::Replaying));
     replay_with(&Engine::new(&config)?, &trace).await?;
     Ok(())
@@ -2011,6 +2015,8 @@ async fn component_async_stream_wait() -> Result<()> {
         })
         .await??;
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(Some(RrConfig::Replaying));
     replay_with(&Engine::new(&config)?, &trace).await?;
     Ok(())
@@ -2045,6 +2051,8 @@ async fn component_async_lift_callback() -> Result<()> {
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, ()).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(Some(RrConfig::Replaying));
     let replay = replay_with(&Engine::new(&config)?, &trace).await?;
     let calls = replay.instances()[0]
@@ -2131,6 +2139,8 @@ async fn component_async_lower_futures_and_cancellation() -> Result<()> {
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, ()).await?, (42,));
     let trace = store.finish_recording()?;
+    #[cfg(feature = "debug")]
+    check_rewinds(config.clone(), &trace).await?;
     config.rr(Some(RrConfig::Replaying));
     replay_with(&Engine::new(&config)?, &trace).await?;
     Ok(())
@@ -2242,6 +2252,7 @@ async fn gc_during_callbacks_sees_parked_roots() -> Result<()> {
 const GC_LIST: &str = r#"
 (module
   (type $s (struct (field (mut i32)) (field (ref null $s))))
+  (import "" "report" (func $report (param i32)))
   (global $list (export "list") (mut (ref null $s)) (ref.null $s))
   (func $churn (param $n i32)
     (local $i i32)
@@ -2258,6 +2269,7 @@ const GC_LIST: &str = r#"
               (i32.add (struct.get $s 0 (global.get $list)) (i32.const 100)))))
     (global.set $list (struct.new $s (local.get $k) (global.get $list)))
     (call $churn (i32.const 20000))
+    (call $report (local.get $k))
     (local.set $x (global.get $list))
     block
       loop
@@ -2412,8 +2424,9 @@ async fn gc_heaps_are_replayed() -> Result<()> {
     ] {
         let recording = gc_engine(RrConfig::Recording, collector)?;
         let mut store = Store::new_recording(&recording, ())?;
+        let report = Func::wrap(&mut store, |_: i32| ());
         let module = new_module(&recording, GC_LIST)?;
-        let instance = Instance::new(&mut store, &module, &[])?;
+        let instance = Instance::new(&mut store, &module, &[report.into()])?;
         let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
         for k in 0..6 {
             // Fails with the null collector once its heap is exhausted, which
@@ -2437,8 +2450,9 @@ async fn gc_heaps_are_replayed() -> Result<()> {
 fn host_mutation_of_gc_objects_poisons_the_recording() -> Result<()> {
     let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
     let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(&mut store, |_: i32| ());
     let module = new_module(&recording, GC_LIST)?;
-    let instance = Instance::new(&mut store, &module, &[])?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
     let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
     step.call(&mut store, 1)?;
     let list = instance.get_global(&mut store, "list").unwrap();
@@ -2967,5 +2981,741 @@ async fn replay_cancelled_at_a_yield_continues() -> Result<()> {
     }
     // Replay continues where it yielded, reproducing the recorded result.
     assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    Ok(())
+}
+
+/// The counter, memory size, and table size of the counter instance.
+fn counter_state(replayer: &mut Replayer) -> (i32, usize, u64, Vec<u8>) {
+    let instance = replayer.instances()[0];
+    let store = replayer.store();
+    let count = instance
+        .get_global(&store, "count")
+        .unwrap()
+        .get(&store)
+        .unwrap_i32();
+    let memory = instance.get_memory(&store, "memory").unwrap();
+    let table = instance.get_table(&store, "table").unwrap();
+    (
+        count,
+        memory.data_size(&store),
+        table.size(&store),
+        memory.data(&store)[..32].to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn checkpoints_rewind_guest_state_and_events() -> Result<()> {
+    let trace = record_counter(6)?;
+    let mut replayer = new_replayer(&trace)?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+    replayer.stop_at_events(true);
+
+    let initial = replayer.checkpoint()?;
+    // Stop at the reports of steps 0 and 3: before and after growth, each
+    // with the guest parked in the middle of a host call.
+    let mut checkpoints = Vec::new();
+    let mut states = Vec::new();
+    while let ReplayStop::Event(_) = replayer.run().await? {
+        let step = *seen.lock().unwrap().last().unwrap();
+        if step == 0 || step == 3 {
+            checkpoints.push(replayer.checkpoint()?);
+            states.push(counter_state(&mut replayer));
+        }
+    }
+    let end = counter_state(&mut replayer);
+    assert_eq!(end.0, 6);
+    assert_eq!((end.1, end.2), (2 << 16, 4));
+    assert_eq!(states[0].0, 1);
+    assert_eq!((states[0].1, states[0].2), (1 << 16, 1));
+    assert_eq!(states[1].0, 4);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+
+    // Rewind after the end, to before growth; then jump forward past growth,
+    // back again, and replay to the end from each.
+    for &which in &[0, 1, 0, 1] {
+        replayer.restore(&checkpoints[which])?;
+        assert_eq!(counter_state(&mut replayer), states[which]);
+        seen.lock().unwrap().clear();
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        replayer.stop_at_events(true);
+        let expected: Vec<i32> = if which == 0 {
+            (1..6).collect()
+        } else {
+            (4..6).collect()
+        };
+        assert_eq!(*seen.lock().unwrap(), expected);
+        assert_eq!(counter_state(&mut replayer), end);
+    }
+
+    // Restart from before any object existed.
+    replayer.restore(&initial)?;
+    assert!(replayer.instances().is_empty());
+    seen.lock().unwrap().clear();
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(counter_state(&mut replayer), end);
+
+    // Checkpoints only restore into their own replay.
+    drop(replayer);
+    let mut other = new_replayer(&trace)?;
+    assert!(other.restore(&checkpoints[0]).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_pages() -> Result<()> {
+    let trace = record_pages()?;
+    let contents = |replayer: &mut Replayer| {
+        let instance = replayer.instances()[0];
+        let mut store = replayer.store();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        memory.data(&store).to_vec()
+    };
+    for page_size in [4096, 64, 1] {
+        let mut replayer = new_replayer(&trace)?;
+        replayer.set_checkpoint_page_size(page_size)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = Vec::new();
+        let mut images = Vec::new();
+        while let ReplayStop::Event(_) = replayer.run().await? {
+            let checkpoint = replayer.checkpoint()?;
+            let stored = checkpoint.copied_bytes();
+            if checkpoints.is_empty() {
+                // The memory's contents so far are its tracking baseline.
+                assert_eq!(stored, 0);
+            } else {
+                // A few pages written since the previous checkpoint.
+                assert!(stored > 0 && stored <= 8 * page_size.max(16), "{stored}");
+            }
+            checkpoints.push(checkpoint);
+            images.push(contents(&mut replayer));
+        }
+        assert_eq!(checkpoints.len(), 6);
+        assert!(set_checkpoint_page_size_fails(&mut replayer));
+        let end = contents(&mut replayer);
+        assert_eq!(&end[150_000..150_003], b"xyz");
+        assert_eq!(&end[200_005..200_008], &[6; 3]);
+
+        for &which in &[3, 0, 5, 1, 4, 2, 2, 0] {
+            replayer.restore(&checkpoints[which])?;
+            assert!(
+                contents(&mut replayer) == images[which],
+                "checkpoint {which}"
+            );
+        }
+        // Replaying forward from a restored checkpoint reproduces the rest.
+        replayer.restore(&checkpoints[1])?;
+        replayer.stop_at_events(false);
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        assert!(contents(&mut replayer) == end);
+        replayer.restore(&checkpoints[4])?;
+        assert!(contents(&mut replayer) == images[4]);
+    }
+    Ok(())
+}
+
+fn set_checkpoint_page_size_fails(replayer: &mut Replayer) -> bool {
+    replayer.set_checkpoint_page_size(128).is_err()
+}
+
+const TABLES: &str = r#"
+(module
+  (import "" "report" (func $report (param i32)))
+  (type $t (func (result i32)))
+  (table $t0 (export "table") 1000 funcref)
+  (elem (table $t0) (i32.const 0) func $f0 $f1 $f2 $f3)
+  (elem $passive func $f3 $f2 $f1)
+  (func $f0 (result i32) i32.const 0)
+  (func $f1 (result i32) i32.const 1)
+  (func $f2 (result i32) i32.const 2)
+  (func $f3 (result i32) i32.const 3)
+  (func (export "step") (param $k i32) (result i32)
+    (table.set $t0 (i32.add (i32.const 100) (local.get $k))
+      (table.get $t0 (i32.rem_u (local.get $k) (i32.const 4))))
+    (table.fill $t0 (i32.add (i32.const 500) (i32.mul (local.get $k) (i32.const 3)))
+      (ref.func $f2) (i32.const 3))
+    (table.copy $t0 $t0 (i32.add (i32.const 700) (local.get $k)) (i32.const 0) (i32.const 2))
+    (table.init $t0 $passive (i32.add (i32.const 900) (local.get $k)) (i32.const 0) (i32.const 3))
+    (if (i32.eq (local.get $k) (i32.const 2))
+      (then (drop (table.grow $t0 (ref.func $f1) (i32.const 10)))))
+    (call $report (local.get $k))
+    (call_indirect $t0 (type $t) (i32.rem_u (local.get $k) (i32.const 4)))))
+"#;
+
+#[tokio::test]
+async fn checkpoints_copy_only_written_table_slots() -> Result<()> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = new_module(&recording, TABLES)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    for k in 0..6 {
+        step.call(&mut store, k)?;
+    }
+    let trace = store.finish_recording()?;
+
+    // The raw function references of every slot.
+    let contents = |replayer: &mut Replayer| {
+        let instance = replayer.instances()[0];
+        let store = replayer.store();
+        let table = instance.get_table(&store, "table").unwrap();
+        (0..table.size(&store))
+            .map(|i| match table.get_if_initialized(&store, i) {
+                Some(Ref::Func(f)) => f.map(|f| f.to_raw(&store) as usize),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut replayer = new_replayer(&trace)?;
+    replayer.stop_at_events(true);
+    let mut checkpoints = Vec::new();
+    let mut images = Vec::new();
+    while let ReplayStop::Event(_) = replayer.run().await? {
+        let checkpoint = replayer.checkpoint()?;
+        let slots = checkpoint.copied_bytes() / std::mem::size_of::<usize>();
+        if checkpoints.is_empty() {
+            assert_eq!(slots, 1000);
+        } else {
+            // Groups of 128 slots, not the whole table.
+            assert!(slots > 0 && slots <= 5 * 128, "{slots}");
+        }
+        checkpoints.push(checkpoint);
+        images.push(contents(&mut replayer));
+    }
+    let end = contents(&mut replayer);
+    assert_eq!(end.len(), 1010);
+    for &which in &[4, 0, 5, 1, 3, 2, 0] {
+        replayer.restore(&checkpoints[which])?;
+        assert!(
+            contents(&mut replayer) == images[which],
+            "checkpoint {which}"
+        );
+    }
+    replayer.restore(&checkpoints[1])?;
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    assert_eq!(contents(&mut replayer), end);
+    Ok(())
+}
+
+/// The contents of every exported memory of the replayed instances.
+fn exported_memories(replayer: &Replayer) -> Vec<Vec<u8>> {
+    let store = replayer.store();
+    let mut memories = Vec::new();
+    for instance in replayer.instances() {
+        for export in instance.module(&store).exports() {
+            if let Some(memory) = instance.get_memory(&store, export.name()) {
+                memories.push(memory.data(&store).to_vec());
+            }
+        }
+    }
+    memories
+}
+
+/// Replays `trace`, single-stepping all guest code and checkpointing every
+/// few stops. Then rewinds to each checkpoint, in several orders, and replays
+/// to the end again: every run must end in the same state.
+#[cfg(feature = "debug")]
+async fn check_rewinds(mut config: Config, trace: &Trace) -> Result<()> {
+    config.rr(Some(RrConfig::Replaying)).guest_debug(true);
+    let mut replayer = new_replayer_with(&Engine::new(&config)?, trace)?;
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+    let mut checkpoints = vec![replayer.checkpoint()?];
+    let mut stops = 0;
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        stops += 1;
+        if stops % 7 == 0 {
+            checkpoints.push(replayer.checkpoint()?);
+        }
+    }
+    assert!(stops > 0);
+    let expected = exported_memories(&replayer);
+    replayer.edit_breakpoints(|b| b.single_step(false))?;
+    let n = checkpoints.len();
+    let order = (0..n)
+        .rev()
+        .chain((0..n).step_by(2))
+        .chain([n / 2, 0, n - 1]);
+    for k in order {
+        replayer.restore(&checkpoints[k])?;
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        assert_eq!(exported_memories(&replayer), expected);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn rewinding_while_debugging() -> Result<()> {
+    let trace = record_counter(4)?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    let initial = replayer.checkpoint()?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+
+    // Run until the guest first reports, then single-step it to the end,
+    // recording every stop.
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+    let mut trail = Vec::new();
+    let mut checkpoints = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        checkpoints.push(replayer.checkpoint()?);
+        trail.push(position(&mut replayer)?);
+    }
+    assert!(trail.len() > 20, "{} steps", trail.len());
+    assert_eq!(trail.last().unwrap().3, 4);
+    assert!(trail.windows(2).all(|w| w[0].2 <= w[1].2));
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3]);
+
+    // Step backwards from the end, one stop at a time, by restoring the
+    // previous stop's checkpoint: the guest is exactly where it was.
+    for (k, checkpoint) in checkpoints.iter().enumerate().rev() {
+        replayer.restore(checkpoint)?;
+        assert_eq!(position(&mut replayer)?, trail[k]);
+    }
+
+    // From the middle, stepping forward again retraces the same path and
+    // re-delivers the same events.
+    let middle = trail.len() / 2;
+    replayer.restore(&checkpoints[middle])?;
+    seen.lock().unwrap().clear();
+    let mut again = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        again.push(position(&mut replayer)?);
+    }
+    assert_eq!(again, trail[middle + 1..]);
+    let reports = trail[middle + 1..]
+        .windows(2)
+        .filter(|w| w[0].2 != w[1].2)
+        .count();
+    assert_eq!(seen.lock().unwrap().len(), reports);
+
+    // Breakpoints persist across a restore to the very beginning: with a
+    // breakpoint at one PC in the loop, replay stops there once per
+    // iteration.
+    let (_, pc, _, _) = trail[0];
+    replayer.restore(&initial)?;
+    assert!(replayer.instances().is_empty());
+    assert_eq!(replayer.run().await?, ReplayStop::Breakpoint);
+    let instance = replayer.instances()[0];
+    let module = instance.module(replayer.store()).clone();
+    replayer.edit_breakpoints(|breakpoints| {
+        breakpoints.single_step(false)?;
+        breakpoints.add_breakpoint(&module, ModulePC::new(pc))?;
+        Ok(())
+    })?;
+    let mut hits = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        hits.push(position(&mut replayer)?);
+    }
+    assert!(hits.iter().all(|h| h.1 == pc));
+    let iterations = hits.iter().map(|h| h.2).collect::<Vec<_>>();
+    assert!(iterations.windows(2).all(|w| w[0] < w[1]));
+    replayer.restore(&initial)?;
+    let mut from_start = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        from_start.push(position(&mut replayer)?);
+    }
+    assert_eq!(from_start.len(), 4);
+    assert!(from_start.ends_with(&hits));
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn rewinding_into_nested_activations() -> Result<()> {
+    let (mut record, run, _) = nested()?;
+    run.typed::<(), i32>(&record)?.call(&mut record, ())?;
+    let trace = record.finish_recording()?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+
+    // Each stop's defined functions, innermost first: `callback` is 0, `fail`
+    // is 1, and `run` is 2.
+    fn stack(replayer: &mut Replayer) -> Result<Vec<u32>> {
+        let frames = replayer.debug_exit_frames();
+        let store = replayer.store();
+        frames
+            .iter()
+            .map(|f| Ok(f.wasm_function_index_and_pc(&store)?.unwrap().0.as_u32()))
+            .collect()
+    }
+    let mut stacks = Vec::new();
+    let mut checkpoints = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        stacks.push(stack(&mut replayer)?);
+        checkpoints.push(replayer.checkpoint()?);
+    }
+    // Callbacks from the host function are separate activations, shown
+    // beneath the stopped one.
+    assert!(stacks.contains(&vec![2]));
+    assert!(stacks.contains(&vec![0, 2]));
+    assert!(stacks.contains(&vec![1, 2]));
+    let end = exported_memories(&replayer);
+
+    // Rewind into the callback, with `run` parked in the host function, and
+    // replay onwards from there, twice.
+    let k = stacks.iter().position(|s| s == &[0, 2]).unwrap();
+    for _ in 0..2 {
+        replayer.restore(&checkpoints[k])?;
+        assert_eq!(stack(&mut replayer)?, stacks[k]);
+        let mut rest = Vec::new();
+        while replayer.run().await? == ReplayStop::Breakpoint {
+            rest.push(stack(&mut replayer)?);
+        }
+        assert_eq!(rest, stacks[k + 1..]);
+        assert_eq!(exported_memories(&replayer), end);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn rewinding_to_watchpoints() -> Result<()> {
+    let trace = record_pages()?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    let instance = replayer.instances()[0];
+    let memory = instance.get_memory(replayer.store(), "memory").unwrap();
+    // Step 1's store, and the second instance's data segment.
+    replayer.edit_breakpoints(|b| b.watch(memory, 8192..8194))?;
+    replayer.edit_breakpoints(|b| b.watch(memory, 150_002..150_010))?;
+    let first = replayer.checkpoint()?;
+
+    let mut hits = Vec::new();
+    let mut at_hits = Vec::new();
+    loop {
+        match replayer.run().await? {
+            ReplayStop::Watchpoint(hit) => {
+                assert_eq!(
+                    hit.memory.debug_index_in_store(),
+                    memory.debug_index_in_store()
+                );
+                // The write has not happened yet.
+                let at = usize::try_from(hit.address)?;
+                let data = memory.data(replayer.store());
+                assert!(data[at..at + 4].iter().all(|b| *b == 0));
+                at_hits.push(replayer.checkpoint()?);
+                hits.push((hit.address, hit.len, hit.value));
+            }
+            ReplayStop::Finished => break,
+            stop => panic!("unexpected stop {stop:?}"),
+        }
+    }
+    assert_eq!(hits, [(8192, 4, Some(2)), (150_000, 3, None)]);
+    let data = memory.data(replayer.store());
+    assert_eq!(&data[8192..8196], &2_u32.to_le_bytes());
+    assert_eq!(&data[150_000..150_003], b"xyz");
+
+    // A checkpoint taken at a watchpoint resumes into the write.
+    replayer.restore(&at_hits[0])?;
+    assert_eq!(&memory.data(replayer.store())[8192..8196], &[0; 4]);
+    match replayer.run().await? {
+        ReplayStop::Watchpoint(hit) => assert_eq!(hit.address, 150_000),
+        stop => panic!("unexpected stop {stop:?}"),
+    }
+    assert_eq!(
+        &memory.data(replayer.store())[8192..8196],
+        &2_u32.to_le_bytes()
+    );
+
+    // Watchpoints persist across restores, like breakpoints.
+    replayer.restore(&first)?;
+    let mut again = Vec::new();
+    while let ReplayStop::Watchpoint(hit) = replayer.run().await? {
+        again.push((hit.address, hit.len, hit.value));
+    }
+    assert_eq!(again, hits);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn rewinding_to_an_interrupt() -> Result<()> {
+    // A long loop with no trace events, which only an epoch check can stop.
+    const SPIN: &str = r#"
+    (module
+      (func (export "spin") (param $n i32) (result i32)
+        (local $i i32) (local $acc i32)
+        loop
+          (local.set $acc (i32.add (local.get $acc) (i32.mul (local.get $i) (i32.const 3))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $acc))
+    "#;
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let module = new_module(&recording, SPIN)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 10_000_000)?;
+    let trace = store.finish_recording()?;
+
+    let mut config = Config::new();
+    config
+        .rr(Some(RrConfig::Replaying))
+        .guest_debug(true)
+        .epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut replayer = new_replayer_with(&engine, &trace)?;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    replayer.set_interrupt_flag(flag.clone());
+    // An interrupt request stops replay at the next epoch check once the
+    // epoch advances (in practice, from another thread while replay runs).
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, ReplayStop::Interrupted);
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    // Stopped in the loop, which can be inspected and checkpointed.
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    frames[0].local(replayer.store(), 1)?.unwrap_i32();
+    let checkpoint = replayer.checkpoint()?;
+    // Epoch ticks without a request do not stop replay, which continues to
+    // the end, reproducing the recorded result, and again from the
+    // interrupted point.
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    replayer.restore(&checkpoint)?;
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn checkpoints_rewind_gc_heaps() -> Result<()> {
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = gc_engine(RrConfig::Recording, collector)?;
+        let mut store = Store::new_recording(&recording, ())?;
+        let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+            rr::record_event(&mut caller, &Step(k))
+        });
+        let module = new_module(&recording, GC_LIST)?;
+        let instance = Instance::new(&mut store, &module, &[report.into()])?;
+        let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+        for k in 0..6 {
+            // Fails with the null collector once its heap is exhausted;
+            // replay reproduces that too.
+            if step.call(&mut store, k).is_err() {
+                break;
+            }
+        }
+        let trace = store.finish_recording()?;
+
+        let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = Vec::new();
+        let mut lists = Vec::new();
+        while let ReplayStop::Event(_) = replayer.run().await? {
+            checkpoints.push(replayer.checkpoint()?);
+            lists.push(gc_list(&replayer)?);
+        }
+        assert!(lists.len() >= 2, "{collector:?}");
+        assert_eq!(lists[1], [1, 100]);
+
+        // Rewind in every direction: the heap, and the globals and stacks
+        // referring into it, are as they were. Replaying on from each
+        // checkpoint reproduces the recorded results, which replay checks.
+        let order = (0..lists.len()).rev().chain([0, lists.len() - 1, 1]);
+        for which in order {
+            replayer.restore(&checkpoints[which])?;
+            assert_eq!(gc_list(&replayer)?, lists[which], "{collector:?}");
+            replayer.stop_at_events(false);
+            assert_eq!(replayer.run().await?, ReplayStop::Finished);
+            replayer.stop_at_events(true);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn unrooted_gc_refs_last_until_replay_moves() -> Result<()> {
+    let collector = Collector::DeferredReferenceCounting;
+    let recording = gc_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, k: i32| {
+        rr::record_event(&mut caller, &Step(k))
+    });
+    let module = new_module(&recording, GC_LIST)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    for k in 0..3 {
+        step.call(&mut store, k)?;
+    }
+    let trace = store.finish_recording()?;
+
+    let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    let checkpoint = replayer.checkpoint()?;
+    let instance = replayer.instances()[0];
+    let head = |replayer: &Replayer| {
+        let s = replayer.store();
+        unrooted_anyref(instance.get_global(&s, "list").unwrap().get(&s)).unwrap()
+    };
+    let unrooted = head(&replayer);
+    assert!(unrooted.as_struct(&replayer.store())?.is_some());
+    // Restoring a checkpoint replaces the heap.
+    replayer.restore(&checkpoint)?;
+    assert!(!unrooted.is_valid(&replayer.store()));
+    let unrooted = head(&replayer);
+    assert!(unrooted.is_valid(&replayer.store()));
+    assert_eq!(gc_list(&replayer)?, [0]);
+    // So does replaying on.
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    assert!(!unrooted.is_valid(&replayer.store()));
+    assert_eq!(gc_list(&replayer)?, [1, 100]);
+    replayer.stop_at_events(false);
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewinding_restores_dropped_segments() -> Result<()> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>| {
+        rr::record_event(&mut caller, &Step(0))
+    });
+    let module = new_module(
+        &recording,
+        r#"(module
+        (import "" "report" (func $report))
+        (memory 1) (table 1 funcref)
+        (data $data "x") (elem $elem func $f) (func $f)
+        (func (export "run")
+            (call $report)
+            (memory.init $data (i32.const 0) (i32.const 0) (i32.const 1))
+            (table.init $elem (i32.const 0) (i32.const 0) (i32.const 1))
+            data.drop $data
+            elem.drop $elem)
+        (func (export "data")
+            (memory.init $data (i32.const 0) (i32.const 0) (i32.const 1)))
+        (func (export "elem")
+            (table.init $elem (i32.const 0) (i32.const 0) (i32.const 1))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    for (name, ok) in [("run", true), ("data", false), ("elem", false)] {
+        let func = instance.get_typed_func::<(), ()>(&mut store, name)?;
+        assert_eq!(func.call(&mut store, ()).is_ok(), ok);
+    }
+    let trace = store.finish_recording()?;
+
+    let mut replayer = new_replayer(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    let checkpoint = replayer.checkpoint()?;
+    for _ in 0..2 {
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        replayer.restore(&checkpoint)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rewinding_reuses_objects() -> Result<()> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    rr::record_event(&mut store, &Step(0))?;
+    let module = new_module(
+        &recording,
+        r#"(module
+        (global $g (export "g") (mut i32) (i32.const 1))
+        (func (export "run") (global.set $g (i32.add (global.get $g) (i32.const 1)))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    rr::record_event(&mut store, &Step(1))?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call(&mut store, ())?;
+    let trace = store.finish_recording()?;
+
+    let mut replayer = new_replayer(&trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    let checkpoint = replayer.checkpoint()?;
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    let instance = replayer.instances()[0];
+    let g = instance.get_global(replayer.store(), "g").unwrap();
+    for _ in 0..20_000 {
+        replayer.restore(&checkpoint)?;
+        assert!(replayer.instances().is_empty());
+        assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+        assert_eq!(replayer.instances().len(), 1);
+        // Handles from the first time still work.
+        assert_eq!(g.get(replayer.store()).unwrap_i32(), 1);
+    }
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    assert_eq!(g.get(replayer.store()).unwrap_i32(), 2);
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn rewinding_past_objects_that_refer_to_the_gc_heap() -> Result<()> {
+    const WAT: &str = r#"
+    (module
+      (type $s (struct (field (mut i32)) (field (ref null $s))))
+      (type $a (array (mut i64)))
+      (global (export "keep") (mut (ref null $s)) (struct.new $s (i32.const 7) (ref.null $s)))
+      (table 4 (ref null $s))
+      (elem $e (ref null $s) (item (struct.new $s (i32.const 1) (ref.null $s))))
+      (func (export "run") (result i32) (local $i i32) (local $x (ref null $a))
+        (table.init $e (i32.const 0) (i32.const 0) (i32.const 1))
+        loop
+          (local.set $x (array.new $a (i64.const -1) (i32.const 50)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (i32.const 20000)))
+        end
+        (struct.get $s 0 (table.get 0 (i32.const 0)))))
+    "#;
+    for collector in [Collector::DeferredReferenceCounting, Collector::Copying] {
+        let recording = gc_engine(RrConfig::Recording, collector)?;
+        let mut store = Store::new_recording(&recording, ())?;
+        let module = new_module(&recording, WAT)?;
+        let run = |store: &mut Store<()>| -> Result<()> {
+            let instance = Instance::new(&mut *store, &module, &[])?;
+            let run = instance.get_typed_func::<(), i32>(&mut *store, "run")?;
+            assert_eq!(run.call(&mut *store, ())?, 1);
+            Ok(())
+        };
+        rr::record_event(&mut store, &Step(0))?;
+        run(&mut store)?;
+        rr::record_event(&mut store, &Step(1))?;
+        run(&mut store)?;
+        let trace = store.finish_recording()?;
+
+        let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+        replayer.stop_at_events(true);
+        assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+        let first = replayer.checkpoint()?;
+        assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+        let second = replayer.checkpoint()?;
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        // The second instance's references must not be traced while the first
+        // one collects garbage.
+        for checkpoint in [&first, &second, &first, &first] {
+            replayer.restore(checkpoint)?;
+            while replayer.run().await? != ReplayStop::Finished {}
+        }
+    }
     Ok(())
 }

@@ -15,7 +15,8 @@
 //!
 //! The embedder can record its own events, such as the program's output, for
 //! replay to report. Replay can also stop at breakpoints, watchpoints, and
-//! single steps, with guest debugging enabled on the replaying engine.
+//! single steps, with guest debugging enabled on the replaying engine, and be
+//! rewound to checkpoints.
 //!
 //! Core function boundaries support numbers, vectors, and abstract function
 //! references. Guest code may use GC and typed function references, but they may

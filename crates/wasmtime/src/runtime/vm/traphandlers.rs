@@ -919,8 +919,14 @@ impl CallThreadState {
         // Also note that this can execute arbitrary WebAssembly code within
         // this block due to the store's debug handler. That means that we
         // might be paused here for quite some time.
+        //
+        // Without a debug handler, skip building the event: an exception's
+        // event roots the exception, and a replaying store must not have roots
+        // into its GC heap, which restoring a checkpoint replaces.
         #[cfg(feature = "debug")]
-        if let Some(UnwindReason::Trap(Ok(trap))) = &unwind {
+        if let Some(UnwindReason::Trap(Ok(trap))) = &unwind
+            && store.has_debug_handler()
+        {
             #[cfg(feature = "gc")]
             use wasmtime_core::alloc::PanicOnOom;
 

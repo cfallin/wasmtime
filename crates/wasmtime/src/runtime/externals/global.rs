@@ -395,6 +395,21 @@ impl Global {
         false
     }
 
+    /// The raw value of this global, for record/replay checkpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_raw(&self, store: &StoreOpaque) -> [u8; 16] {
+        // SAFETY: the definition is valid, plain data.
+        unsafe { self.definition(store).cast::<[u8; 16]>().read() }
+    }
+
+    /// Restores the raw value of this global, without barriers: checkpoints
+    /// restore what it refers to as well.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_set_raw(&self, store: &StoreOpaque, value: &[u8; 16]) {
+        // SAFETY: the definition is valid, plain data, and nothing borrows it.
+        unsafe { self.definition(store).cast::<[u8; 16]>().write(*value) }
+    }
+
     pub(crate) fn wasmtime_ty<'a>(&self, store: &'a StoreOpaque) -> &'a wasmtime_environ::Global {
         self.store.assert_belongs_to(store.id());
         match self.kind {
