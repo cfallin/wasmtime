@@ -2450,3 +2450,135 @@ fn host_mutation_of_gc_objects_poisons_the_recording() -> Result<()> {
     assert!(err.contains("host mutation of GC objects"), "{err}");
     Ok(())
 }
+
+/// Program output, as a WASI implementation could record it.
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Output {
+    stream: u8,
+    text: String,
+}
+
+impl rr::TraceEvent for Output {
+    const TAG: u32 = 1;
+}
+
+/// A guest that prints through a host function which records its output.
+fn printing() -> Result<(Store<()>, TypedFunc<i32, ()>)> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let print = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, ()>, stream: i32, ptr: i32, len: i32| -> Result<()> {
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            let bytes = &memory.data(&caller)[ptr as usize..][..len as usize];
+            let text = String::from_utf8(bytes.to_vec())?;
+            rr::record_event(
+                &mut caller,
+                &Output {
+                    stream: stream as u8,
+                    text,
+                },
+            )
+        },
+    );
+    let module = new_module(
+        &recording,
+        r#"(module
+        (import "" "print" (func $print (param i32 i32 i32)))
+        (memory (export "memory") 1)
+        (data (i32.const 0) "tick err")
+        (func (export "run") (param $n i32)
+            (loop $l
+                (call $print (i32.const 1) (i32.const 0) (i32.const 4))
+                (call $print (i32.const 2) (i32.const 5) (i32.const 3))
+                (br_if $l (local.tee $n (i32.sub (local.get $n) (i32.const 1)))))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    Ok((store, run))
+}
+
+#[tokio::test]
+async fn embedder_events_are_replayed_in_order() -> Result<()> {
+    let (mut store, run) = printing()?;
+    let start = Output {
+        stream: 0,
+        text: "start".to_string(),
+    };
+    rr::record_event(&mut store, &start)?;
+    run.call(&mut store, 2)?;
+    let trace = store.finish_recording()?;
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replayer = new_replayer(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output));
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    drop(replayer);
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            start,
+            tick(1, "tick"),
+            tick(2, "err"),
+            tick(1, "tick"),
+            tick(2, "err"),
+        ]
+    );
+    // Recording outside of a recording does nothing.
+    rr::record_event(&mut store, &tick(0, "ignored"))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
+    let recording = engine(RrConfig::Recording)?;
+    let tick = |stream, text: &str| Output {
+        stream,
+        text: text.to_string(),
+    };
+    // The sink is handed out before recording starts, like the two ends of
+    // a channel; events before the receiver is attached are buffered.
+    let (sink, receiver) = rr::event_channel();
+    sink.record(&tick(9, "early"));
+    let mut store = Store::new_recording(&recording, Some(sink.clone()))?;
+    store.rr_attach_events(receiver)?;
+    // A host function records through a sink, as code without access to
+    // the store would, on another thread.
+    let print = Func::wrap(
+        &mut store,
+        move |caller: Caller<'_, Option<rr::EventSink>>, stream: i32| {
+            let sink = caller.data().clone().unwrap();
+            std::thread::spawn(move || sink.record(&tick(stream as u8, "sunk")))
+                .join()
+                .unwrap();
+        },
+    );
+    let module = new_module(
+        &recording,
+        r#"(module (import "" "print" (func $print (param i32)))
+             (func (export "run") (call $print (i32.const 1)) (call $print (i32.const 2))))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[print.into()])?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    run.call(&mut store, ())?;
+    rr::record_event(&mut store, &tick(0, "direct"))?;
+    sink.record(&tick(3, "last"));
+    let trace = store.finish_recording()?;
+    // Recording after the end does nothing.
+    sink.record(&tick(4, "ignored"));
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut replayer = new_replayer(&trace)?;
+    let observed = seen.clone();
+    replayer.on_event(move |output: Output| observed.lock().unwrap().push(output.stream));
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    // Direct events are recorded immediately; sunk ones at the next boundary,
+    // which for the last one is the end of the recording.
+    assert_eq!(*seen.lock().unwrap(), [9, 1, 2, 0, 3]);
+    Ok(())
+}

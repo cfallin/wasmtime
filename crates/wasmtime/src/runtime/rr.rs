@@ -13,6 +13,9 @@
 //! is unsupported under Miri, with AddressSanitizer, and with hardware-enforced
 //! shadow stacks.
 //!
+//! The embedder can record its own events, such as the program's output, for
+//! replay to report.
+//!
 //! Core function boundaries support numbers, vectors, and abstract function
 //! references. Guest code may use GC and typed function references, but they may
 //! not cross the host boundary, and the host may not write to GC objects. It may

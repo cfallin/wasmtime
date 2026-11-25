@@ -464,6 +464,7 @@ jobs:
               -p wasmtime-wasi --no-default-features --features p1
               -p wasmtime-wasi --no-default-features --features p2
               -p wasmtime-wasi --no-default-features --features p3
+              -p wasmtime-wasi --no-default-features --features rr
 
           - name: wasmtime-wasi-tls
             checks: |

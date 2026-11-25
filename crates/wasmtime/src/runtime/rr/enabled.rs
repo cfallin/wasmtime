@@ -10,6 +10,7 @@ use wasmtime_environ::RrCallKind;
 mod codec;
 #[cfg(feature = "component-model")]
 mod component;
+mod events;
 mod growth;
 mod init;
 mod objects;
@@ -18,6 +19,9 @@ mod replay;
 use codec::{Kind, Reader};
 #[cfg(feature = "component-model")]
 pub(crate) use component::wrap_destructor;
+pub use events::{
+    EventReceiver, EventSink, RESERVED_TAGS, TraceEvent, event_channel, record_event,
+};
 use growth::GrowthFailure;
 use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
 pub use replay::{ReplayStop, Replayer};
@@ -193,6 +197,7 @@ struct Recording {
     next_call: u32,
     /// Memory ranges that the host may have written since the last flush.
     dirty_ranges: TryVec<DirtyRange>,
+    receivers: TryVec<EventReceiver>,
     /// The values of component instance flags when Wasm last called or returned
     /// to the host, parallel to `Objects::flags`.
     flags: TryVec<i32>,
@@ -479,6 +484,9 @@ impl StoreOpaque {
             overlaps
         });
         let result = (|| {
+            for receiver in &self.rr.session.as_mut().unwrap().mode.recording().receivers {
+                receiver.drain(&mut bytes)?;
+            }
             for DirtyRange {
                 memory: id,
                 bytes: range,

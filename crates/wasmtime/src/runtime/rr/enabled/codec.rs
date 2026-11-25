@@ -9,7 +9,7 @@ use crate::store::StoreOpaque;
 use crate::{HeapType, RefType, Trap, ValRaw, ValType};
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0d";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0e";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -30,6 +30,8 @@ pub(super) const TABLE: u8 = 12;
 pub(super) const GROWTH_FAILED: u8 = 13;
 /// The host's write to a component instance flag: `[id, value]`.
 pub(super) const GLOBAL_WRITE: u8 = 14;
+/// An embedder-defined event: `[tag, postcard payload]`.
+pub(super) const EVENT: u8 = 15;
 
 pub(super) const UNSUPPORTED: &str =
     "record/replay does not support GC or typed reference boundaries";

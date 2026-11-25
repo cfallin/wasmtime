@@ -566,6 +566,7 @@ rr = [
   "wasmtime/rr",
   "component-model",
   "wasmtime-cli-flags?/rr",
+  "wasmtime-wasi?/rr",
   "wasmtime-wast?/rr",
   "run",
 ]

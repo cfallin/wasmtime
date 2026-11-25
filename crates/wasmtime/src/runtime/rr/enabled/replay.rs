@@ -39,6 +39,11 @@ pub struct Replayer {
     /// The startup function of a newly created instance, which must run before
     /// anything else.
     pending_startup: Option<RecordedFunc>,
+    /// Observers of embedder events, by tag.
+    observers: Vec<(u32, Observer)>,
+    stop_at_events: bool,
+    /// Why `run` should return, once the current step completes.
+    stop: Option<ReplayStop>,
     /// Storage for encoding values to compare with the trace.
     scratch: TryVec<u8>,
     finished: bool,
@@ -52,6 +57,9 @@ pub struct Replayer {
 pub enum ReplayStop {
     /// The entire trace was replayed.
     Finished,
+    /// An embedder event with this tag was replayed, after its observers ran.
+    /// Only reported when enabled with [`Replayer::stop_at_events`].
+    Event(u32),
 }
 
 enum Observed {
@@ -67,6 +75,8 @@ enum Observed {
         result: Result<()>,
     },
 }
+
+type Observer = Box<dyn FnMut(&[u8]) -> Result<()> + Send>;
 
 /// The bytecode that the embedder provided for the trace's modules.
 #[derive(Default)]
@@ -124,6 +134,9 @@ impl Replayer {
             observed: None,
             instances: TryVec::new(),
             pending_startup: None,
+            observers: Vec::new(),
+            stop_at_events: false,
+            stop: None,
             scratch: TryVec::new(),
             finished: false,
             failed: false,
@@ -145,6 +158,23 @@ impl Replayer {
         Ok(())
     }
 
+    /// Calls `observer` with each recorded event of type `E` as replay reaches
+    /// it. Observers cannot affect the replay.
+    pub fn on_event<E: TraceEvent>(&mut self, mut observer: impl FnMut(E) + Send + 'static) {
+        self.observers.push((
+            E::TAG,
+            Box::new(move |bytes| {
+                observer(postcard::from_bytes(bytes)?);
+                Ok(())
+            }),
+        ));
+    }
+
+    /// Sets whether [`Replayer::run`] stops after each embedder event.
+    pub fn stop_at_events(&mut self, enabled: bool) {
+        self.stop_at_events = enabled;
+    }
+
     /// Replays until the next stop.
     ///
     /// This yields to the async executor periodically, so a long replay can
@@ -163,6 +193,9 @@ impl Replayer {
                 if let Err(e) = self.step() {
                     let e = e.context(format!("replaying the trace record at byte {offset}"));
                     return Poll::Ready(Err(e));
+                }
+                if let Some(stop) = self.stop.take() {
+                    return Poll::Ready(Ok(stop));
                 }
             }
             cx.waker().wake_by_ref();
@@ -263,6 +296,7 @@ impl Replayer {
                     codec::WRITE => self.write(body),
                     codec::GLOBAL_WRITE => self.global_write(body),
                     codec::RESIZE => self.resize(body),
+                    codec::EVENT => self.event(body),
                     codec::END => {
                         // Activations may remain parked at host calls if the
                         // recording ended while they were unfinished.
@@ -459,6 +493,19 @@ impl Replayer {
             .filter(|delta| delta % page_size == 0)
             .ok_or_else(|| format_err!("invalid memory size in trace"))?;
         memory.grow(StoreContextMut(store), delta / page_size)?;
+        Ok(())
+    }
+
+    /// Replays an embedder event.
+    fn event(&mut self, body: &mut Reader<'_>) -> Result<()> {
+        let tag = body.u32()?;
+        let payload = body.rest();
+        for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
+            observer(payload).context("failed to observe a trace event")?;
+        }
+        if self.stop_at_events {
+            self.stop = Some(ReplayStop::Event(tag));
+        }
         Ok(())
     }
 
