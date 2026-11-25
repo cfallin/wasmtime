@@ -110,6 +110,12 @@ pub struct RunCommon {
     #[cfg(feature = "gdbstub")]
     #[arg(short = 'g', long = "gdbstub", value_name = "[ADDR:]PORT")]
     pub gdbstub: Option<String>,
+
+    /// The modules of the Wasm compiled by `load_module`, by checksum, which
+    /// `-R bundle` includes in trace bundles.
+    #[cfg(feature = "rr")]
+    #[arg(skip)]
+    pub(crate) bundle_modules: std::sync::Mutex<crate::rr::BundleModules>,
 }
 
 fn parse_env_var(s: &str) -> Result<(String, Option<String>)> {
@@ -269,6 +275,17 @@ impl RunCommon {
         deserialize_module: impl FnOnce() -> Result<Module>,
         #[cfg(feature = "component-model")] deserialize_component: impl FnOnce() -> Result<Component>,
     ) -> Result<RunTarget> {
+        #[cfg(feature = "rr")]
+        if self.recording() && self.common.record.bundle == Some(true) {
+            if Engine::detect_precompiled(bytes).is_some() {
+                bail!("`-R bundle` requires Wasm input, not precompiled code");
+            }
+            let modules = wasmtime::rr::core_modules(engine, bytes)?;
+            let mut bundle = self.bundle_modules.lock().unwrap();
+            for (checksum, wasm) in modules {
+                bundle.insert(checksum, wasm.into());
+            }
+        }
         Ok(match Engine::detect_precompiled(bytes) {
             Some(Precompiled::Module) => {
                 self.ensure_allow_precompiled()?;

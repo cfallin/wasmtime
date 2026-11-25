@@ -25,6 +25,9 @@ pub mod commands;
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub(crate) mod code_builder;
 
+#[cfg(feature = "rr")]
+mod rr;
+
 #[cfg(any(feature = "run", feature = "wizer"))]
 pub(crate) mod common;
 
