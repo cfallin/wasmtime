@@ -180,9 +180,21 @@ impl Replayer {
     /// The store being replayed into, for inspection.
     ///
     /// Only the replay may change the store's state, so this gives only shared
-    /// access to it.
+    /// access to it. GC objects are read as [`Unrooted`](crate::Unrooted)
+    /// references, which are valid until replay continues.
     pub fn store(&self) -> StoreContext<'_, ()> {
         self.store.as_context()
+    }
+
+    /// The most recent exception that guest code threw and that reached the
+    /// host.
+    ///
+    /// It remains available after the recorded host took it from the store (with
+    /// [`Store::take_pending_exception`]), until guest code throws another
+    /// exception.
+    #[cfg(feature = "gc")]
+    pub fn pending_exception(&self) -> Option<crate::Unrooted<crate::ExnRef>> {
+        self.store.as_context().0.rr_pending_exception()
     }
 
     /// Looks up `instance`'s export `name`, as [`Instance::get_export`] does.
@@ -240,6 +252,8 @@ impl Replayer {
                         init::replay_object(store, &self.trampolines, &self.bytecode, tag, body)
                     }
                     codec::INSTANCE => {
+                        // Allocating the instance may collect garbage.
+                        self.publish_parked(None)?;
                         let store = self.store.as_context_mut().0;
                         let (instance, startup) = init::replay_instance(store, body)?;
                         self.instances.push(instance)?;
@@ -455,7 +469,8 @@ impl Replayer {
         growth_failures.reverse();
         let store = self.store.as_context_mut().0;
         store.rr_session().mode.replaying().growth_failures = growth_failures;
-
+        self.publish_parked(Some(index))?;
+        let store = self.store.as_context_mut().0;
         let activation = &mut self.activations[index];
         let yielded = activation.resume(store, pending)?;
         // Failures from code that ran on the activation and could not return
@@ -484,6 +499,26 @@ impl Replayer {
         Ok(())
     }
 
+    /// Publishes the suspended activations, other than the `running` one, whose
+    /// frames the garbage collector must trace.
+    fn publish_parked(&mut self, running: Option<usize>) -> Result<()> {
+        let parked = &mut self
+            .store
+            .as_context_mut()
+            .0
+            .rr_session()
+            .mode
+            .replaying()
+            .parked;
+        parked.clear();
+        for (i, activation) in self.activations.iter().enumerate() {
+            if Some(i) != running && activation.host.is_some() {
+                parked.push(activation.exit_state())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Reads the records of growth that fails while guest code runs, which
     /// follow the record that resumes it.
     fn read_growth_failures(&mut self) -> Result<TryVec<GrowthFailure>> {
@@ -507,6 +542,33 @@ impl Drop for Replayer {
 }
 
 impl StoreOpaque {
+    /// Traces the GC roots in the frames of suspended activations, which are on
+    /// other fibers than the running one.
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_trace_parked_roots(&self, roots: &mut crate::vm::GcRootsList) {
+        let Some(Mode::Replaying(replaying)) = self.rr.session.as_deref().map(|s| &s.mode) else {
+            return;
+        };
+        for exit in &replaying.parked {
+            // SAFETY: the stacks of suspended activations are intact, and their
+            // exit state describes their Wasm frames.
+            let _ = unsafe {
+                let fp =
+                    crate::vm::VMStoreContext::wasm_exit_fp_from_trampoline_fp(exit.trampoline_fp);
+                wasmtime_unwinder::visit_frames::<()>(
+                    self.unwinder(),
+                    exit.pc,
+                    fp,
+                    exit.entry_fp,
+                    |frame| {
+                        StoreOpaque::trace_wasm_stack_frame(self.modules(), roots, frame);
+                        core::ops::ControlFlow::Continue(())
+                    },
+                )
+            };
+        }
+    }
+
     fn rr_replayed_memory(&self, id: RecordedMemory) -> Result<Memory> {
         self.rr_objects()
             .memories

@@ -613,6 +613,12 @@ impl StructRef {
     ///
     /// Panics if this reference is associated with a different store.
     pub fn set_field(&self, mut store: impl AsContextMut, index: usize, value: Val) -> Result<()> {
+        // The trace does not represent writes to GC objects by the host.
+        store
+            .as_context_mut()
+            .0
+            .rr
+            .reject("host mutation of GC objects")?;
         self._set_field(store.as_context_mut().0, index, value)
     }
 

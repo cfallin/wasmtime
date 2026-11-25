@@ -581,6 +581,12 @@ pub(crate) fn pending_unwind_error() -> Option<Error> {
             Some(UnwindReason::Trap(Ok(trap))) => Some(match &trap.reason {
                 TrapReason::User(error) => match error.downcast_ref::<crate::Trap>() {
                     Some(trap) => Error::from(*trap),
+                    // Keep the type of thrown exceptions, so that recording can
+                    // tell when a host function throws one.
+                    #[cfg(feature = "gc")]
+                    None if error.is::<crate::ThrownException>() => {
+                        Error::from(crate::ThrownException)
+                    }
                     None => format_err!("{}", error.root_cause()),
                 },
                 TrapReason::Jit {

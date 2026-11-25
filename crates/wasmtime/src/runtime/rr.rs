@@ -14,7 +14,10 @@
 //! shadow stacks.
 //!
 //! Core function boundaries support numbers, vectors, and abstract function
-//! references. Modules that use GC or exceptions are unsupported.
+//! references. Guest code may use GC and typed function references, but they may
+//! not cross the host boundary, and the host may not write to GC objects. It may
+//! throw and catch exceptions, including those that reach the host, but host
+//! functions may not throw them. Importing tags is unsupported.
 //! Shared memory, host table/global mutation, call hooks,
 //! custom signal handlers, Wasm stack switching, epoch deadline callbacks, and
 //! guest debugging are unsupported. Fuel and epoch interruption may yield to

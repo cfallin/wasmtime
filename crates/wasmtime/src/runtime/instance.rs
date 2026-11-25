@@ -298,10 +298,6 @@ impl Instance {
         module: &Module,
         imports: Imports<'_>,
     ) -> Result<(Instance, bool)> {
-        // The trace cannot yet represent GC references.
-        if module.env_module().needs_gc_heap {
-            store.rr.reject("GC or exception-using modules")?;
-        }
         // Other threads may write to shared memories at any time, which the
         // trace cannot represent.
         if module.env_module().memories.values().any(|m| m.shared) {

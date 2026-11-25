@@ -235,6 +235,15 @@ impl Activation {
         self.values.as_ptr()
     }
 
+    /// The state with which this suspended activation exited Wasm.
+    pub fn exit_state(&self) -> ExitState {
+        ExitState {
+            pc: self.context.last_wasm_exit_pc,
+            trampoline_fp: self.context.last_wasm_exit_trampoline_fp,
+            entry_fp: self.context.last_wasm_entry_fp,
+        }
+    }
+
     /// Runs this activation until its next yield. A `pending` error makes the
     /// host call that it is parked at fail; its results must otherwise have
     /// been written.

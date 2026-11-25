@@ -9,7 +9,7 @@ use crate::store::StoreOpaque;
 use crate::{HeapType, RefType, Trap, ValRaw, ValType};
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0c";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0d";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -196,7 +196,11 @@ pub(super) unsafe fn outcome(
             unsafe { values(bytes, kinds, raw, encode_ref)? };
         }
         Err(e) => {
-            if let Some(trap) = e.downcast_ref::<Trap>() {
+            if tag == LEAVE_WASM && is_exception(e) {
+                record(bytes, tag, 5)?;
+                bytes.extend_from_slice(&call)?;
+                bytes.push(3)?;
+            } else if let Some(trap) = e.downcast_ref::<Trap>() {
                 record(bytes, tag, 6)?;
                 bytes.extend_from_slice(&call)?;
                 bytes.extend_from_slice(&[1, *trap as u8])?;
@@ -213,6 +217,12 @@ pub(super) unsafe fn outcome(
         }
     }
     Ok(())
+}
+
+/// Whether a call into Wasm failed as the guest threw an exception. How the host
+/// sees that, as an exception or a trap, depends on how it called the guest.
+fn is_exception(e: &Error) -> bool {
+    e.is::<crate::ThrownException>() || e.downcast_ref() == Some(&Trap::UncaughtException)
 }
 
 /// A cursor over the bytes of a trace or of a record.

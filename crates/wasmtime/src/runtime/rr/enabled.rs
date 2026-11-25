@@ -221,6 +221,17 @@ struct Replaying {
     /// The guest growth failures that the running activation has yet to
     /// reproduce, last first.
     growth_failures: TryVec<GrowthFailure>,
+    /// The activations, other than the running one, that are suspended.
+    parked: TryVec<ExitState>,
+}
+
+/// The Wasm frames of a suspended activation, from its `VMStoreContext` state.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "gc"), expect(dead_code, reason = "only for GC roots"))]
+struct ExitState {
+    pc: usize,
+    trampoline_fp: usize,
+    entry_fp: usize,
 }
 
 impl Mode {
@@ -678,6 +689,18 @@ impl StoreOpaque {
                 None => return Ok(()),
             }
         };
+        // A host function that fails with the store's pending exception throws
+        // it into the guest, which may catch it, but replay can't provide that
+        // exception. (Replay computes an exception that the guest throws.)
+        #[cfg(feature = "gc")]
+        if kind == RrCallKind::WasmToHost
+            && self.has_pending_exception()
+            && result
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::ThrownException>())
+        {
+            self.rr.poison("host functions throwing exceptions");
+        }
         // SAFETY: inherited from this function's contract.
         let recorded =
             unsafe { self.rr_record_leave(RecordedCall::from_u32(call), raw, &result, kind) };

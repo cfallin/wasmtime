@@ -1020,6 +1020,12 @@ impl ArrayRef {
     /// Panics if either this reference or the given `value` is associated with
     /// a different store.
     pub fn set(&self, mut store: impl AsContextMut, index: u32, value: Val) -> Result<()> {
+        // The trace does not represent writes to GC objects by the host.
+        store
+            .as_context_mut()
+            .0
+            .rr
+            .reject("host mutation of GC objects")?;
         self._set(store.as_context_mut().0, index, value)
     }
 

@@ -825,6 +825,8 @@ impl StoreOpaque {
                 .trace_fiber_roots(modules, unwind, gc_roots_list);
         }
 
+        self.rr_trace_parked_roots(gc_roots_list);
+
         log::trace!("End trace GC roots :: Wasm stack");
     }
 
@@ -1038,6 +1040,13 @@ impl StoreOpaque {
         );
         *self.vm_store_context.gc_heap.get_mut() = gc_store.vmmemory_definition();
         Ok(self.gc_store.insert(gc_store))
+    }
+
+    /// The pending exception, without taking it.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_pending_exception(&self) -> Option<crate::Unrooted<ExnRef>> {
+        let exn = self.gc_data.pending_exception.as_ref()?;
+        Some(crate::Unrooted::new(self, exn))
     }
 
     /// Tests whether there is a pending exception.

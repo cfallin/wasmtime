@@ -2163,3 +2163,290 @@ async fn component_bytecode_provides_its_nested_modules() -> Result<()> {
     assert_eq!(replay.instances().len(), 2);
     Ok(())
 }
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn gc_during_callbacks_sees_parked_roots() -> Result<()> {
+    const WAT: &str = r#"
+    (module
+      (type $s (struct (field (mut i32)) (field (mut (ref null $s)))))
+      (import "" "host" (func $host))
+      (func $build (param $n i32) (param $base i32) (result (ref null $s))
+        (local $i i32) (local $x (ref null $s))
+        loop
+          (local.set $x (struct.new $s (i32.add (local.get $base) (local.get $i)) (local.get $x)))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $x)
+      (func $sum (param $x (ref null $s)) (result i32) (local $sum i32)
+        block
+          loop
+            (br_if 1 (ref.is_null (local.get $x)))
+            (local.set $sum (i32.add (local.get $sum) (struct.get $s 0 (local.get $x))))
+            (local.set $x (struct.get $s 1 (local.get $x)))
+            br 0
+          end
+        end
+        local.get $sum)
+      (func (export "churn") (result i32)
+        (local $k i32) (local $t i32)
+        loop
+          (local.set $t (i32.add (local.get $t)
+            (call $sum (call $build (i32.const 1000) (local.get $k)))))
+          (local.set $k (i32.add (local.get $k) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $k) (i32.const 200)))
+        end
+        local.get $t)
+      (func (export "run") (result i32)
+        (local $x (ref null $s))
+        (local.set $x (call $build (i32.const 500) (i32.const 7)))
+        call $host
+        (call $sum (local.get $x))))
+    "#;
+    let mk = |mode, collector| -> Result<Engine> {
+        let mut config = Config::new();
+        config
+            .rr(Some(mode))
+            .wasm_gc(true)
+            .wasm_function_references(true)
+            .collector(collector);
+        Engine::new(&config)
+    };
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = mk(RrConfig::Recording, collector)?;
+        let mut store = Store::new_recording(&recording, ())?;
+        let host = Func::wrap(&mut store, |mut caller: Caller<'_, ()>| -> Result<()> {
+            let churn = caller.get_export("churn").unwrap().into_func().unwrap();
+            let churn = churn.typed::<(), i32>(&caller)?;
+            churn.call(&mut caller, ())?;
+            Ok(())
+        });
+        let module = new_module(&recording, WAT)?;
+        let instance = Instance::new(&mut store, &module, &[host.into()])?;
+        let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+        // The callback allocates enough to collect while `run` holds a list.
+        assert_eq!(run.call(&mut store, ())?, (7..507).sum::<i32>());
+        let trace = store.finish_recording()?;
+        // Replay checks the recorded result.
+        replay_with(&mk(RrConfig::Replaying, collector)?, &trace).await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+const GC_LIST: &str = r#"
+(module
+  (type $s (struct (field (mut i32)) (field (ref null $s))))
+  (global $list (export "list") (mut (ref null $s)) (ref.null $s))
+  (func $churn (param $n i32)
+    (local $i i32)
+    loop
+      (drop (struct.new $s (local.get $i) (ref.null $s)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+    end)
+  (func (export "step") (param $k i32) (result i32)
+    (local $x (ref null $s)) (local $sum i32)
+    ;; Existing objects change too: the previous head gains 100.
+    (if (i32.eqz (ref.is_null (global.get $list)))
+      (then (struct.set $s 0 (global.get $list)
+              (i32.add (struct.get $s 0 (global.get $list)) (i32.const 100)))))
+    (global.set $list (struct.new $s (local.get $k) (global.get $list)))
+    (call $churn (i32.const 20000))
+    (local.set $x (global.get $list))
+    block
+      loop
+        (br_if 1 (ref.is_null (local.get $x)))
+        (local.set $sum (i32.add (local.get $sum) (struct.get $s 0 (local.get $x))))
+        (local.set $x (struct.get $s 1 (local.get $x)))
+        br 0
+      end
+    end
+    local.get $sum))
+"#;
+
+#[cfg(feature = "gc")]
+fn gc_engine(mode: RrConfig, collector: Collector) -> Result<Engine> {
+    let mut config = Config::new();
+    config
+        .rr(Some(mode))
+        .wasm_gc(true)
+        .wasm_function_references(true)
+        .collector(collector);
+    Engine::new(&config)
+}
+
+/// The non-null `anyref` in `val`, as an unrooted reference.
+#[cfg(feature = "gc")]
+fn unrooted_anyref(val: Val) -> Option<Unrooted<AnyRef>> {
+    val.unwrap_anyref().map(|r| r.unwrap_unrooted())
+}
+
+/// The values in the list in the `list` global, read through unrooted
+/// references, which leave the replay's GC roots alone.
+#[cfg(feature = "gc")]
+fn gc_list(replayer: &Replayer) -> Result<Vec<i32>> {
+    let instance = replayer.instances()[0];
+    let store = replayer.store();
+    let list = instance.get_global(&store, "list").unwrap();
+    let mut values = Vec::new();
+    let mut next = unrooted_anyref(list.get(&store));
+    while let Some(node) = next {
+        let node = node.as_struct(&store)?.unwrap();
+        values.push(node.field(&store, 0)?.unwrap_i32());
+        next = unrooted_anyref(node.field(&store, 1)?);
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "gc")]
+const EXCEPTIONS: &str = r#"
+(module
+  (tag $e (param i32))
+  (func $throw (param i32) (throw $e (local.get 0)))
+  ;; Throws and catches within the activation.
+  (func (export "catch") (param i32) (result i32)
+    (block $h (result i32)
+      (try_table (catch $e $h) (call $throw (local.get 0)))
+      (i32.const -1))
+    (i32.add (i32.const 1)))
+  ;; Throws an exception that reaches the host.
+  (func (export "throw") (param i32)
+    (call $throw (local.get 0))))
+"#;
+
+#[cfg(feature = "gc")]
+fn exceptions_engine(mode: RrConfig, collector: Collector) -> Result<Engine> {
+    let mut config = Config::new();
+    config
+        .rr(Some(mode))
+        .wasm_exceptions(true)
+        .collector(collector);
+    Engine::new(&config)
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn guest_exceptions_are_replayed() -> Result<()> {
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = exceptions_engine(RrConfig::Recording, collector)?;
+        let mut store = Store::new_recording(&recording, ())?;
+        let module = new_module(&recording, EXCEPTIONS)?;
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let catch = instance.get_typed_func::<i32, i32>(&mut store, "catch")?;
+        let throw = instance.get_typed_func::<i32, ()>(&mut store, "throw")?;
+        assert_eq!(catch.call(&mut store, 5)?, 6);
+        // The host takes the first exception that reaches it and leaves the
+        // second one pending.
+        let err = throw.call(&mut store, 7).unwrap_err();
+        assert!(err.is::<ThrownException>());
+        let exn = store.take_pending_exception().unwrap();
+        assert_eq!(exn.field(&store, 0)?.unwrap_i32(), 7);
+        assert!(
+            throw
+                .call(&mut store, 8)
+                .unwrap_err()
+                .is::<ThrownException>()
+        );
+        assert!(store.has_pending_exception());
+        let trace = store.finish_recording()?;
+
+        // Replay computes the exceptions itself, and still has the last one
+        // pending.
+        let engine = exceptions_engine(RrConfig::Replaying, collector)?;
+        let replayer = replay_with(&engine, &trace).await?;
+        let exn = replayer.pending_exception().unwrap();
+        assert_eq!(exn.field(replayer.store(), 0)?.unwrap_i32(), 8);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[test]
+fn host_functions_throwing_exceptions_poison_the_recording() -> Result<()> {
+    let recording = exceptions_engine(RrConfig::Recording, Collector::DeferredReferenceCounting)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    // The host rethrows the exception that a nested guest call threw, and the
+    // outer guest code catches it.
+    let rethrow = Func::wrap(&mut store, |mut caller: Caller<'_, ()>| -> Result<()> {
+        let throw = caller.get_export("throw").unwrap().into_func().unwrap();
+        throw.typed::<(), ()>(&caller)?.call(&mut caller, ())
+    });
+    let module = new_module(
+        &recording,
+        r#"(module
+        (tag $e)
+        (import "" "rethrow" (func $rethrow))
+        (func (export "throw") (throw $e))
+        (func (export "run") (result i32)
+          (block $h
+            (try_table (catch $e $h) (call $rethrow))
+            (return (i32.const 0)))
+          (i32.const 1)))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[rethrow.into()])?;
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    // Recording fails the rest of the call once the host throws.
+    assert!(run.call(&mut store, ()).is_err());
+    let err = store.finish_recording().err().unwrap().to_string();
+    assert!(err.contains("host functions throwing exceptions"), "{err}");
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn gc_heaps_are_replayed() -> Result<()> {
+    for collector in [
+        Collector::DeferredReferenceCounting,
+        Collector::Null,
+        Collector::Copying,
+    ] {
+        let recording = gc_engine(RrConfig::Recording, collector)?;
+        let mut store = Store::new_recording(&recording, ())?;
+        let module = new_module(&recording, GC_LIST)?;
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+        for k in 0..6 {
+            // Fails with the null collector once its heap is exhausted, which
+            // replay reproduces.
+            if step.call(&mut store, k).is_err() {
+                break;
+            }
+        }
+        let trace = store.finish_recording()?;
+        let engine = gc_engine(RrConfig::Replaying, collector)?;
+        let replayer = replay_with(&engine, &trace).await?;
+        let list = gc_list(&replayer)?;
+        assert!(list.len() >= 2, "{collector:?}");
+        assert!(list[1..].iter().rev().zip(100..).all(|(a, b)| *a == b));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[test]
+fn host_mutation_of_gc_objects_poisons_the_recording() -> Result<()> {
+    let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let module = new_module(&recording, GC_LIST)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let step = instance.get_typed_func::<i32, i32>(&mut store, "step")?;
+    step.call(&mut store, 1)?;
+    let list = instance.get_global(&mut store, "list").unwrap();
+    let head = unrooted_anyref(list.get(&store)).unwrap();
+    let head = head.to_rooted(&mut store)?;
+    let head = head.as_struct(&store)?.unwrap();
+    assert!(head.set_field(&mut store, 0, Val::I32(7)).is_err());
+    let err = store.finish_recording().err().unwrap().to_string();
+    assert!(err.contains("host mutation of GC objects"), "{err}");
+    Ok(())
+}
