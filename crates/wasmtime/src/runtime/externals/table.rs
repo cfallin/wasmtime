@@ -297,9 +297,8 @@ impl Table {
     /// Panics if `store` does not own this table.
     pub fn set(&self, mut store: impl AsContextMut, index: u64, val: Ref) -> Result<()> {
         let store = store.as_context_mut().0;
-        // The trace has no record for this store mutation.
-        store.rr.reject("host table mutation")?;
-        self.set_(store, index, val)
+        self.set_(store, index, val.clone())?;
+        store.rr_table_filled(*self, index, 1, val)
     }
 
     pub(crate) fn set_(&self, store: &mut StoreOpaque, index: u64, val: Ref) -> Result<()> {
@@ -377,8 +376,6 @@ impl Table {
 
     async fn _grow<T>(&self, store: StoreContextMut<'_, T>, delta: u64, init: Ref) -> Result<u64> {
         let store = store.0;
-        // The trace has no record for this store mutation.
-        store.rr.reject("host table growth")?;
         let (mut limiter, store) = store.resource_limiter_and_store_opaque();
         let limiter = limiter.as_mut();
 
@@ -408,7 +405,8 @@ impl Table {
         // fail, hence the unwrap. Note that this is required for the safety of
         // this operation because this table's type may be non-nullable elements
         // which means this must happen after growth.
-        self._fill(store, start, init, delta).unwrap();
+        self._fill(store, start, init.clone(), delta).unwrap();
+        store.rr_table_grown(*self, init)?;
         Ok(start)
     }
 
@@ -459,9 +457,18 @@ impl Table {
         len: u64,
     ) -> Result<()> {
         let store = store.as_context_mut().0;
-        // The trace has no record for this store mutation.
-        store.rr.reject("host table mutation")?;
+        let dst = (*dst_table, dst_index);
+        let src = (*src_table, src_index);
+        Table::copy_(store, dst, src, len)?;
+        store.rr_table_copied(dst, src, len)
+    }
 
+    pub(crate) fn copy_(
+        store: &mut StoreOpaque,
+        (dst_table, dst_index): (Table, u64),
+        (src_table, src_index): (Table, u64),
+        len: u64,
+    ) -> Result<()> {
         let src_range = src_index..src_index.checked_add(len).ok_or(Trap::TableOutOfBounds)?;
         let dst_range = dst_index..dst_index.checked_add(len).ok_or(Trap::TableOutOfBounds)?;
 
@@ -471,8 +478,8 @@ impl Table {
             return Err(Trap::TableOutOfBounds.into());
         }
 
-        let dst_ty = dst_table.ty(&store);
-        let src_ty = src_table.ty(&store);
+        let dst_ty = dst_table.ty_(store);
+        let src_ty = src_table.ty_(store);
         src_ty
             .element()
             .ensure_matches(store.engine(), dst_ty.element())
@@ -481,18 +488,28 @@ impl Table {
                  destination table's element type",
             )?;
 
+        let mut store = AutoAssertNoGc::new(store);
         let mut copy_elem = |src: u64, dst: u64| -> Result<()> {
-            let scope = store.enter_gc_lifo_scope();
-            let result = match src_table.get(&mut *store, src) {
-                // `get` returns an unrooted reference, which must be rooted
-                // (within the scope above) before `set` can store it.
-                Some(mut val) => val
-                    .ensure_rooted(&mut *store)
-                    .and_then(|()| dst_table.set(&mut *store, dst, val)),
-                None => Err(Trap::TableOutOfBounds.into()),
-            };
-            store.exit_gc_lifo_scope(scope);
-            result
+            let (table, _) = src_table.wasmtime_table(&mut store, [src]);
+            match element_type(&src_ty) {
+                TableElementType::Func => {
+                    let element = table.get_func_maybe_init(src)?;
+                    let element = element.expect("element was just initialized");
+                    let (table, _) = dst_table.wasmtime_table(&mut store, iter::empty());
+                    table.set_func(dst, element)?;
+                }
+                TableElementType::GcRef => {
+                    // This does not need to be rooted, as there can be no GC
+                    // and the source table still refers to it.
+                    let element = table.get_gc_ref(src)?.map(|r| r.unchecked_copy());
+                    let (table, gc_store) = dst_table.wasmtime_table(&mut store, iter::empty());
+                    table.set_gc_ref(gc_store, dst, element.as_ref())?;
+                }
+                // TODO(#10248) Required to support stack switching in the
+                // embedder API.
+                TableElementType::Cont => bail!("unimplemented table for cont"),
+            }
+            Ok(())
         };
 
         // Do a forwards or backwards copy depending on the indices involved to
@@ -532,9 +549,8 @@ impl Table {
     /// Panics if `store` does not own either `dst_table` or `src_table`.
     pub fn fill(&self, mut store: impl AsContextMut, dst: u64, val: Ref, len: u64) -> Result<()> {
         let store = store.as_context_mut().0;
-        // The trace has no record for this store mutation.
-        store.rr.reject("host table mutation")?;
-        self._fill(store, dst, val, len)
+        self._fill(store, dst, val.clone(), len)?;
+        store.rr_table_filled(*self, dst, len, val)
     }
 
     pub(crate) fn _fill(

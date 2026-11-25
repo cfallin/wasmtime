@@ -165,28 +165,6 @@ async fn non_nullable_function_references_cross_boundaries() -> Result<()> {
 }
 
 #[test]
-fn forbidden_mutation_poisons_even_if_error_is_caught() -> Result<()> {
-    let (mut store, _, _) = identity()?;
-    let global = Global::new(
-        &mut store,
-        GlobalType::new(ValType::I32, Mutability::Var),
-        Val::I32(0),
-    )?;
-    assert!(global.set(&mut store, Val::I32(1)).is_err());
-    assert!(store.finish_recording().is_err());
-
-    let (mut store, _, _) = identity()?;
-    let table = Table::new(
-        &mut store,
-        TableType::new(RefType::FUNCREF, 1, None)?,
-        Ref::Func(None),
-    )?;
-    assert!(table.set(&mut store, 0, Ref::Func(None)).is_err());
-    assert!(store.finish_recording().is_err());
-    Ok(())
-}
-
-#[test]
 fn rr_config_enables_determinism_but_rejects_explicit_conflicts() -> Result<()> {
     engine(RrConfig::Recording)?;
     engine(RrConfig::Replaying)?;
@@ -4465,6 +4443,8 @@ async fn corrupt_host_gc_operations() -> Result<()> {
     const TAG: u8 = 19;
     const READ: u8 = 20;
     const OBJECT_WRITE: u8 = 21;
+    let tags = [TYPE, ALLOC, TAG, READ, OBJECT_WRITE].into_iter();
+    let tags = tags.chain(HOST_MUTATIONS).collect::<Vec<_>>();
     let collector = Collector::DeferredReferenceCounting;
     let traces = [
         (
@@ -4475,12 +4455,16 @@ async fn corrupt_host_gc_operations() -> Result<()> {
             record_host_exceptions(collector)?,
             exceptions_engine(RrConfig::Replaying, collector)?,
         ),
+        (
+            record_host_mutation(collector, 1)?.0,
+            gc_engine(RrConfig::Replaying, collector)?,
+        ),
     ];
     for (trace, engine) in traces {
         let frames = frames(trace.as_bytes());
         let mut rejected = 0;
         for (i, (tag, body)) in frames.iter().enumerate() {
-            if ![TYPE, ALLOC, TAG, READ, OBJECT_WRITE].contains(tag) {
+            if !tags.contains(tag) {
                 continue;
             }
             for at in *body..frames[i + 1].1 - 5 {
@@ -4561,6 +4545,221 @@ async fn host_functions_throw_new_exceptions() -> Result<()> {
     for collector in COLLECTORS {
         let trace = record_host_exceptions(collector)?;
         replay_with(&exceptions_engine(RrConfig::Replaying, collector)?, &trace).await?;
+    }
+    Ok(())
+}
+
+/// Records of host writes to globals and tables.
+#[cfg(feature = "gc")]
+const HOST_MUTATIONS: [u8; 4] = [14, 22, 23, 24];
+
+/// Records a host function that writes to globals and tables, and the same
+/// writes outside of any call.
+#[cfg(feature = "gc")]
+fn record_host_mutation(collector: Collector, calls: usize) -> Result<(Trace, Vec<i32>)> {
+    let recording = gc_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, Vec::new())?;
+    let module = new_module(
+        &recording,
+        r#"(module
+        (type $f (func (result i32)))
+        (type $box (struct (field i32)))
+        (import "" "host" (func $host))
+        (import "" "log" (func $log (param i32)))
+        (import "" "global" (global $imported (mut i64)))
+        (import "" "table" (table $imported_table 2 10 funcref))
+        (global $i32 (export "i32") (mut i32) (i32.const 0))
+        (global $f64 (export "f64") (mut f64) (f64.const 0))
+        (global $v128 (export "v128") (mut v128) (v128.const i64x2 0 0))
+        (global $const (export "const") i32 (i32.const 0))
+        (global $func (export "func") (mut funcref) (ref.null func))
+        (global $any (export "any") (mut anyref) (ref.null any))
+        (global $box (export "box") (mut (ref null $box)) (ref.null $box))
+        (table $funcs (export "funcs") 6 10 funcref)
+        (table $boxes (export "boxes") 5 10 (ref $box) (struct.new $box (i32.const 5)))
+        (elem (table $funcs) (i32.const 0) func $one $two $three $one $two)
+        (func $one (result i32) (i32.const 1))
+        (func $two (result i32) (i32.const 2))
+        (func $three (result i32) (i32.const 3))
+        (func $log_func (param $f funcref)
+          (if (ref.is_null (local.get $f))
+            (then (call $log (i32.const -1)))
+            (else (call $log (call_ref $f (ref.cast (ref $f) (local.get $f)))))))
+        (func $log_tables (local $i i32)
+          (loop
+            (call $log_func (table.get $funcs (local.get $i)))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br_if 0 (i32.lt_u (local.get $i) (table.size $funcs))))
+          (local.set $i (i32.const 0))
+          (loop
+            (call $log (struct.get $box 0 (table.get $boxes (local.get $i))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br_if 0 (i32.lt_u (local.get $i) (table.size $boxes))))
+          (call $log_func (table.get $imported_table (i32.const 0))))
+        (func (export "check")
+          (call $log (global.get $i32))
+          (call $log (i32.wrap_i64 (global.get $imported)))
+          (call $log (i32.trunc_f64_s (global.get $f64)))
+          (call $log (i32x4.extract_lane 2 (global.get $v128)))
+          (call $log_func (global.get $func))
+          (call $log (i31.get_s (ref.cast i31ref (global.get $any))))
+          (call $log (struct.get $box 0 (global.get $box)))
+          (call $log_tables))
+        (func (export "log_box") (param (ref $box))
+          (call $log (struct.get $box 0 (local.get 0))))
+        (func (export "run")
+          (global.set $box (struct.new $box (i32.const 7)))
+          (call $host)))"#,
+    )?;
+    let ty = GlobalType::new(ValType::I64, Mutability::Var);
+    let global = Global::new(&mut store, ty, Val::I64(0))?;
+    let ty = TableType::new(RefType::FUNCREF, 2, Some(10))?;
+    let table = Table::new(&mut store, ty, Ref::Func(None))?;
+
+    fn mutate(
+        mut store: impl AsContextMut<Data = Vec<i32>>,
+        instance: Instance,
+        imported: (Global, Table),
+        n: i32,
+    ) -> Result<()> {
+        let mut scope = RootScope::new(&mut store);
+        let mut global = |name| instance.get_global(&mut scope, name).unwrap();
+        let [i32_, f64_, v128, const_, func, any, box_] =
+            ["i32", "f64", "v128", "const", "func", "any", "box"].map(&mut global);
+        let funcs = instance.get_table(&mut scope, "funcs").unwrap();
+        let boxes = instance.get_table(&mut scope, "boxes").unwrap();
+
+        i32_.set(&mut scope, Val::I32(n))?;
+        imported.0.set(&mut scope, Val::I64(i64::from(n) + 1))?;
+        f64_.set(&mut scope, Val::from(f64::from(n) + 2.0))?;
+        v128.set(
+            &mut scope,
+            Val::V128((u128::from(u32::try_from(n + 3)?) << 64).into()),
+        )?;
+        let i31 = AnyRef::from_i31(&mut scope, I31::new_i32(n + 4).unwrap());
+        any.set(&mut scope, Val::from(i31))?;
+
+        // These fail, without changing anything.
+        assert!(const_.set(&mut scope, Val::I32(1)).is_err());
+        assert!(i32_.set(&mut scope, Val::I64(1)).is_err());
+        assert!(funcs.set(&mut scope, 100, Ref::Func(None)).is_err());
+        assert!(funcs.fill(&mut scope, 1, Ref::Func(None), 100).is_err());
+        assert!(funcs.grow(&mut scope, 100, Ref::Func(None)).is_err());
+        assert!(boxes.set(&mut scope, 0, Ref::Any(None)).is_err());
+        assert!(Table::copy(&mut scope, &funcs, 0, &boxes, 0, 1).is_err());
+        assert!(Table::copy(&mut scope, &boxes, 0, &boxes, 3, 100).is_err());
+
+        // A function that is already in a table, and one that is new.
+        let two = funcs.get(&mut scope, 1).unwrap();
+        func.set(&mut scope, Val::from(two))?;
+        let new = Func::wrap(&mut scope, move || n + 100);
+        funcs.set(&mut scope, 5, Ref::from(new))?;
+        if funcs.size(&scope) < 8 {
+            funcs.grow(&mut scope, 2, Ref::from(new))?;
+            funcs.grow(&mut scope, 0, Ref::Func(None))?;
+        }
+        funcs.fill(&mut scope, 4, Ref::Func(None), 1)?;
+        // Overlapping copies, of elements that are lazily initialized.
+        Table::copy(&mut scope, &funcs, 0, &funcs, 1, 3)?;
+        Table::copy(&mut scope, &funcs, 3, &funcs, 2, 3)?;
+        Table::copy(&mut scope, &imported.1, 0, &funcs, 7, 1)?;
+
+        // The object that a global referred to, and one that is new.
+        let mut old = box_.get(&mut scope);
+        old.ensure_rooted(&mut scope)?;
+        let ty = box_.ty(&scope).content().unwrap_ref().heap_type().clone();
+        let pre = StructRefPre::new(&mut scope, ty.unwrap_concrete_struct().clone());
+        let new = StructRef::new(&mut scope, &pre, &[Val::I32(n + 8)])?;
+        box_.set(&mut scope, Val::from(new.to_anyref()))?;
+        scope.as_context_mut().gc(None)?;
+        let log_box = instance.get_func(&mut scope, "log_box").unwrap();
+        log_box.call(&mut scope, &[old], &mut [])?;
+
+        boxes.set(&mut scope, 1, Ref::from(new.to_anyref()))?;
+        let old = Ref::from(*old.unwrap_anyref().unwrap());
+        boxes.fill(&mut scope, 3, old.clone(), 2)?;
+        Table::copy(&mut scope, &boxes, 0, &boxes, 1, 1)?;
+        if boxes.size(&scope) < 7 {
+            boxes.grow(&mut scope, 2, old)?;
+        }
+        scope.as_context_mut().gc(None)?;
+        rr::record_event(&mut scope, &Step(n))
+    }
+
+    let instance = std::sync::Arc::new(std::sync::OnceLock::<Instance>::new());
+    let host = {
+        let instance = instance.clone();
+        Func::wrap(&mut store, move |mut caller: Caller<'_, Vec<i32>>| {
+            mutate(&mut caller, *instance.get().unwrap(), (global, table), 10)
+        })
+    };
+    let log = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, Vec<i32>>, value: i32| {
+            caller.data_mut().push(value);
+        },
+    );
+    let imports = [host.into(), log.into(), global.into(), table.into()];
+    let created = Instance::new(&mut store, &module, &imports)?;
+    instance.set(created).unwrap();
+    let run = created.get_typed_func::<(), ()>(&mut store, "run")?;
+    let check = created.get_typed_func::<(), ()>(&mut store, "check")?;
+    for _ in 0..calls {
+        run.call(&mut store, ())?;
+        check.call(&mut store, ())?;
+        mutate(&mut store, created, (global, table), 20)?;
+        check.call(&mut store, ())?;
+    }
+    let log = store.data().clone();
+    Ok((store.finish_recording()?, log))
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn host_mutation_of_globals_and_tables() -> Result<()> {
+    let expected = [
+        7, // The global's old box.
+        10, 11, 12, 13, 2, 14, 18, // Globals.
+        2, 3, 1, 1, 1, -1, 110, 110, // Functions.
+        18, 18, 5, 7, 7, 7, 7,   // Boxes.
+        110, // The imported table.
+        18, 20, 21, 22, 23, 3, 24, 28, // The same, after the second time.
+        3, 1, 1, 1, 1, -1, 110, 110, 28, 28, 5, 18, 18, 7, 7, 110,
+    ];
+    for collector in COLLECTORS {
+        let (trace, log) = record_host_mutation(collector, 1)?;
+        assert_eq!(log, expected);
+        for replay_collector in COLLECTORS {
+            let engine = gc_engine(RrConfig::Replaying, replay_collector)?;
+            replay_with(&engine, &trace).await?;
+        }
+        // Copies are recorded whole, and do not read references. The only read
+        // is of the global's first box, as the host allocates the others.
+        let frames = frames(trace.as_bytes());
+        let count = |tag| frames.iter().filter(|(t, _)| *t == tag).count();
+        assert_eq!(HOST_MUTATIONS.map(count), [14, 8, 3, 8]);
+        assert_eq!(count(20), 1);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn rewinding_host_mutation_of_globals_and_tables() -> Result<()> {
+    for collector in [Collector::DeferredReferenceCounting, Collector::Copying] {
+        let (trace, _) = record_host_mutation(collector, 2)?;
+        let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+        replayer.stop_at_events(true);
+        let mut checkpoints = vec![replayer.checkpoint()?];
+        while let ReplayStop::Event(_) = replayer.run().await? {
+            checkpoints.push(replayer.checkpoint()?);
+        }
+        assert_eq!(checkpoints.len(), 5);
+        replayer.stop_at_events(false);
+        for i in [4, 1, 3, 0, 2, 0] {
+            replayer.restore(&checkpoints[i])?;
+            assert_eq!(replayer.run().await?, ReplayStop::Finished);
+        }
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ use crate::{
 };
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x10";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x11";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -30,7 +30,7 @@ pub(super) const MEMORY: u8 = 11;
 pub(super) const TABLE: u8 = 12;
 /// A guest's failed `memory.grow` or `table.grow`; see `GrowthFailure`.
 pub(super) const GROWTH_FAILED: u8 = 13;
-/// The host's write to a component instance flag: `[id, value]`.
+/// The host's write to a global: `[id, value]`.
 pub(super) const GLOBAL_WRITE: u8 = 14;
 /// An embedder-defined event: `[tag, postcard payload]`.
 pub(super) const EVENT: u8 = 15;
@@ -47,6 +47,14 @@ pub(super) const TYPE_ARRAY: u8 = 3;
 pub(super) const RELEASE: u8 = 18;
 /// A tag that the host created: `[id, type]`.
 pub(super) const TAG: u8 = 19;
+
+/// The host's write of one value to a table: `[id, start, length, value]`.
+pub(super) const TABLE_FILL: u8 = 22;
+/// A table's growth by the host: `[id, new size, value of new elements]`.
+pub(super) const TABLE_GROW: u8 = 23;
+/// The host's copy between tables:
+/// `[destination, start, source, start, length]`.
+pub(super) const TABLE_COPY: u8 = 24;
 
 /// The host's allocation of an object, for the next handle: `[kind]` and
 /// - `ALLOC_EXTERN`: nothing, as the guest can't observe host data

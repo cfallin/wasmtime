@@ -16,6 +16,7 @@ mod handles;
 #[cfg(feature = "gc")]
 mod host_gc;
 mod init;
+mod mutation;
 mod objects;
 mod replay;
 

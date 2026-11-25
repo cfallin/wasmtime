@@ -124,22 +124,6 @@ impl StoreOpaque {
         Ok(u64::try_from(index)?)
     }
 
-    /// Encodes values that the host is storing in an object, which must be
-    /// rooted.
-    fn rr_encode_vals(&mut self, body: &mut TryVec<u8>, vals: &[Val]) -> Result<()> {
-        for val in vals {
-            if let Val::FuncRef(Some(func)) = val {
-                let raw = func.vm_func_ref(self);
-                // SAFETY: the store owns the function.
-                unsafe { self.rr_register_func_reference(raw)? };
-            }
-            let (kind, raw) = self.rr_val_raw(val)?;
-            // SAFETY: the value is valid and of this kind.
-            unsafe { codec::values(body, &[kind], &raw, self.rr_session().refs())? };
-        }
-        Ok(())
-    }
-
     /// Records the host's allocation of `object`.
     pub(crate) fn rr_allocated<T: GcRef>(
         &mut self,
@@ -191,20 +175,13 @@ impl StoreOpaque {
     /// Records the host's write to a field or element of the object whose raw
     /// reference is `object`.
     pub(crate) fn rr_object_written(&mut self, object: u32, index: u32, value: &Val) -> Result<()> {
-        if !self.rr.recording() {
-            return Ok(());
-        }
-        let result = (|| {
-            self.rr_check()?;
-            let mut body = TryVec::new();
-            let handle = self.rr_handles().find(object);
+        self.rr_mutated(codec::OBJECT_WRITE, |store, body| {
+            let handle = store.rr_handles().find(object);
             let handle = handle.ok_or_else(|| format_err!(handles::NO_HANDLE))?;
             body.extend_from_slice(&handle.to_le_bytes())?;
             body.extend_from_slice(&index.to_le_bytes())?;
-            self.rr_encode_vals(&mut body, core::slice::from_ref(value))?;
-            self.rr_session().append(codec::OBJECT_WRITE, &body)
-        })();
-        self.rr_poison_on_err(result)
+            store.rr_encode_vals(body, core::slice::from_ref(value))
+        })
     }
 
     fn rr_type(&mut self, ty: HeapType) -> Result<RecordedType> {

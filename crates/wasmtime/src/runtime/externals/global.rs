@@ -275,9 +275,8 @@ impl Global {
     /// Panics if `store` does not own this global.
     pub fn set(&self, mut store: impl AsContextMut, val: Val) -> Result<()> {
         let store = store.as_context_mut().0;
-        // The trace has no record for this store mutation.
-        store.rr.reject("host global mutation")?;
-        self._set(store, val)
+        self._set(store, val)?;
+        store.rr_global_written(*self, &val)
     }
 
     pub(crate) fn _set(&self, store: &mut StoreOpaque, val: Val) -> Result<()> {

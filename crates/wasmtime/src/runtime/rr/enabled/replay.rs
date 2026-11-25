@@ -5,12 +5,12 @@
 //! beneath a host function. Activations may complete in any order.
 
 use super::*;
-use crate::{AsContext, Extern, Instance, Module, StoreContext, StoreContextMut, Val};
+use crate::{AsContext, Extern, Instance, Module, StoreContext, StoreContextMut};
 use alloc::collections::BTreeMap;
 use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicBool;
 use core::task::Poll;
-use objects::{RecordedGlobal, RecordedModule};
+use objects::RecordedModule;
 
 mod activation;
 mod checkpoint;
@@ -20,6 +20,7 @@ mod count;
 mod host_gc;
 mod image;
 mod init;
+mod mutation;
 #[cfg(feature = "debug")]
 mod reverse;
 mod stop;
@@ -580,7 +581,16 @@ impl Replayer {
                         Ok(())
                     }
                     codec::WRITE => self.write(body),
-                    codec::GLOBAL_WRITE => self.global_write(body),
+                    codec::GLOBAL_WRITE
+                    | codec::TABLE_FILL
+                    | codec::TABLE_GROW
+                    | codec::TABLE_COPY => {
+                        let store = self.store.as_context_mut().0;
+                        let scope = store.enter_gc_lifo_scope();
+                        let result = mutation::replay_mutation(store, tag, body);
+                        store.exit_gc_lifo_scope(scope);
+                        result
+                    }
                     codec::RESIZE => self.resize(body),
                     codec::EVENT => self.event(body),
                     #[cfg(feature = "gc")]
@@ -814,21 +824,6 @@ impl Replayer {
         store.rr_memory_written(memory, range.clone())?;
         memory.data_mut_untracked(store)[range].copy_from_slice(bytes);
         Ok(())
-    }
-
-    /// Replays the host's write to a component instance flag.
-    fn global_write(&mut self, body: &mut Reader<'_>) -> Result<()> {
-        let id = RecordedGlobal::from_u32(body.u32()?);
-        let value = Val::I32(body.u32()?.cast_signed());
-        body.end()?;
-        let store = self.store.as_context_mut().0;
-        let global = store.rr_objects().globals.get(id).copied();
-        let global = global.ok_or_else(|| format_err!("invalid global ID in trace"))?;
-        ensure!(
-            global._ty(store).mutability().is_var(),
-            "write to an immutable global in trace"
-        );
-        global._set(store, value)
     }
 
     /// Replays a memory's growth by the host.

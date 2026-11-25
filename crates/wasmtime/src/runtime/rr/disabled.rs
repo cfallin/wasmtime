@@ -5,7 +5,7 @@ use crate::prelude::*;
 use crate::rr::{GcSource, Growable};
 use crate::runtime::vm::{VMFuncRef, VMGcRef};
 use crate::store::{InstanceId, StoreOpaque};
-use crate::{Global, Instance, Memory, Module, Ref, Table, Tag, ValRaw, bail_bug};
+use crate::{Global, Instance, Memory, Module, Ref, Table, Tag, Val, ValRaw, bail_bug};
 use core::ops::Range;
 use core::ptr::NonNull;
 use wasmtime_environ::RrCallKind;
@@ -94,6 +94,37 @@ impl StoreOpaque {
 
     #[inline]
     pub(crate) fn rr_note_read(&self, _gc_ref: Option<&VMGcRef>, _source: GcSource) {}
+
+    #[inline]
+    pub(crate) fn rr_global_written(&mut self, _global: Global, _value: &Val) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn rr_table_filled(
+        &mut self,
+        _table: Table,
+        _start: u64,
+        _len: u64,
+        _value: Ref,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn rr_table_grown(&mut self, _table: Table, _init: Ref) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn rr_table_copied(
+        &mut self,
+        _dst: (Table, u64),
+        _src: (Table, u64),
+        _len: u64,
+    ) -> Result<()> {
+        Ok(())
+    }
 
     #[inline]
     pub(crate) fn rr_created_tag(&mut self, _tag: Tag) -> Result<()> {

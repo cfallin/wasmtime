@@ -20,8 +20,8 @@
 //!
 //! Values of any type but continuation references can cross core function
 //! boundaries. The host's allocation of, reads of references from, and writes to
-//! GC objects are recorded, as are the exceptions that it throws.
-//! Shared memory, host table/global mutation, call hooks,
+//! GC objects are recorded, as are its writes to globals and tables, and the
+//! exceptions that it throws. Shared memory, call hooks,
 //! custom signal handlers, Wasm stack switching, epoch deadline callbacks, and
 //! guest debugging are unsupported. Fuel and epoch interruption may yield to
 //! the async executor, which the guest cannot observe, but a recording in
