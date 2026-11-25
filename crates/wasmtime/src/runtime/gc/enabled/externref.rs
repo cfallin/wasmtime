@@ -344,8 +344,10 @@ impl ExternRef {
                 },
             )?;
 
+        let gc_ref = gc_ref.into();
+        store.rr_created_externref(&gc_ref)?;
         let mut ctx = AutoAssertNoGc::new(store);
-        Ok(Self::from_cloned_gc_ref(&mut ctx, gc_ref.into()))
+        Ok(Self::from_cloned_gc_ref(&mut ctx, gc_ref))
     }
 
     /// Convert an `anyref` into an `externref`.

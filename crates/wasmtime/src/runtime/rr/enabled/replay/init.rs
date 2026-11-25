@@ -5,11 +5,12 @@ use super::super::*;
 use super::Trampolines;
 use crate::runtime::vm;
 use crate::{
-    Extern, FuncType, Global, GlobalType, HeapType, Instance, MemoryType, Module, Mutability, Ref,
-    RefType, StoreContextMut, Table, TableType, Val,
+    ArrayType, Extern, FuncType, Global, GlobalType, HeapType, Instance, MemoryType, Module,
+    Mutability, Ref, StoreContextMut, StructType, Table, TableType, Val, ValType,
 };
-use objects::{RecordedGlobal, RecordedModule, RecordedTable};
-use wasmtime_environ::{EntityIndex, Initializer};
+use core::mem::MaybeUninit;
+use objects::{RecordedGlobal, RecordedModule, RecordedTable, RecordedType};
+use wasmtime_environ::{EntityIndex, Initializer, TypeIndex, VMSharedTypeIndex};
 
 /// Replays a record of the construction of an object other than a module or an
 /// instance.
@@ -22,19 +23,32 @@ pub(super) fn replay_object(
     let id = body.u32()?;
     match tag {
         codec::HOST => {
-            let params = Kind::decode_list(body.blob()?)?;
-            let results = Kind::decode_list(body.blob()?)?;
+            let objects = store.rr_objects();
+            let params = Reader::new(body.blob()?).val_types(objects)?;
+            let results = Reader::new(body.blob()?).val_types(objects)?;
             body.end()?;
-            let tys = |kinds: &[Kind]| kinds.iter().map(|k| k.ty()).collect::<Result<Vec<_>>>();
-            let ty = FuncType::new(store.engine(), tys(&params)?, tys(&results)?);
+            let ty = FuncType::new(store.engine(), params, results);
             let func = trampolines.host_stub(store, ty)?;
             let mut session = store.rr.session.take().unwrap();
             let added = session.objects.add_func(store, func);
             store.rr.session = Some(session);
             check_id(RecordedFunc::from_u32(id), added?)?;
         }
+        codec::TYPE => {
+            let module = RecordedModule::from_u32(body.u32()?);
+            let index = TypeIndex::from_u32(body.u32()?);
+            body.end()?;
+            let modules = &store.rr_objects().modules;
+            let ty = modules
+                .get(module)
+                .and_then(|module| super::super::init::module_type(module, index))
+                .and_then(|index| heap_type(store.engine(), index))
+                .ok_or_else(|| format_err!("invalid type in trace"))?;
+            let added = store.rr_session().objects.types.push(ty)?;
+            check_id(RecordedType::from_u32(id), added)?;
+        }
         codec::GLOBAL => {
-            let kind = body.kind()?;
+            let ty = body.val_type(store.rr_objects())?;
             let mutability = if body.bool()? {
                 Mutability::Var
             } else {
@@ -42,24 +56,32 @@ pub(super) fn replay_object(
             };
             let objects = store.rr_objects();
             check_id(RecordedGlobal::from_u32(id), objects.globals.next_key())?;
-            let raw = body.value(kind, store, objects)?;
+            let mut raw = [MaybeUninit::uninit()];
+            body.values(core::slice::from_ref(&ty), &mut raw, store)?;
             body.end()?;
-            let value = match kind {
+            // SAFETY: `values` initialized this.
+            let raw = unsafe { raw[0].assume_init() };
+            let value = match Kind::new(&ty) {
                 Kind::I32 => Val::I32(raw.get_i32()),
                 Kind::I64 => Val::I64(raw.get_i64()),
                 Kind::F32 => Val::F32(raw.get_f32()),
                 Kind::F64 => Val::F64(raw.get_f64()),
                 Kind::V128 => Val::V128(raw.get_v128().into()),
-                // SAFETY: `Reader::value` returned this store's function.
+                // SAFETY: `values` decoded this store's function.
                 Kind::FuncRef { .. } => Val::FuncRef(unsafe {
                     NonNull::new(raw.get_funcref().cast())
                         .map(|f| Func::from_vm_func_ref(store.id(), f))
                 }),
-                Kind::Unsupported => unreachable!(),
+                Kind::GcRef { .. } => {
+                    ensure!(raw.get_anyref() == 0, "invalid global in trace");
+                    ty.default_value()
+                        .ok_or_else(|| format_err!("invalid global in trace"))?
+                }
+                Kind::Unsupported => bail!(codec::UNSUPPORTED),
             };
             Global::new(
                 StoreContextMut(store),
-                GlobalType::new(kind.ty()?, mutability),
+                GlobalType::new(ty, mutability),
                 value,
             )?;
         }
@@ -79,16 +101,18 @@ pub(super) fn replay_object(
             Memory::new(StoreContextMut(store), ty)?;
         }
         codec::TABLE => {
-            let Kind::FuncRef { nullable } = body.kind()? else {
+            let ValType::Ref(element) = body.val_type(store.rr_objects())? else {
                 bail!("invalid table type in trace");
             };
             let table64 = body.bool()?;
             let (min, max) = limits(body)?;
             let objects = store.rr_objects();
-            let init = Ref::Func(objects.decode_ref(body.u32()?)?);
+            let init = match objects.decode_ref(body.u32()?)? {
+                Some(func) => Ref::Func(Some(func)),
+                None => Ref::null(element.heap_type()),
+            };
             body.end()?;
             check_id(RecordedTable::from_u32(id), objects.tables.next_key())?;
-            let element = RefType::new(nullable, HeapType::Func);
             let ty = if table64 {
                 TableType::new64(element, min, max)?
             } else {
@@ -153,6 +177,13 @@ pub(super) fn replay_instance(
         .map(|func| store.rr_objects().find_func(store, func))
         .transpose()?;
     Ok((instance, startup))
+}
+
+fn heap_type(engine: &Engine, index: VMSharedTypeIndex) -> Option<HeapType> {
+    FuncType::from_shared_type_index(engine, index)
+        .map(HeapType::ConcreteFunc)
+        .or_else(|| StructType::from_shared_type_index(engine, index).map(HeapType::ConcreteStruct))
+        .or_else(|| ArrayType::from_shared_type_index(engine, index).map(HeapType::ConcreteArray))
 }
 
 fn limits(body: &mut Reader<'_>) -> Result<(u64, Option<u64>)> {

@@ -12,6 +12,7 @@ mod codec;
 mod component;
 mod events;
 mod growth;
+mod handles;
 mod init;
 mod objects;
 mod replay;
@@ -23,7 +24,8 @@ pub use events::{
     EventReceiver, EventSink, RESERVED_TAGS, TraceEvent, event_channel, record_event,
 };
 use growth::GrowthFailure;
-use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
+use handles::Handles;
+use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory, RecordedType};
 #[cfg(feature = "gc")]
 pub(crate) use replay::PagedImage;
 #[cfg(feature = "debug")]
@@ -164,6 +166,7 @@ pub(crate) struct State {
 
 struct Session {
     objects: Objects,
+    handles: Handles,
     mode: Mode,
     failure: Option<Error>,
 }
@@ -182,6 +185,7 @@ struct DirtyRange {
 }
 
 /// The direction of a call or return between the host and Wasm.
+#[derive(Clone, Copy)]
 enum Direction {
     ToWasm,
     ToHost,
@@ -317,6 +321,13 @@ impl State {
 }
 
 impl Session {
+    fn refs(&self) -> codec::Refs<'_> {
+        codec::Refs {
+            objects: &self.objects,
+            handles: &self.handles,
+        }
+    }
+
     /// Keeps the first failure of a session; later ones are its consequences.
     fn fail(&mut self, error: Error) {
         self.failure.get_or_insert(error);
@@ -370,6 +381,7 @@ impl<T: 'static> Store<T> {
         recording.bytes.extend_from_slice(codec::MAGIC)?;
         let session = try_new::<Box<_>>(Session {
             objects: Objects::default(),
+            handles: Handles::default(),
             mode: Mode::Recording(recording),
             failure: None,
         })?;
@@ -391,6 +403,7 @@ impl<T: 'static> Store<T> {
         let store = self.as_context_mut().0;
         ensure!(store.rr.recording(), "store is not recording");
         let flushed = store.rr_flush();
+        store.rr_release_all_handles();
         let mut session = store.rr.session.take().unwrap();
         store.vm_store_context_mut().recording = 0;
         if let Some(e) = session.failure {
@@ -412,6 +425,10 @@ impl StoreOpaque {
 
     fn rr_objects(&self) -> &Objects {
         &self.rr.session.as_deref().unwrap().objects
+    }
+
+    fn rr_handles(&self) -> &Handles {
+        &self.rr.session.as_deref().unwrap().handles
     }
 
     /// Poisons an active session if recording failed, so that the trace can
@@ -487,6 +504,8 @@ impl StoreOpaque {
             Direction::ToWasm => self.rr_flush(),
             Direction::ToHost => {
                 self.rr_check()?;
+                let pruned = self.rr_prune_handles();
+                self.rr_poison_on_err(pruned)?;
                 self.rr_note_flags()
             }
         }
@@ -568,8 +587,8 @@ impl StoreOpaque {
         }
     }
 
-    /// Registers the function references among a call's parameters or
-    /// `results`, so that they can be encoded.
+    /// Registers the references among a call's parameters or `results`, so that
+    /// they can be encoded, where `direction` is that in which they pass.
     ///
     /// # Safety
     ///
@@ -580,6 +599,7 @@ impl StoreOpaque {
         func: RecordedFunc,
         raw: *const ValRaw,
         results: bool,
+        direction: Direction,
     ) -> Result<()> {
         let bound = &self.rr_session().objects.funcs[func];
         let count = if results {
@@ -600,6 +620,10 @@ impl StoreOpaque {
                     // SAFETY: this store owns the reference.
                     unsafe { self.rr_register_func_reference(ptr.cast())? };
                 }
+            }
+            if let (Kind::GcRef { .. }, Direction::ToHost) = (kind, direction) {
+                // SAFETY: the slot is initialized and has GC reference type.
+                self.rr_create_handle(unsafe { (*raw.add(i)).get_anyref() })?;
             }
         }
         Ok(())
@@ -661,18 +685,23 @@ impl StoreOpaque {
             })?;
             return Ok(call);
         }
-        self.rr_cross_boundary(match kind {
+        let direction = match kind {
             RrCallKind::HostToWasm => Direction::ToWasm,
             RrCallKind::WasmToHost => Direction::ToHost,
-        })?;
+        };
+        self.rr_cross_boundary(direction)?;
         let id = self.rr_objects().find_func_ref(func)?;
         // SAFETY: inherited from this function's contract.
         unsafe {
-            self.rr_boundary_refs(id, raw, false)?;
+            self.rr_boundary_refs(id, raw, false, direction)?;
         }
         let session = self.rr_session();
         let bound = &session.objects.funcs[id];
         let recording = session.mode.recording();
+        let refs = codec::Refs {
+            objects: &session.objects,
+            handles: &session.handles,
+        };
         let tag = match kind {
             RrCallKind::WasmToHost => codec::ENTER_HOST,
             RrCallKind::HostToWasm => codec::ENTER_WASM,
@@ -682,11 +711,7 @@ impl StoreOpaque {
         bytes.extend_from_slice(&id.as_u32().to_le_bytes())?;
         bytes.extend_from_slice(&call.to_le_bytes())?;
         // SAFETY: inherited from this function's contract.
-        unsafe {
-            codec::values(bytes, &bound.params, raw, |ptr| {
-                session.objects.encode_ref(ptr)
-            })?
-        };
+        unsafe { codec::values(bytes, &bound.params, raw, refs)? };
         recording.outstanding.push(Outstanding {
             call: RecordedCall::from_u32(call),
             callee: Callee::Func(id),
@@ -724,18 +749,6 @@ impl StoreOpaque {
                 None => return Ok(()),
             }
         };
-        // A host function that fails with the store's pending exception throws
-        // it into the guest, which may catch it, but replay can't provide that
-        // exception. (Replay computes an exception that the guest throws.)
-        #[cfg(feature = "gc")]
-        if kind == RrCallKind::WasmToHost
-            && self.has_pending_exception()
-            && result
-                .as_ref()
-                .is_err_and(|e| e.is::<crate::ThrownException>())
-        {
-            self.rr.poison("host functions throwing exceptions");
-        }
         // SAFETY: inherited from this function's contract.
         let recorded =
             unsafe { self.rr_record_leave(RecordedCall::from_u32(call), raw, &result, kind) };
@@ -760,10 +773,11 @@ impl StoreOpaque {
         if !self.rr.recording() {
             return Ok(());
         }
-        self.rr_cross_boundary(match kind {
+        let direction = match kind {
             RrCallKind::HostToWasm => Direction::ToHost,
             RrCallKind::WasmToHost => Direction::ToWasm,
-        })?;
+        };
+        self.rr_cross_boundary(direction)?;
         let (mut call, mut callee) = (call, self.rr_take_outstanding(call)?);
         if let Callee::Destructor(drop) = callee {
             if result.is_ok() {
@@ -779,11 +793,22 @@ impl StoreOpaque {
             // SAFETY: inherited from this function's contract, as `func` is
             // the function that was passed to `rr_enter`.
             unsafe {
-                self.rr_boundary_refs(func, raw, true)?;
+                self.rr_boundary_refs(func, raw, true, direction)?;
             }
+        }
+        let exception = match result {
+            Err(e) if e.is::<crate::ThrownException>() => self.rr_pending_exception_raw(),
+            _ => 0,
+        };
+        if let Direction::ToHost = direction {
+            self.rr_create_handle(exception)?;
         }
         let session = self.rr_session();
         let recording = session.mode.recording();
+        let refs = codec::Refs {
+            objects: &session.objects,
+            handles: &session.handles,
+        };
         let tag = match kind {
             RrCallKind::WasmToHost => codec::LEAVE_HOST,
             RrCallKind::HostToWasm => codec::LEAVE_WASM,
@@ -798,7 +823,8 @@ impl StoreOpaque {
                 result,
                 results,
                 raw,
-                |ptr| session.objects.encode_ref(ptr),
+                refs,
+                exception,
             )?;
         }
         Ok(())

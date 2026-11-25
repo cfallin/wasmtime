@@ -7,6 +7,7 @@
 use super::*;
 use crate::{AsContext, Extern, Instance, Module, StoreContext, StoreContextMut, Val};
 use alloc::collections::BTreeMap;
+use core::mem::MaybeUninit;
 use core::sync::atomic::AtomicBool;
 use core::task::Poll;
 use objects::{RecordedGlobal, RecordedModule};
@@ -177,6 +178,7 @@ impl Replayer {
         let mut store = Store::try_new(engine, ())?;
         store.as_context_mut().0.rr.session = Some(try_new::<Box<_>>(Session {
             objects: Objects::default(),
+            handles: Handles::default(),
             mode: Mode::Replaying(Replaying::default()),
             failure: None,
         })?);
@@ -537,11 +539,18 @@ impl Replayer {
             codec::ENTER_HOST => self.enter_host(body),
             codec::LEAVE_HOST => self.leave_host(body),
             codec::LEAVE_WASM => self.leave_wasm(body),
+            // This precedes the record of a guest's call or return to the host,
+            // which replay has reached.
+            codec::RELEASE => {
+                let handle = body.u32()?;
+                body.end()?;
+                self.store.as_context_mut().0.rr_release_handle(handle)
+            }
             codec::GROWTH_FAILED => bail!("growth failure outside of guest execution in trace"),
             _ => {
                 self.require_idle()?;
                 match tag {
-                    codec::HOST | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
+                    codec::HOST | codec::TYPE | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
                         let store = self.store.as_context_mut().0;
                         init::replay_object(store, &self.trampolines, tag, body)?;
                         self.note_defined();
@@ -562,6 +571,8 @@ impl Replayer {
                     codec::GLOBAL_WRITE => self.global_write(body),
                     codec::RESIZE => self.resize(body),
                     codec::EVENT => self.event(body),
+                    #[cfg(feature = "gc")]
+                    codec::EXTERNREF => self.create_externref(body),
                     codec::END => {
                         // Activations may remain parked at host calls if the
                         // recording ended while they were unfinished.
@@ -621,11 +632,9 @@ impl Replayer {
             self.activations.iter().all(|a| a.call != call),
             "duplicate call ID in trace"
         );
-        let store = self.store.as_context_mut().0;
-        let objects = store.rr_objects();
-        let info = objects
-            .funcs
-            .get(func)
+        let store: &mut StoreOpaque = self.store.as_context_mut().0;
+        let info = store.rr_objects().funcs.get(func);
+        let info = info
             .filter(|f| !f.host)
             .ok_or_else(|| format_err!("invalid function ID in trace"))?;
         match self.pending_startup.take() {
@@ -636,10 +645,16 @@ impl Replayer {
         values.resize_with(info.params.len().max(info.results.len()), || {
             ValRaw::v128(0)
         })?;
-        for (kind, slot) in info.params.iter().zip(values.iter_mut()) {
-            *slot = body.value(*kind, store, objects)?;
-        }
+        let ty = info.func.load_ty(store);
+        let params = ty.params().collect::<Vec<_>>();
+        let mut slots = TryVec::new();
+        slots.resize_with(params.len(), MaybeUninit::uninit)?;
+        body.values(&params, &mut slots, store)?;
         body.end()?;
+        for (slot, value) in slots.iter().zip(values.iter_mut()) {
+            // SAFETY: `values` initialized this.
+            *value = unsafe { slot.assume_init() };
+        }
         self.activations.reserve(1)?;
         let serial = self.next_serial;
         self.next_serial += 1;
@@ -672,17 +687,15 @@ impl Replayer {
             hosts.clone().all(|h| h.call != call),
             "duplicate call ID in trace"
         );
-        let objects = self.store.as_context().0.rr_objects();
+        let store: &mut StoreOpaque = self.store.as_context_mut().0;
         self.scratch.clear();
         // SAFETY: the activation is parked at the call, for which it
         // initialized the parameter slots with this store's values.
         unsafe {
-            codec::values(
-                &mut self.scratch,
-                &objects.funcs[func].params,
-                values.as_ptr(),
-                |ptr| objects.encode_ref(ptr),
-            )?
+            store.rr_boundary_refs(func, values.as_ptr(), false, Direction::ToHost)?;
+            let session = store.rr_session();
+            let params = &session.objects.funcs[func].params;
+            codec::values(&mut self.scratch, params, values.as_ptr(), session.refs())?
         };
         ensure!(
             body.rest() == &self.scratch[..],
@@ -705,11 +718,12 @@ impl Replayer {
             .enumerate()
             .find_map(|(i, a)| Some((i, a.host.filter(|h| h.call == call)?)))
             .ok_or_else(|| format_err!("invalid call ID in trace"))?;
-        let store = self.store.as_context().0;
-        let objects = store.rr_objects();
+        let store: &mut StoreOpaque = self.store.as_context_mut().0;
+        let ty = store.rr_objects().funcs[host.func].func.load_ty(store);
+        let results = ty.results().collect::<Vec<_>>();
         // SAFETY: the activation is parked at this call.
         let values = unsafe { host.values.as_mut() };
-        let outcome = body.outcome(&objects.funcs[host.func].results, values, store, objects)?;
+        let outcome = body.outcome(&results, values, store)?;
         self.resume(index, outcome.err())
     }
 
@@ -724,19 +738,35 @@ impl Replayer {
             .position(|a| a.call == activation)
             .unwrap();
         let activation = &self.activations[index];
-        let objects = self.store.as_context().0.rr_objects();
+        let store: &mut StoreOpaque = self.store.as_context_mut().0;
+        let mut exception = 0;
+        match &result {
+            // SAFETY: the activation holds its results, which are this store's
+            // values.
+            Ok(()) => unsafe {
+                let results = activation.results();
+                store.rr_boundary_refs(activation.func, results, true, Direction::ToHost)?;
+            },
+            // The recorded host may not have seen the exception itself.
+            Err(e) if e.is::<crate::ThrownException>() && !body.has_null_exception() => {
+                exception = store.rr_pending_exception_raw();
+                store.rr_create_handle(exception)?;
+            }
+            Err(_) => {}
+        }
+        let session = store.rr_session();
         self.scratch.clear();
-        // SAFETY: if the call succeeded then the activation holds its results,
-        // which are this store's values.
+        // SAFETY: as above.
         unsafe {
             codec::outcome(
                 &mut self.scratch,
                 codec::LEAVE_WASM,
                 activation.call,
                 &result,
-                &objects.funcs[activation.func].results,
+                &session.objects.funcs[activation.func].results,
                 activation.results(),
-                |ptr| objects.encode_ref(ptr),
+                session.refs(),
+                exception,
             )?;
         }
         let (_, observed) = Reader::new(&self.scratch).record()?;
@@ -800,6 +830,19 @@ impl Replayer {
             .ok_or_else(|| format_err!("invalid memory size in trace"))?;
         memory.grow(StoreContextMut(store), delta / page_size)?;
         Ok(())
+    }
+
+    /// Replays the host's creation of an `externref`.
+    #[cfg(feature = "gc")]
+    fn create_externref(&mut self, body: &mut Reader<'_>) -> Result<()> {
+        body.end()?;
+        // This may collect garbage.
+        self.publish_parked(None)?;
+        let mut scope = crate::RootScope::new(&mut self.store);
+        let externref = crate::ExternRef::new(&mut scope, ())?;
+        let store = scope.as_context_mut().0;
+        let raw = externref.try_gc_ref(store)?.as_raw_u32();
+        store.rr_create_handle(raw)
     }
 
     /// Replays an embedder event.

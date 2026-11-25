@@ -3,13 +3,13 @@
 //! Each record has a one-byte tag and a four-byte payload length. The format is
 //! versioned independently of Wasmtime: changing it requires changing MAGIC.
 
-use super::{Objects, RecordedCall};
+use super::{Handles, Objects, RecordedCall};
 use crate::prelude::*;
 use crate::store::StoreOpaque;
-use crate::{HeapType, RefType, Trap, ValRaw, ValType};
+use crate::{HeapTopType, HeapType, RefType, Trap, ValRaw, ValType};
 use core::mem::MaybeUninit;
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0e";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x0f";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -32,9 +32,16 @@ pub(super) const GROWTH_FAILED: u8 = 13;
 pub(super) const GLOBAL_WRITE: u8 = 14;
 /// An embedder-defined event: `[tag, postcard payload]`.
 pub(super) const EVENT: u8 = 15;
+/// A type of GC object or function: `[id, module, index of a type in it]`.
+pub(super) const TYPE: u8 = 16;
+/// The host's creation of an `externref`, for the next handle.
+#[cfg(feature = "gc")]
+pub(super) const EXTERNREF: u8 = 17;
+/// The release of a GC handle: `[handle]`.
+pub(super) const RELEASE: u8 = 18;
 
 pub(super) const UNSUPPORTED: &str =
-    "record/replay does not support GC or typed reference boundaries";
+    "record/replay does not support continuation references at boundaries";
 
 /// The types of values that cross the record/replay boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,11 +51,15 @@ pub(super) enum Kind {
     F32,
     F64,
     V128,
-    /// An abstract function reference.
+    /// A function reference.
     FuncRef {
         nullable: bool,
     },
-    /// GC and typed references, which functions may use internally but which
+    /// A reference to a GC object, or an `i31ref`.
+    GcRef {
+        nullable: bool,
+    },
+    /// Continuation references, which functions may use internally but which
     /// cannot cross the record/replay boundary.
     Unsupported,
 }
@@ -61,62 +72,78 @@ impl Kind {
             ValType::F32 => Self::F32,
             ValType::F64 => Self::F64,
             ValType::V128 => Self::V128,
-            ValType::Ref(r) if r.heap_type().is_func() => Self::FuncRef {
-                nullable: r.is_nullable(),
-            },
-            ValType::Ref(_) => Self::Unsupported,
+            ValType::Ref(r) => {
+                let nullable = r.is_nullable();
+                match r.heap_type().top() {
+                    HeapTopType::Func => Self::FuncRef { nullable },
+                    HeapTopType::Any | HeapTopType::Extern | HeapTopType::Exn => {
+                        Self::GcRef { nullable }
+                    }
+                    HeapTopType::Cont => Self::Unsupported,
+                }
+            }
         }
     }
 
-    /// Appends the type in the encoding of a `valtype` in the Wasm binary
-    /// format.
-    pub fn encode(self, bytes: &mut TryVec<u8>) -> Result<()> {
-        let encoded: &[u8] = match self {
-            Self::I32 => &[0x7f],
-            Self::I64 => &[0x7e],
-            Self::F32 => &[0x7d],
-            Self::F64 => &[0x7c],
-            Self::V128 => &[0x7b],
-            Self::FuncRef { nullable: true } => &[0x70],
-            Self::FuncRef { nullable: false } => &[0x64, 0x70],
-            Self::Unsupported => bail!(UNSUPPORTED),
-        };
-        bytes.extend_from_slice(encoded)?;
-        Ok(())
-    }
-
-    /// Decodes a list of types from [`Kind::encode`].
-    pub fn decode_list(bytes: &[u8]) -> Result<TryVec<Self>> {
-        let mut reader = Reader::new(bytes);
-        let mut kinds = TryVec::new();
-        while reader.end().is_err() {
-            kinds.push(reader.kind()?)?;
-        }
-        Ok(kinds)
-    }
-
-    pub fn ty(self) -> Result<ValType> {
-        Ok(match self {
-            Self::I32 => ValType::I32,
-            Self::I64 => ValType::I64,
-            Self::F32 => ValType::F32,
-            Self::F64 => ValType::F64,
-            Self::V128 => ValType::V128,
-            Self::FuncRef { nullable } => ValType::Ref(RefType::new(nullable, HeapType::Func)),
-            Self::Unsupported => bail!(UNSUPPORTED),
-        })
-    }
-
-    /// The size of a value of this type in a trace. Function references are
-    /// represented by IDs.
+    /// The size of a value of this type in a trace. References are represented
+    /// by IDs.
     pub fn size(self) -> usize {
         match self {
             Self::I32 | Self::F32 | Self::FuncRef { .. } => 4,
-            Self::I64 | Self::F64 => 8,
+            Self::I64 | Self::F64 | Self::GcRef { .. } => 8,
             Self::V128 => 16,
             Self::Unsupported => 0,
         }
     }
+}
+
+/// Abstract heap types, as encoded in the Wasm binary format.
+fn abstract_heap_types() -> [(u8, HeapType); 12] {
+    [
+        (0x70, HeapType::Func),
+        (0x6f, HeapType::Extern),
+        (0x6e, HeapType::Any),
+        (0x6d, HeapType::Eq),
+        (0x6c, HeapType::I31),
+        (0x6b, HeapType::Struct),
+        (0x6a, HeapType::Array),
+        (0x69, HeapType::Exn),
+        (0x73, HeapType::NoFunc),
+        (0x72, HeapType::NoExtern),
+        (0x71, HeapType::None),
+        (0x74, HeapType::NoExn),
+    ]
+}
+
+/// Appends a type in the encoding of a `valtype` in the Wasm binary format, in
+/// which the trace's types are the index space of types.
+pub(super) fn val_type(bytes: &mut TryVec<u8>, ty: &ValType, objects: &Objects) -> Result<()> {
+    let ty = match ty {
+        ValType::I32 => return Ok(bytes.push(0x7f)?),
+        ValType::I64 => return Ok(bytes.push(0x7e)?),
+        ValType::F32 => return Ok(bytes.push(0x7d)?),
+        ValType::F64 => return Ok(bytes.push(0x7c)?),
+        ValType::V128 => return Ok(bytes.push(0x7b)?),
+        ValType::Ref(ty) => ty,
+    };
+    let abstract_ = abstract_heap_types()
+        .into_iter()
+        .find(|(_, abstract_)| HeapType::eq(abstract_, ty.heap_type()));
+    if let Some((code, _)) = abstract_ {
+        if !ty.is_nullable() {
+            bytes.push(0x64)?;
+        }
+        return Ok(bytes.push(code)?);
+    }
+    let mut id = objects.find_type(ty.heap_type())?.as_u32();
+    bytes.push(if ty.is_nullable() { 0x63 } else { 0x64 })?;
+    // Signed LEB128, of a nonnegative number.
+    while id >= 0x40 {
+        bytes.push(u8::try_from(id & 0x7f)? | 0x80)?;
+        id >>= 7;
+    }
+    bytes.push(u8::try_from(id)?)?;
+    Ok(())
 }
 
 pub(super) fn blob(bytes: &mut TryVec<u8>, value: &[u8]) -> Result<()> {
@@ -138,18 +165,24 @@ pub(super) fn record(bytes: &mut TryVec<u8>, tag: u8, len: usize) -> Result<()> 
     Ok(())
 }
 
+/// Encodes references.
+#[derive(Clone, Copy)]
+pub(super) struct Refs<'a> {
+    pub objects: &'a Objects,
+    pub handles: &'a Handles,
+}
+
 /// Appends values, reading only the part of each slot that its type specifies.
 ///
 /// # Safety
 ///
 /// `raw` must point to an initialized slot of the corresponding type for each
-/// element of `kinds`, and it must be sound to call `encode_ref` with the
-/// function references among them.
+/// element of `kinds`, whose references are valid.
 pub(super) unsafe fn values(
     bytes: &mut TryVec<u8>,
     kinds: &[Kind],
     raw: *const ValRaw,
-    mut encode_ref: impl FnMut(*mut core::ffi::c_void) -> Result<u32>,
+    refs: Refs<'_>,
 ) -> Result<()> {
     for (i, kind) in kinds.iter().enumerate() {
         // SAFETY: the caller guarantees these slots have the specified types.
@@ -161,7 +194,14 @@ pub(super) unsafe fn values(
             Kind::F64 => bytes.extend_from_slice(&value.get_f64().to_le_bytes())?,
             Kind::V128 => bytes.extend_from_slice(&value.get_v128().to_le_bytes())?,
             Kind::FuncRef { .. } => {
-                bytes.extend_from_slice(&encode_ref(value.get_funcref())?.to_le_bytes())?
+                // SAFETY: inherited from this function's contract.
+                let id = unsafe { refs.objects.encode_ref(value.get_funcref())? };
+                bytes.extend_from_slice(&id.to_le_bytes())?
+            }
+            Kind::GcRef { .. } => {
+                // All GC references have the same representation.
+                let id = refs.handles.encode(value.get_anyref())?;
+                bytes.extend_from_slice(&id.to_le_bytes())?
             }
             Kind::Unsupported => bail!(UNSUPPORTED),
         }
@@ -173,12 +213,12 @@ pub(super) fn values_len(kinds: &[Kind]) -> usize {
     kinds.iter().map(|k| k.size()).sum()
 }
 
-/// Records the return of `call`.
+/// Records the return of `call`, which may have thrown `exception`.
 ///
 /// # Safety
 ///
 /// If `result` is successful then the contract of `values` applies to `kinds`,
-/// `raw`, and `encode_ref`.
+/// and `raw`.
 pub(super) unsafe fn outcome(
     bytes: &mut TryVec<u8>,
     tag: u8,
@@ -186,7 +226,8 @@ pub(super) unsafe fn outcome(
     result: &Result<()>,
     kinds: &[Kind],
     raw: *const ValRaw,
-    encode_ref: impl FnMut(*mut core::ffi::c_void) -> Result<u32>,
+    refs: Refs<'_>,
+    exception: u32,
 ) -> Result<()> {
     let call = call.as_u32().to_le_bytes();
     match result {
@@ -195,13 +236,16 @@ pub(super) unsafe fn outcome(
             bytes.extend_from_slice(&call)?;
             bytes.push(0)?;
             // SAFETY: inherited from this function's contract.
-            unsafe { values(bytes, kinds, raw, encode_ref)? };
+            unsafe { values(bytes, kinds, raw, refs)? };
         }
         Err(e) => {
-            if tag == LEAVE_WASM && is_exception(e) {
-                record(bytes, tag, 5)?;
+            let thrown = e.is::<crate::ThrownException>();
+            if thrown || (tag == LEAVE_WASM && is_exception(e)) {
+                let exception = refs.handles.encode(if thrown { exception } else { 0 })?;
+                record(bytes, tag, 13)?;
                 bytes.extend_from_slice(&call)?;
                 bytes.push(3)?;
+                bytes.extend_from_slice(&exception.to_le_bytes())?;
             } else if let Some(trap) = e.downcast_ref::<Trap>() {
                 record(bytes, tag, 6)?;
                 bytes.extend_from_slice(&call)?;
@@ -317,21 +361,59 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// Reads a type from [`Kind::encode`].
-    pub fn kind(&mut self) -> Result<Kind> {
-        Ok(match self.u8()? {
-            0x7f => Kind::I32,
-            0x7e => Kind::I64,
-            0x7d => Kind::F32,
-            0x7c => Kind::F64,
-            0x7b => Kind::V128,
-            0x70 => Kind::FuncRef { nullable: true },
-            0x64 if self.u8()? == 0x70 => Kind::FuncRef { nullable: false },
-            _ => bail!("invalid value type in trace"),
+    /// Reads a type from [`val_type`].
+    pub fn val_type(&mut self, objects: &Objects) -> Result<ValType> {
+        let ref_type = |nullable, heap| ValType::Ref(RefType::new(nullable, heap));
+        let find_abstract = |code| {
+            let mut types = abstract_heap_types().into_iter();
+            types.find_map(|(c, ty)| (c == code).then_some(ty))
+        };
+        let code = self.u8()?;
+        Ok(match code {
+            0x7f => ValType::I32,
+            0x7e => ValType::I64,
+            0x7d => ValType::F32,
+            0x7c => ValType::F64,
+            0x7b => ValType::V128,
+            0x63 | 0x64 => {
+                let next = self.u8()?;
+                if let Some(heap) = find_abstract(next) {
+                    ensure!(code == 0x64, "invalid value type in trace");
+                    return Ok(ref_type(false, heap));
+                }
+                let mut byte = next;
+                let mut id = u32::from(byte & 0x7f);
+                let mut shift = 0;
+                while byte & 0x80 != 0 {
+                    byte = self.u8()?;
+                    shift += 7;
+                    let bits = u32::from(byte & 0x7f);
+                    ensure!(shift < 28 || bits < 8, "invalid value type in trace");
+                    id |= bits.checked_shl(shift).unwrap_or(0);
+                }
+                let ty = objects.types.get(super::RecordedType::from_u32(id));
+                let ty = ty.ok_or_else(|| format_err!("invalid type ID in trace"))?;
+                ref_type(code == 0x63, ty.clone())
+            }
+            code => match find_abstract(code) {
+                Some(heap) => ref_type(true, heap),
+                None => bail!("invalid value type in trace"),
+            },
         })
     }
 
-    pub fn value(&mut self, kind: Kind, store: &StoreOpaque, objects: &Objects) -> Result<ValRaw> {
+    /// Reads a list of types that fills the rest of these bytes.
+    pub fn val_types(&mut self, objects: &Objects) -> Result<Vec<ValType>> {
+        let mut types = Vec::new();
+        while self.end().is_err() {
+            types.push(self.val_type(objects)?);
+        }
+        Ok(types)
+    }
+
+    /// Reads a value. A GC reference has yet to be exposed to Wasm, and only
+    /// the nullability of a reference has been checked.
+    fn value(&mut self, kind: Kind, store: &StoreOpaque) -> Result<ValRaw> {
         Ok(match kind {
             Kind::I32 => ValRaw::u32(self.u32()?),
             Kind::I64 => ValRaw::u64(self.u64()?),
@@ -339,13 +421,23 @@ impl<'a> Reader<'a> {
             Kind::F64 => ValRaw::f64(self.u64()?),
             Kind::V128 => ValRaw::v128(u128::from_le_bytes(self.take(16)?.try_into().unwrap())),
             Kind::FuncRef { nullable } => {
-                ValRaw::funcref(match objects.decode_ref(self.u32()?)? {
+                let func = store.rr_objects().decode_ref(self.u32()?)?;
+                ensure!(
+                    nullable || func.is_some(),
+                    "null value of non-nullable type in trace"
+                );
+                ValRaw::funcref(match func {
                     Some(func) => func.vm_func_ref(store).as_ptr().cast(),
-                    None => {
-                        ensure!(nullable, "null value of non-nullable type in trace");
-                        core::ptr::null_mut()
-                    }
+                    None => core::ptr::null_mut(),
                 })
+            }
+            Kind::GcRef { nullable } => {
+                let gc_ref = store.rr_handles().decode(self.u64()?)?;
+                ensure!(
+                    nullable || gc_ref.is_some(),
+                    "null value of non-nullable type in trace"
+                );
+                ValRaw::anyref(gc_ref.map_or(0, |r| r.as_raw_u32()))
             }
             Kind::Unsupported => bail!(UNSUPPORTED),
         })
@@ -354,33 +446,43 @@ impl<'a> Reader<'a> {
     /// Reads values into the first of `slots`.
     pub fn values(
         &mut self,
-        kinds: &[Kind],
+        types: &[ValType],
         slots: &mut [MaybeUninit<ValRaw>],
-        store: &StoreOpaque,
-        objects: &Objects,
+        store: &mut StoreOpaque,
     ) -> Result<()> {
-        ensure!(slots.len() >= kinds.len(), "not enough value slots");
-        for (kind, slot) in kinds.iter().zip(slots) {
-            slot.write(self.value(*kind, store, objects)?);
+        ensure!(slots.len() >= types.len(), "not enough value slots");
+        for (ty, slot) in types.iter().zip(slots) {
+            let kind = Kind::new(ty);
+            slot.write(self.value(kind, store)?);
+            // SAFETY: the slot was just initialized with a value of this kind.
+            let raw = unsafe { slot.assume_init_ref() };
+            store.rr_check_ref_type(ty, raw)?;
+            store.rr_expose_refs(&[kind], core::slice::from_mut(slot))?;
         }
         Ok(())
+    }
+
+    /// Whether this is the record of a call into Wasm that threw an exception
+    /// that the host did not see.
+    pub fn has_null_exception(&self) -> bool {
+        self.bytes.len() == 13 && self.bytes[4..] == [3, 0, 0, 0, 0, 0, 0, 0, 0]
     }
 
     /// Reads how a call returned, from [`outcome`], after its call ID. If it
     /// succeeded, its results are written to the first of `slots`.
     pub fn outcome(
         &mut self,
-        kinds: &[Kind],
+        types: &[ValType],
         slots: &mut [MaybeUninit<ValRaw>],
-        store: &StoreOpaque,
-        objects: &Objects,
+        store: &mut StoreOpaque,
     ) -> Result<Result<()>> {
         let result = match self.u8()? {
-            0 => Ok(self.values(kinds, slots, store, objects)?),
+            0 => Ok(self.values(types, slots, store)?),
             1 => Err(Trap::from_u8(self.u8()?)
                 .ok_or_else(|| format_err!("invalid trap code in trace"))?
                 .into()),
             2 => Err(format_err!("{}", core::str::from_utf8(self.rest())?)),
+            3 => Err(store.rr_throw(self.u64()?)?),
             _ => bail!("invalid outcome in trace"),
         };
         self.end()?;
@@ -393,29 +495,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kinds_use_the_wasm_binary_encoding() -> Result<()> {
-        use wasmparser::{RefType, ValType};
+    fn types_use_the_wasm_binary_encoding() -> Result<()> {
+        use wasmparser::{RefType as R, ValType as V};
 
-        for (kind, ty) in [
-            (Kind::I32, ValType::I32),
-            (Kind::I64, ValType::I64),
-            (Kind::F32, ValType::F32),
-            (Kind::F64, ValType::F64),
-            (Kind::V128, ValType::V128),
-            (Kind::FuncRef { nullable: true }, ValType::FUNCREF),
+        let objects = Objects::default();
+        for (ty, wasm) in [
+            (ValType::I32, V::I32),
+            (ValType::I64, V::I64),
+            (ValType::F32, V::F32),
+            (ValType::F64, V::F64),
+            (ValType::V128, V::V128),
+            (ValType::FUNCREF, V::FUNCREF),
             (
-                Kind::FuncRef { nullable: false },
-                ValType::Ref(RefType::FUNC),
+                ValType::Ref(RefType::new(false, HeapType::Func)),
+                V::Ref(R::FUNC),
             ),
+            (ValType::EXTERNREF, V::EXTERNREF),
+            (ValType::ANYREF, V::Ref(R::ANYREF)),
+            (
+                ValType::Ref(RefType::new(false, HeapType::Struct)),
+                V::Ref(R::STRUCT),
+            ),
+            (ValType::EXNREF, V::EXNREF),
+            (ValType::NULLREF, V::Ref(R::NULLREF)),
         ] {
             let mut bytes = TryVec::new();
-            kind.encode(&mut bytes)?;
-            assert_eq!(*Kind::decode_list(&bytes)?, [kind]);
+            val_type(&mut bytes, &ty, &objects)?;
+            let decoded = Reader::new(&bytes).val_types(&objects)?;
+            assert_eq!(decoded.len(), 1);
+            assert!(ValType::eq(&decoded[0], &ty));
             let mut reader = wasmparser::BinaryReader::new(&bytes, 0);
-            assert_eq!(reader.read::<ValType>()?, ty);
+            assert_eq!(reader.read::<V>()?, wasm);
             assert!(reader.eof());
         }
-        assert!(Kind::Unsupported.encode(&mut TryVec::new()).is_err());
         Ok(())
     }
 }

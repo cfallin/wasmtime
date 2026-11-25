@@ -496,6 +496,13 @@ impl RootSet {
             || self.owned_rooted.iter().any(|(_, r)| !r.is_i31())
     }
 
+    /// All roots.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_raw_roots(&self) -> impl Iterator<Item = &VMGcRef> {
+        let lifo = self.lifo_roots.iter().map(|r| &r.gc_ref);
+        lifo.chain(self.owned_rooted.iter().map(|(_, r)| r))
+    }
+
     /// Enter a LIFO rooting scope.
     ///
     /// Returns an integer that should be passed unmodified to `exit_lifo_scope`

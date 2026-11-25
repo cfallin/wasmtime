@@ -11,6 +11,16 @@ impl StoreOpaque {
         bail!("cannot allocate a GC store: the `gc` feature was disabled at compile time")
     }
 
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_raw_host_roots(&self) -> alloc::collections::BTreeSet<u32> {
+        Default::default()
+    }
+
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_pending_exception_raw(&self) -> u32 {
+        0
+    }
+
     pub(crate) fn has_pending_exception(&self) -> bool {
         false
     }

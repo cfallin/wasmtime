@@ -59,6 +59,16 @@ impl StoreOpaque {
     pub(crate) fn rr_trace_parked_roots(&self, _roots: &mut crate::vm::GcRootsList) {}
 
     #[inline]
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_trace_handles(&mut self, _roots: &mut crate::vm::GcRootsList) {}
+
+    #[inline]
+    #[cfg(feature = "gc")]
+    pub(crate) fn rr_created_externref(&mut self, _gc_ref: &crate::vm::VMGcRef) -> Result<()> {
+        Ok(())
+    }
+
+    #[inline]
     pub(crate) fn rr_memory_grown(&mut self, _memory: Memory) -> Result<()> {
         Ok(())
     }

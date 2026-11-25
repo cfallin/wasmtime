@@ -2,12 +2,55 @@
 //! Wasm bytecode, and host functions as their signatures.
 
 use super::*;
-use crate::{Global, Instance, Module};
+use crate::{Global, HeapType, Instance, Module, ValType};
 use objects::RecordedGlobal;
 use wasmtime_environ::packed_option::ReservedValue;
-use wasmtime_environ::{DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, EntityIndex};
+use wasmtime_environ::{
+    DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, EngineOrModuleTypeIndex,
+    EntityIndex, TypeIndex, VMSharedTypeIndex,
+};
+
+/// The type at `index` in a module's type section.
+pub(super) fn module_type(module: &Module, index: TypeIndex) -> Option<VMSharedTypeIndex> {
+    match *module.env_module().types.get(index)? {
+        EngineOrModuleTypeIndex::Engine(index) => Some(index),
+        EngineOrModuleTypeIndex::Module(index) => module.signatures().shared_type(index),
+        EngineOrModuleTypeIndex::RecGroup(_) => None,
+    }
+}
 
 impl Session {
+    /// Records a type's definition if it is a reference to a concrete type that
+    /// has not been recorded.
+    fn record_type(&mut self, ty: &ValType) -> Result<()> {
+        let ValType::Ref(ty) = ty else {
+            return Ok(());
+        };
+        let ty = ty.heap_type();
+        let target = match ty {
+            HeapType::ConcreteFunc(t) => t.type_index(),
+            HeapType::ConcreteStruct(t) => t.type_index(),
+            HeapType::ConcreteArray(t) => t.type_index(),
+            _ => return Ok(()),
+        };
+        if self.objects.find_type(ty).is_ok() {
+            return Ok(());
+        }
+        for (module_id, module) in self.objects.modules.iter() {
+            for index in module.env_module().types.keys() {
+                if module_type(module, index) == Some(target) {
+                    let id = self.objects.types.push(ty.clone())?;
+                    let mut body = TryVec::new();
+                    body.extend_from_slice(&id.as_u32().to_le_bytes())?;
+                    body.extend_from_slice(&module_id.as_u32().to_le_bytes())?;
+                    body.extend_from_slice(&index.as_u32().to_le_bytes())?;
+                    return self.append(codec::TYPE, &body);
+                }
+            }
+        }
+        bail!("record/replay does not support types that are not in a module")
+    }
+
     fn import_func(&mut self, store: &StoreOpaque, func: Func) -> Result<RecordedFunc> {
         if let Ok(id) = self.objects.find_func(store, func) {
             return Ok(id);
@@ -15,12 +58,16 @@ impl Session {
         let id = self.objects.add_func(store, func)?;
         let f = &self.objects.funcs[id];
         ensure!(f.host, "unregistered guest function in instance imports");
+        let ty = func.load_ty(store);
         let mut body = TryVec::new();
         body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-        for kinds in [&f.params, &f.results] {
+        let params = ty.params().collect::<Vec<_>>();
+        let results = ty.results().collect::<Vec<_>>();
+        for types in [params, results] {
             let mut encoded = TryVec::new();
-            for kind in kinds {
-                kind.encode(&mut encoded)?;
+            for ty in types {
+                self.record_type(&ty)?;
+                codec::val_type(&mut encoded, &ty, &self.objects)?;
             }
             codec::blob(&mut body, &encoded)?;
         }
@@ -36,8 +83,9 @@ impl Session {
         let kind = Kind::new(ty.content());
         ensure!(
             kind != Kind::Unsupported,
-            "record/replay does not support globals of GC or typed references"
+            "record/replay does not support globals of continuation references"
         );
+        self.record_type(ty.content())?;
         let raw = match global._get(store) {
             crate::Val::I32(v) => ValRaw::i32(v),
             crate::Val::I64(v) => ValRaw::i64(v),
@@ -49,7 +97,10 @@ impl Session {
                 self.import_func(store, func)?;
                 ValRaw::funcref(func.vm_func_ref(store).as_ptr().cast())
             }
-            _ => unreachable!(),
+            crate::Val::ExternRef(None) | crate::Val::AnyRef(None) | crate::Val::ExnRef(None) => {
+                ValRaw::anyref(0)
+            }
+            _ => bail!("record/replay does not support host globals that refer to GC objects"),
         };
         let id = self.objects.add_global(store, global)?;
         if global.is_component_flag() {
@@ -60,12 +111,12 @@ impl Session {
         }
         let mut body = TryVec::new();
         body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-        kind.encode(&mut body)?;
+        codec::val_type(&mut body, ty.content(), &self.objects)?;
         body.push(u8::from(ty.mutability() == crate::Mutability::Var))?;
         // SAFETY: kind and raw both came from the global's checked type, and
         // the store owns any function that raw refers to.
         unsafe {
-            codec::values(&mut body, &[kind], &raw, |ptr| self.objects.encode_ref(ptr))?;
+            codec::values(&mut body, &[kind], &raw, self.refs())?;
         }
         self.append(codec::GLOBAL, &body)?;
         Ok(id)
@@ -201,20 +252,18 @@ impl StoreOpaque {
     pub(crate) fn rr_created_table(&mut self, table: crate::Table, init: crate::Ref) -> Result<()> {
         self.rr_register(|store, session| {
             let ty = table.ty_(store);
-            let kind = Kind::new(&crate::ValType::Ref(ty.element().clone()));
-            ensure!(
-                matches!(kind, Kind::FuncRef { .. }),
-                "record/replay does not support tables of GC or typed references"
-            );
+            let element = ValType::Ref(ty.element().clone());
+            session.record_type(&element)?;
             let func = match init {
                 crate::Ref::Func(None) => 0,
                 crate::Ref::Func(Some(func)) => 1 + session.import_func(store, func)?.as_u32(),
-                _ => bail!("record/replay does not support tables of GC or typed references"),
+                init if init.is_null() => 0,
+                _ => bail!("record/replay does not support host tables that refer to GC objects"),
             };
             let id = session.objects.add_table(store, table)?;
             let mut body = TryVec::new();
             body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-            kind.encode(&mut body)?;
+            codec::val_type(&mut body, &element, &session.objects)?;
             body.push(u8::from(ty.is_64()))?;
             body.extend_from_slice(&ty.minimum().to_le_bytes())?;
             body.push(u8::from(ty.maximum().is_some()))?;

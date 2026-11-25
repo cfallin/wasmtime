@@ -37,6 +37,8 @@ define_ids! {
     RecordedTable;
     /// The ID of a module in a trace.
     RecordedModule;
+    /// The ID of a concrete type in a trace.
+    RecordedType;
     /// The ID of a call across the host/Wasm boundary in a trace.
     RecordedCall;
 }
@@ -63,6 +65,8 @@ pub(super) struct Objects {
     tables_by_key: TryHashMap<TableHashKey, RecordedTable>,
     /// The globals that are flags of component instances.
     pub flags: TryVec<RecordedGlobal>,
+    /// Concrete types.
+    pub types: TryPrimaryMap<RecordedType, crate::HeapType>,
     pub modules: TryPrimaryMap<RecordedModule, crate::Module>,
 }
 
@@ -81,6 +85,15 @@ impl Objects {
         let func = unsafe { ptr.as_ref() };
         // Cannot overflow: `u32::MAX` is not a valid ID.
         Ok(1 + self.find_func_ref(func)?.as_u32())
+    }
+
+    pub fn find_type(&self, ty: &crate::HeapType) -> Result<RecordedType> {
+        self.types
+            .iter()
+            .find_map(|(id, t)| crate::HeapType::eq(t, ty).then_some(id))
+            .ok_or_else(|| {
+                format_err!("record/replay does not support types that are not in a module")
+            })
     }
 
     /// The function that `id` refers to in a trace.

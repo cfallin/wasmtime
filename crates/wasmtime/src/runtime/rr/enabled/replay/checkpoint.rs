@@ -13,6 +13,7 @@
 //! restores a checkpoint from just after they were first created. Handles to
 //! objects thus stay valid, and rewinding repeatedly does not leak them.
 
+use super::super::handles::HandlesImage;
 use super::activation::ActivationImage;
 use super::image::{Image, PagedImage};
 use super::*;
@@ -103,6 +104,7 @@ pub struct Checkpoint {
     tables: Vec<Arc<PagedImage>>,
     globals: Arc<PagedImage>,
     segments: Vec<Arc<RrSegments>>,
+    handles: HandlesImage,
     #[cfg(feature = "gc")]
     gc: Option<Arc<crate::store::RrGcImage>>,
     copied_bytes: usize,
@@ -211,6 +213,7 @@ impl Replayer {
             tables: self.checkpoints.tables.clone(),
             globals: self.checkpoints.globals.clone(),
             segments: self.checkpoints.segments.clone(),
+            handles: self.store.as_context().0.rr_handles().save(),
             #[cfg(feature = "gc")]
             gc: self.checkpoints.gc.clone(),
             copied_bytes,
@@ -258,6 +261,7 @@ impl Replayer {
         if let Some(image) = &checkpoint.gc {
             store.rr_gc_restore(image)?;
         }
+        store.rr_session().handles.restore(&checkpoint.handles);
         store.on_wasm_to_host_transition();
 
         self.checkpoints.globals = checkpoint.globals.clone();
@@ -400,6 +404,7 @@ impl Replayer {
             Some(
                 codec::HOST
                     | codec::MODULE
+                    | codec::TYPE
                     | codec::INSTANCE
                     | codec::GLOBAL
                     | codec::MEMORY

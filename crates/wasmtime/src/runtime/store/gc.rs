@@ -737,6 +737,7 @@ impl StoreOpaque {
         }
 
         self.trace_pending_exception_roots(gc_roots_list);
+        self.rr_trace_handles(gc_roots_list);
 
         log::trace!("End trace GC roots")
     }
@@ -1040,6 +1041,26 @@ impl StoreOpaque {
         );
         *self.vm_store_context.gc_heap.get_mut() = gc_store.vmmemory_definition();
         Ok(self.gc_store.insert(gc_store))
+    }
+
+    /// The raw references of all objects that the host has roots for.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_raw_host_roots(&self) -> alloc::collections::BTreeSet<u32> {
+        self.gc_data
+            .gc_roots
+            .rr_raw_roots()
+            .chain(self.gc_data.pending_exception.as_ref())
+            .map(|r| r.as_raw_u32())
+            .collect()
+    }
+
+    /// The raw reference to the pending exception, or null.
+    #[cfg(feature = "rr")]
+    pub(crate) fn rr_pending_exception_raw(&self) -> u32 {
+        self.gc_data
+            .pending_exception
+            .as_ref()
+            .map_or(0, |r| r.as_raw_u32())
     }
 
     /// The pending exception, without taking it.
