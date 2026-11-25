@@ -222,6 +222,23 @@ impl StoreOpaque {
             .filter_map(|act| unsafe { FrameHandle::exit_frame(self, act) })
     }
 
+    /// The return addresses of the checks of individual breakpoints.
+    #[cfg(feature = "rr")]
+    pub(crate) fn breakpoint_return_addresses(&self) -> Vec<usize> {
+        let (breakpoints, registry) = self.breakpoints_and_registry();
+        let mut addresses = Vec::new();
+        for breakpoint in breakpoints.breakpoints(registry) {
+            let module = &breakpoint.module;
+            let base = registry.store_code_base(module.engine_code()).unwrap();
+            let table = module.frame_table().unwrap();
+            let index = module.compiled_module().module_index();
+            for patch in table.lookup_breakpoint_patches_by_pc(index, breakpoint.pc) {
+                addresses.push(base.raw() + patch.offset + patch.enable.len());
+            }
+        }
+        addresses
+    }
+
     pub(crate) fn edit_breakpoints<R>(
         &mut self,
         f: impl FnOnce(&mut BreakpointState<'_>) -> Result<R>,
@@ -1124,6 +1141,9 @@ pub trait DebugHandler: Clone + Send + Sync + 'static {
 pub(crate) struct Breakpoints {
     /// Single-step mode.
     single_step: bool,
+    /// Whether to patch in every breakpoint for replay to count.
+    #[cfg(feature = "rr")]
+    count_events: bool,
     /// Breakpoints added individually. Maps from the actual
     /// (possibly slipped-forward) breakpoint key to a reference
     /// count. Multiple requested PCs may map to the same actual
@@ -1214,6 +1234,15 @@ impl Breakpoints {
         self.single_step
     }
 
+    /// Whether every breakpoint is patched in.
+    fn patches_all(&self) -> bool {
+        #[cfg(feature = "rr")]
+        if self.count_events {
+            return true;
+        }
+        self.single_step
+    }
+
     /// Internal helper to patch a new module for
     /// single-stepping. When a module is newly registered in a
     /// `Store`, we need to patch all breakpoints into the copy for
@@ -1227,7 +1256,7 @@ impl Breakpoints {
         // other modules that share this code (as the modules within a
         // component do). That is fine: the `BreakpointState` leaves
         // code published until its edits are committed.
-        if self.single_step {
+        if self.patches_all() {
             let mem = code.code_memory_mut().unwrap();
             mem.unpublish()?;
             BreakpointState::apply_single_step(mem, module, true, |_key| false);
@@ -1264,7 +1293,7 @@ impl<'a> BreakpointState<'a> {
         // single-stepping state (including if it was just registered,
         // above), so if this transaction changes it, all of the
         // module's sites must be re-patched.
-        if committed.single_step != self.edited.single_step {
+        if committed.patches_all() != self.edited.patches_all() {
             pending.modules.insert(module.id());
         }
         Ok(store_code_pc)
@@ -1416,6 +1445,17 @@ impl<'a> BreakpointState<'a> {
             return Ok(());
         }
         self.edited.single_step = enabled;
+        self.repatch_all()
+    }
+
+    /// Patches in every breakpoint, so that replay can count debug events.
+    #[cfg(feature = "rr")]
+    pub(crate) fn count_events(&mut self) -> Result<()> {
+        self.edited.count_events = true;
+        self.repatch_all()
+    }
+
+    fn repatch_all(&mut self) -> Result<()> {
         let modules = self
             .store
             .modules()
@@ -1530,7 +1570,7 @@ impl<'a> BreakpointState<'a> {
         // Patch every pending site to match the edited breakpoint
         // state, regardless of the edits that led to it.
         let enabled =
-            |key: &BreakpointKey| edited.single_step || edited.breakpoints.contains_key(key);
+            |key: &BreakpointKey| edited.patches_all() || edited.breakpoints.contains_key(key);
         for (store_code_base, modules, sites) in &regions {
             let mem = Self::code_memory(registry, *store_code_base);
             for module in modules {
@@ -1553,6 +1593,7 @@ impl<'a> BreakpointState<'a> {
         for (memory, range, watch) in watches {
             store.debug_set_watch(memory, range, watch);
         }
+        store.rr_breakpoints_edited();
         Ok(())
     }
 }

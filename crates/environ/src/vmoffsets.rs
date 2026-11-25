@@ -1177,6 +1177,9 @@ for_each_vmctx_type!(define_vmoffsets_dynamic_offsets);
 /// This is stored at the start of all `VMContext` structures.
 pub const VMCONTEXT_MAGIC: u32 = u32::from_le_bytes(*b"core");
 
+/// The length of `VMStoreContext::debug_event_filter`, a power of two.
+pub const DEBUG_EVENT_FILTER_LEN: usize = 4096;
+
 /// Equivalent of `VMCONTEXT_MAGIC` except for array-call host functions.
 ///
 /// This is stored at the start of all `VMArrayCallHostFuncContext` structures

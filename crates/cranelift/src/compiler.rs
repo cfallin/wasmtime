@@ -542,6 +542,85 @@ impl Compiler {
         })
     }
 
+    /// Counts a debug event, returning from its trampoline unless it must call
+    /// the `breakpoint` builtin:
+    ///
+    /// ```ignore
+    /// let cx: &VMStoreContext;
+    /// if let Some(filter) = cx.debug_event_filter {
+    ///     cx.debug_event_count += 1;
+    ///     if cx.debug_event_count < cx.debug_event_target
+    ///         && filter[return_address() % DEBUG_EVENT_FILTER_LEN] == 0
+    ///     {
+    ///         return;
+    ///     }
+    /// }
+    /// ```
+    fn count_debug_event(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        alias_regions: &mut AliasRegions<u8>,
+        vm_store_context: ir::Value,
+    ) {
+        let pointer_type = self.isa.pointer_type();
+        let count_block = builder.create_block();
+        let filter_block = builder.create_block();
+        let return_block = builder.create_block();
+        let call_block = builder.create_block();
+        builder.set_cold_block(call_block);
+
+        let filter = alias_regions
+            .vm_store_context()
+            .debug_event_filter()
+            .load(&mut builder.cursor(), vm_store_context);
+        builder
+            .ins()
+            .brif(filter, count_block, &[], call_block, &[]);
+
+        builder.switch_to_block(count_block);
+        builder.seal_block(count_block);
+        let count = alias_regions
+            .vm_store_context()
+            .debug_event_count()
+            .load(&mut builder.cursor(), vm_store_context);
+        let count = builder.ins().iadd_imm_u(count, 1);
+        alias_regions.vm_store_context().debug_event_count().store(
+            &mut builder.cursor(),
+            vm_store_context,
+            count,
+        );
+        let target = alias_regions
+            .vm_store_context()
+            .debug_event_target()
+            .load(&mut builder.cursor(), vm_store_context);
+        let reached = builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, count, target);
+        builder
+            .ins()
+            .brif(reached, call_block, &[], filter_block, &[]);
+
+        builder.switch_to_block(filter_block);
+        builder.seal_block(filter_block);
+        let pc = builder.ins().get_return_address(pointer_type);
+        let mask = i64::try_from(wasmtime_environ::DEBUG_EVENT_FILTER_LEN - 1).unwrap();
+        let index = builder.ins().band_imm_u(pc, mask);
+        let address = builder.ins().iadd(filter, index);
+        let region = alias_regions.debug_event_filter_region(builder.func);
+        let flags = ir::MemFlagsData::trusted().with_alias_region(Some(region));
+        let matches = builder.ins().load(ir::types::I8, flags, address, 0);
+        builder
+            .ins()
+            .brif(matches, call_block, &[], return_block, &[]);
+
+        builder.switch_to_block(return_block);
+        builder.seal_block(return_block);
+        builder.ins().return_(&[]);
+
+        builder.switch_to_block(call_block);
+        builder.seal_block(call_block);
+    }
+
     /// Yield to the replayer if the running replay activation has requested to
     /// stop.
     fn replay_yield_if_stopped(
@@ -656,6 +735,11 @@ impl Compiler {
             .vmctx()
             .store_context()
             .load(&mut builder.cursor(), vmctx);
+        if key == FuncKey::PatchableToBuiltinTrampoline(BuiltinFunctionIndex::breakpoint())
+            && self.tunables.rr == Some(RrConfig::Replaying)
+        {
+            self.count_debug_event(&mut builder, &mut alias_regions, vm_store_context);
+        }
         save_last_wasm_exit_fp_and_pc(
             &mut builder,
             pointer_type,

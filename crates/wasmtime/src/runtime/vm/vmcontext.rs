@@ -1071,6 +1071,9 @@ impl Default for VMStoreContext {
             lazy_lenders: VmPtr::dangling(),
             lazy_lenders_len: UnsafeCell::new(0),
             replay_control: None,
+            debug_event_count: UnsafeCell::new(0),
+            debug_event_target: UnsafeCell::new(usize::MAX),
+            debug_event_filter: None,
             recording: 0,
         }
     }

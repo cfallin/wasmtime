@@ -11,10 +11,14 @@ use wasmtime_environ::RrYield;
 
 /// Why the running activation stops.
 pub(in super::super) enum Stop {
+    #[cfg(feature = "debug")]
     Breakpoint,
     #[cfg(feature = "debug")]
     Watchpoint(crate::WatchpointHit),
     Interrupt,
+    /// The count of debug events reached its target.
+    #[cfg(feature = "debug")]
+    EventTarget,
     /// To let the replayer yield to the async executor.
     Yield,
 }
@@ -30,30 +34,39 @@ pub(in super::super) struct Epochs {
 }
 
 impl StoreOpaque {
-    /// Stops the running replay activation, if any. Returns whether there is
-    /// one.
-    fn rr_stop(&mut self, stop: Stop) -> bool {
-        let Some(control) = self.vm_store_context().replay_control else {
-            return false;
-        };
+    /// Stops the running replay activation.
+    fn rr_stop(&mut self, stop: Stop) {
+        let control = self.vm_store_context().replay_control.unwrap();
         // SAFETY: the running activation's control block is live, and no
         // reference to it is live while it runs.
         unsafe {
             (*control.as_ptr()).reason = RrYield::Stopped as u32;
         }
         self.rr_session().mode.replaying().stop = Some(stop);
+    }
+
+    /// Handles a breakpoint during replay, returning whether replaying.
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_stop_at_breakpoint(&mut self) -> bool {
+        if !self.rr.replaying() {
+            return false;
+        }
+        if let Some(stop) = self.rr_breakpoint_stop() {
+            self.rr_stop(stop);
+        }
         true
     }
 
-    /// Stops the running replay activation, if any, at a breakpoint.
-    pub(crate) fn rr_stop_at_breakpoint(&mut self) -> bool {
-        self.rr_stop(Stop::Breakpoint)
-    }
-
-    /// Stops the running replay activation, if any, at a watchpoint.
+    /// Handles a watchpoint during replay, returning whether replaying.
     #[cfg(feature = "debug")]
     pub(crate) fn rr_stop_at_watchpoint(&mut self, hit: crate::WatchpointHit) -> bool {
-        self.rr_stop(Stop::Watchpoint(hit))
+        if !self.rr.replaying() {
+            return false;
+        }
+        if self.rr_watchpoint_stops() {
+            self.rr_stop(Stop::Watchpoint(hit));
+        }
+        true
     }
 
     /// Handles an epoch deadline during replay, returning the new deadline, or
@@ -65,10 +78,16 @@ impl StoreOpaque {
             return None;
         }
         let epoch = self.engine().current_epoch();
+        // Interrupts wait until replay moves forward.
+        #[cfg(feature = "debug")]
+        let moving_backward = self.rr_moving_backward();
+        #[cfg(not(feature = "debug"))]
+        let moving_backward = false;
         let epochs = &mut self.rr_session().mode.replaying().epochs;
         let interrupt = epochs
             .interrupt
             .as_ref()
+            .filter(|_| !moving_backward)
             .is_some_and(|flag| flag.swap(false, Ordering::SeqCst));
         let due = epochs.yields.as_mut().filter(|(_, next)| epoch >= *next);
         let yields = match due {

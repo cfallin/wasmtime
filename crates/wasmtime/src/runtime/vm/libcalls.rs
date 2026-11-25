@@ -1426,11 +1426,11 @@ fn rr_leave(
 }
 
 fn breakpoint(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
-    if store.rr_stop_at_breakpoint() {
-        return Ok(());
-    }
     #[cfg(feature = "debug")]
     {
+        if store.rr_stop_at_breakpoint() {
+            return Ok(());
+        }
         store.block_on_debug_handler(crate::DebugEvent::Breakpoint)?;
     }
     // Avoid unused-argument warning in no-debugger builds.

@@ -90,7 +90,11 @@ pub struct Checkpoint {
     next_module: RecordedModule,
     pending_startup: Option<RecordedFunc>,
     finished: bool,
+    /// The number of debug events that were counted.
+    #[cfg(feature = "debug")]
+    events: usize,
     paused: Option<RecordedCall>,
+    at_check: bool,
     #[cfg(feature = "debug")]
     pending_write: Option<(Memory, Range<usize>)>,
     growth_failures: TryVec<GrowthFailure>,
@@ -195,7 +199,10 @@ impl Replayer {
             next_module: self.next_module,
             pending_startup: self.pending_startup,
             finished: self.finished,
+            #[cfg(feature = "debug")]
+            events: self.store.as_context_mut().0.rr_event_count(),
             paused: self.paused,
+            at_check: self.at_check,
             #[cfg(feature = "debug")]
             pending_write: self.pending_write.clone(),
             growth_failures: self.replaying().growth_failures.try_clone()?,
@@ -272,13 +279,17 @@ impl Replayer {
         self.pending_startup = checkpoint.pending_startup;
         self.finished = checkpoint.finished;
         self.paused = checkpoint.paused;
+        self.at_check = checkpoint.at_check;
         #[cfg(feature = "debug")]
         {
             self.pending_write = checkpoint.pending_write.clone();
+            let store = self.store.as_context_mut().0;
+            store.rr_set_event_count(checkpoint.events);
         }
         self.replaying().growth_failures = checkpoint.growth_failures.try_clone()?;
         self.observed = None;
         self.stop = None;
+        self.at_target = false;
         self.failed = false;
         Ok(())
     }

@@ -88,6 +88,11 @@ impl StoreOpaque {
     }
 
     #[inline]
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_breakpoints_edited(&mut self) {}
+
+    #[inline]
+    #[cfg(feature = "debug")]
     pub(crate) fn rr_stop_at_breakpoint(&mut self) -> bool {
         false
     }

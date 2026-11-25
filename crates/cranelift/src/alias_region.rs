@@ -208,6 +208,9 @@ enum AliasRegionKey {
 
     /// An access of the shadow bytes of a linear memory, for watchpoints.
     ShadowMemory,
+
+    /// An access of `VMStoreContext::debug_event_filter`'s bytes.
+    DebugEventFilter,
 }
 
 impl AliasRegionKey {
@@ -1736,6 +1739,11 @@ where
     /// watchpoint checks read before stores.
     pub fn shadow_memory_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
         self.region(func, AliasRegionKey::ShadowMemory)
+    }
+
+    /// The alias region for `VMStoreContext::debug_event_filter`'s bytes.
+    pub fn debug_event_filter_region(&mut self, func: &mut ir::Function) -> ir::AliasRegion {
+        self.region(func, AliasRegionKey::DebugEventFilter)
     }
 }
 

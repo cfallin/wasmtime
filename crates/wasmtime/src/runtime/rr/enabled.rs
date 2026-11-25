@@ -26,6 +26,8 @@ use growth::GrowthFailure;
 use objects::{Objects, RecordedCall, RecordedFunc, RecordedMemory};
 #[cfg(feature = "gc")]
 pub(crate) use replay::PagedImage;
+#[cfg(feature = "debug")]
+pub use replay::Position;
 pub use replay::{Checkpoint, ReplayStop, Replayer};
 
 /// The call ID with which `rr_enter` reports a call that is not recorded.
@@ -234,6 +236,9 @@ struct Replaying {
     stop: Option<replay::Stop>,
     epochs: replay::Epochs,
     histories: replay::Histories,
+    /// Counts debug events, if reverse execution is enabled.
+    #[cfg(feature = "debug")]
+    counter: Option<replay::EventCounter>,
 }
 
 /// The Wasm frames of a suspended activation, from its `VMStoreContext` state.

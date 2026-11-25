@@ -497,6 +497,24 @@ macro_rules! for_each_vm_type {
                 /// feature to keep `VMOffsets` unconditional.
                 pub replay_control: Option<VmPtr<VMReplayControl>>,
 
+                /// The number of debug events (breakpoint checks that were
+                /// patched in) that have been counted. This and the next two
+                /// fields are only used when replaying with guest debugging.
+                pub debug_event_count: UnsafeCell<usize>,
+
+                /// The count at which debug events call the `breakpoint`
+                /// builtin, although `debug_event_filter` does not match.
+                pub debug_event_target: UnsafeCell<usize>,
+
+                /// An array of `DEBUG_EVENT_FILTER_LEN` bytes, indexed by the
+                /// low bits of a breakpoint check's return address. Debug
+                /// events are counted, and call the `breakpoint` builtin only
+                /// if their byte is nonzero.
+                ///
+                /// If this is `None` then debug events are not counted, and
+                /// all call the builtin.
+                pub debug_event_filter: Option<VmPtr<u8>>,
+
                 /// Nonzero while the store records its execution.
                 ///
                 /// Trampolines compiled for record/replay engines check it

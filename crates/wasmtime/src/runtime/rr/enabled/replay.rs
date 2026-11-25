@@ -13,15 +13,23 @@ use objects::{RecordedGlobal, RecordedModule};
 
 mod activation;
 mod checkpoint;
+#[cfg(feature = "debug")]
+mod count;
 mod image;
 mod init;
+#[cfg(feature = "debug")]
+mod reverse;
 mod stop;
 mod track;
 
 use activation::{Activation, HostCall, HostValues, Serial, Trampolines, Yield};
 pub use checkpoint::Checkpoint;
+#[cfg(feature = "debug")]
+pub(super) use count::EventCounter;
 #[cfg(feature = "gc")]
 pub(crate) use image::PagedImage;
+#[cfg(feature = "debug")]
+pub use reverse::Position;
 pub(super) use stop::{Epochs, Stop};
 pub(super) use track::Histories;
 
@@ -72,10 +80,16 @@ pub struct Replayer {
     stop: Option<ReplayStop>,
     /// Whether `run` should yield to the async executor.
     yield_now: bool,
+    /// Whether the count of debug events reached its target.
+    at_target: bool,
+    /// Whether the paused activation is at the check of a debug event.
+    at_check: bool,
     /// Whether to leave single-stepping enabled after the interrupt that is
     /// being settled, if any.
     #[cfg(feature = "debug")]
     settling: Option<bool>,
+    #[cfg(feature = "debug")]
+    reverse: Option<reverse::Reverse>,
     /// Storage for encoding values to compare with the trace.
     scratch: TryVec<u8>,
     finished: bool,
@@ -99,6 +113,8 @@ pub enum ReplayStop {
     Watchpoint(crate::WatchpointHit),
     /// Replay was interrupted through [`Replayer::set_interrupt_flag`].
     Interrupted,
+    /// Reverse execution reached the beginning of the replay.
+    Beginning,
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
@@ -190,8 +206,12 @@ impl Replayer {
             stop_at_events: false,
             stop: None,
             yield_now: false,
+            at_target: false,
+            at_check: false,
             #[cfg(feature = "debug")]
             settling: None,
+            #[cfg(feature = "debug")]
+            reverse: None,
             scratch: TryVec::new(),
             finished: false,
             failed: false,
@@ -298,11 +318,25 @@ impl Replayer {
     /// this again. After an error, replay cannot be resumed.
     pub async fn run(&mut self) -> Result<ReplayStop> {
         loop {
+            #[cfg(feature = "debug")]
+            self.prepare_to_run_forward();
             let stop = self.run_to_stop().await?;
             #[cfg(feature = "debug")]
-            let Some(stop) = self.settle_interrupt(stop)? else {
+            let stop = match stop {
+                Some(stop) => self.settle_interrupt(stop)?,
+                // A snapshot is due.
+                None => {
+                    self.take_snapshot()?;
+                    None
+                }
+            };
+            let Some(stop) = stop else {
                 continue;
             };
+            #[cfg(feature = "debug")]
+            if stop != ReplayStop::Finished {
+                self.take_snapshot()?;
+            }
             return Ok(stop);
         }
     }
@@ -329,14 +363,16 @@ impl Replayer {
         }))
     }
 
-    async fn run_to_stop(&mut self) -> Result<ReplayStop> {
+    /// Replays until the next stop, or to the target for the count of debug
+    /// events, for which this returns `None`.
+    async fn run_to_stop(&mut self) -> Result<Option<ReplayStop>> {
         // Invalidate handles to state that Wasm may mutate, as ordinary calls
         // into Wasm do when they return to the host.
         self.store.as_context_mut().0.on_wasm_to_host_transition();
         core::future::poll_fn(|cx| {
             for _ in 0..256 {
                 if self.finished && self.paused.is_none() {
-                    return Poll::Ready(Ok(ReplayStop::Finished));
+                    return Poll::Ready(Ok(Some(ReplayStop::Finished)));
                 }
                 let offset = self.offset;
                 if let Err(e) = self.step() {
@@ -344,7 +380,10 @@ impl Replayer {
                     return Poll::Ready(Err(e));
                 }
                 if let Some(stop) = self.stop.take() {
-                    return Poll::Ready(Ok(stop));
+                    return Poll::Ready(Ok(Some(stop)));
+                }
+                if core::mem::take(&mut self.at_target) {
+                    return Poll::Ready(Ok(None));
                 }
                 if core::mem::take(&mut self.yield_now) {
                     break;
@@ -458,6 +497,7 @@ impl Replayer {
         ensure!(!self.failed, "replay cannot continue after it failed");
         self.failed = true;
         if let Some(paused) = self.paused.take() {
+            self.at_check = false;
             #[cfg(feature = "debug")]
             {
                 self.pending_write = None;
@@ -766,6 +806,10 @@ impl Replayer {
     fn event(&mut self, body: &mut Reader<'_>) -> Result<()> {
         let tag = body.u32()?;
         let payload = body.rest();
+        #[cfg(feature = "debug")]
+        if self.store.as_context_mut().0.rr_moving_backward() {
+            return Ok(());
+        }
         for (_, observer) in self.observers.iter_mut().filter(|(t, _)| *t == tag) {
             observer(payload).context("failed to observe a trace event")?;
         }
@@ -799,7 +843,16 @@ impl Replayer {
             self.paused = Some(activation.call);
             match self.replaying().stop.take() {
                 Some(Stop::Yield) => self.yield_now = true,
-                Some(Stop::Breakpoint) => self.stop = Some(ReplayStop::Breakpoint),
+                #[cfg(feature = "debug")]
+                Some(Stop::Breakpoint) => {
+                    self.at_check = true;
+                    self.stop = Some(ReplayStop::Breakpoint);
+                }
+                #[cfg(feature = "debug")]
+                Some(Stop::EventTarget) => {
+                    self.at_check = true;
+                    self.at_target = true;
+                }
                 #[cfg(feature = "debug")]
                 Some(Stop::Watchpoint(hit)) => {
                     let start = usize::try_from(hit.address).unwrap_or(usize::MAX);
