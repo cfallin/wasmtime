@@ -760,6 +760,10 @@ fn memory_atomic_wait64(
 
 // Hook for when an instance runs out of fuel.
 fn out_of_gas(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    if store.rr_replay_fuel()? {
+        return Ok(());
+    }
+
     let result = block_on!(store, async |store, _| {
         if !store.refuel() {
             return Err(Trap::OutOfFuel.into());
@@ -784,6 +788,10 @@ fn out_of_gas(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
 #[cfg(target_has_atomic = "64")]
 fn new_epoch(store: &mut dyn VMStore, _instance: InstanceId) -> Result<NextEpoch> {
     use crate::UpdateDeadline;
+
+    if let Some(deadline) = store.rr_replay_epoch() {
+        return Ok(NextEpoch(deadline));
+    }
 
     #[cfg(feature = "debug")]
     {
@@ -1369,6 +1377,9 @@ fn watched_write(
             len,
             value,
         };
+        if store.rr_stop_at_watchpoint(hit) {
+            return Ok(());
+        }
         store.block_on_debug_handler(crate::DebugEvent::Watchpoint(hit))?;
     }
     let _ = (bits, value);
@@ -1412,6 +1423,9 @@ fn rr_leave(
 }
 
 fn breakpoint(store: &mut dyn VMStore, _instance: InstanceId) -> Result<()> {
+    if store.rr_stop_at_breakpoint() {
+        return Ok(());
+    }
     #[cfg(feature = "debug")]
     {
         store.block_on_debug_handler(crate::DebugEvent::Breakpoint)?;

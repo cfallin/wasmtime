@@ -88,6 +88,28 @@ impl StoreOpaque {
     }
 
     #[inline]
+    pub(crate) fn rr_stop_at_breakpoint(&mut self) -> bool {
+        false
+    }
+
+    #[inline]
+    #[cfg(feature = "debug")]
+    pub(crate) fn rr_stop_at_watchpoint(&mut self, _hit: crate::WatchpointHit) -> bool {
+        false
+    }
+
+    #[inline]
+    #[cfg(target_has_atomic = "64")]
+    pub(crate) fn rr_replay_epoch(&mut self) -> Option<u64> {
+        None
+    }
+
+    #[inline]
+    pub(crate) fn rr_replay_fuel(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+
+    #[inline]
     pub(crate) fn rr_replay_growth_fails(
         &mut self,
         _object: Growable,

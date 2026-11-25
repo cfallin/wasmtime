@@ -169,7 +169,8 @@ impl WastContext {
     }
 
     /// Replays the execution of a script, after running it, with
-    /// `replay_engine`, checking that it behaves as it did when recorded.
+    /// `replay_engine`, checking that it behaves as it did when recorded. If
+    /// that engine enables guest debugging then replay also single-steps.
     ///
     /// This context's engine must be configured for recording, and it can only
     /// run one script.
@@ -195,10 +196,8 @@ impl WastContext {
         #[cfg(feature = "component-model")]
         replayer.add_bytecode(SIMPLE_MODULE.as_bytes())?;
         let rt = tokio::runtime::Builder::new_current_thread().build()?;
-        match rt.block_on(replayer.run()).context("replay failed")? {
-            rr::ReplayStop::Finished => Ok(()),
-            stop => bail!("unexpected replay stop {stop:?}"),
-        }
+        rt.block_on(crate::rr::replay(&mut replayer))
+            .context("replay failed")
     }
 
     fn engine(&self) -> &Engine {

@@ -78,6 +78,8 @@ pub(super) enum Yield {
     Host(RecordedFunc, HostValues),
     /// It finished.
     Complete(Result<()>),
+    /// It stopped at a point that isn't in the trace; see `super::stop`.
+    Stopped,
 }
 
 /// The argument and result storage of a host call, on the stack of an
@@ -244,9 +246,9 @@ impl Activation {
         }
     }
 
-    /// Runs this activation until its next yield. A `pending` error makes the
-    /// host call that it is parked at fail; its results must otherwise have
-    /// been written.
+    /// Runs this activation until its next yield. If it is parked at a host call
+    /// then a `pending` error makes the call fail, and its results must
+    /// otherwise have been written.
     pub fn resume(&mut self, store: &mut StoreOpaque, pending: Option<Error>) -> Result<Yield> {
         self.host = None;
         let control = self.control.as_ptr();
@@ -329,6 +331,7 @@ impl Activation {
                 self.fiber.finish()?;
                 Ok(Yield::Complete(result))
             }
+            Some(RrYield::Stopped) => Ok(Yield::Stopped),
             None => bail!(
                 "replay activation yielded with unknown reason {}",
                 control.reason

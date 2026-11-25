@@ -228,15 +228,34 @@ struct Replaying {
     growth_failures: TryVec<GrowthFailure>,
     /// The activations, other than the running one, that are suspended.
     parked: TryVec<ExitState>,
+    /// Why the running activation stopped.
+    stop: Option<replay::Stop>,
+    epochs: replay::Epochs,
 }
 
 /// The Wasm frames of a suspended activation, from its `VMStoreContext` state.
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "gc"), expect(dead_code, reason = "only for GC roots"))]
+#[cfg_attr(
+    not(any(feature = "gc", feature = "debug")),
+    expect(dead_code, reason = "only for GC roots and debugging")
+)]
 struct ExitState {
     pc: usize,
     trampoline_fp: usize,
     entry_fp: usize,
+}
+
+impl ExitState {
+    /// # Safety
+    ///
+    /// The activation's stack must be intact.
+    #[cfg(feature = "debug")]
+    unsafe fn activation(self) -> crate::runtime::vm::Activation {
+        // SAFETY: inherited from this function's contract.
+        unsafe {
+            crate::runtime::vm::Activation::from_exit(self.pc, self.trampoline_fp, self.entry_fp)
+        }
+    }
 }
 
 impl Mode {

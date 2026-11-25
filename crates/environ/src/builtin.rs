@@ -511,6 +511,8 @@ pub enum RrYield {
     Returned = 2,
     /// Its entry function trapped.
     Trapped = 3,
+    /// It stopped where a builtin requested it to, such as at a breakpoint.
+    Stopped = 4,
 }
 
 impl RrYield {
@@ -520,6 +522,7 @@ impl RrYield {
             1 => Some(Self::HostCall),
             2 => Some(Self::Returned),
             3 => Some(Self::Trapped),
+            4 => Some(Self::Stopped),
             _ => None,
         }
     }

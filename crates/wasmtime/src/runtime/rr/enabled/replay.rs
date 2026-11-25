@@ -5,15 +5,18 @@
 //! beneath a host function. Activations may complete in any order.
 
 use super::*;
-use crate::{AsContext, Extern, Instance, StoreContext, StoreContextMut, Val};
+use crate::{AsContext, Extern, Instance, Module, StoreContext, StoreContextMut, Val};
 use alloc::collections::BTreeMap;
+use core::sync::atomic::AtomicBool;
 use core::task::Poll;
-use objects::RecordedGlobal;
+use objects::{RecordedGlobal, RecordedModule};
 
 mod activation;
 mod init;
+mod stop;
 
 use activation::{Activation, HostCall, HostValues, Trampolines, Yield};
+pub(super) use stop::{Epochs, Stop};
 
 /// Replays a trace, one stop at a time, without calling the original host
 /// functions.
@@ -31,7 +34,13 @@ pub struct Replayer {
     trace: Arc<Trace>,
     /// The offset of the next record in the trace.
     offset: usize,
+    /// The next module to be instantiated. Those from here on in `Objects` were
+    /// preloaded.
+    next_module: RecordedModule,
     activations: TryVec<Activation>,
+    /// The activation that stopped at a point that isn't in the trace, which
+    /// resumes before anything else.
+    paused: Option<RecordedCall>,
     /// What guest code did when it last ran, until the trace's next record is
     /// checked against it.
     observed: Option<Observed>,
@@ -44,6 +53,12 @@ pub struct Replayer {
     stop_at_events: bool,
     /// Why `run` should return, once the current step completes.
     stop: Option<ReplayStop>,
+    /// Whether `run` should yield to the async executor.
+    yield_now: bool,
+    /// Whether to leave single-stepping enabled after the interrupt that is
+    /// being settled, if any.
+    #[cfg(feature = "debug")]
+    settling: Option<bool>,
     /// Storage for encoding values to compare with the trace.
     scratch: TryVec<u8>,
     finished: bool,
@@ -57,6 +72,16 @@ pub struct Replayer {
 pub enum ReplayStop {
     /// The entire trace was replayed.
     Finished,
+    /// Guest code reached a breakpoint or single-stepped, as set with
+    /// [`Replayer::edit_breakpoints`]. The stopped frames are available from
+    /// [`Replayer::debug_exit_frames`].
+    Breakpoint,
+    /// Guest code is about to write to memory that is being watched. The write
+    /// happens when replay continues.
+    #[cfg(feature = "debug")]
+    Watchpoint(crate::WatchpointHit),
+    /// Replay was interrupted through [`Replayer::set_interrupt_flag`].
+    Interrupted,
     /// An embedder event with this tag was replayed, after its observers ran.
     /// Only reported when enabled with [`Replayer::stop_at_events`].
     Event(u32),
@@ -105,17 +130,6 @@ impl Replayer {
     /// incompatible with replay, or on allocation failure.
     pub fn new(engine: &Engine, trace: impl Into<Arc<Trace>>) -> Result<Self> {
         ensure!(engine.is_replaying(), "replay requires RrConfig::Replaying");
-        let tunables = engine.tunables();
-        ensure!(
-            !tunables.debug_guest,
-            "replay does not support guest debugging"
-        );
-        // Fuel and epochs would stop or suspend replay where the recording did
-        // not. Recordings made with them replay without them.
-        ensure!(
-            !tunables.consume_fuel && !tunables.epoch_interruption,
-            "replay does not support fuel or epoch interruption"
-        );
         let trampolines = Trampolines::new(engine)?;
         let mut store = Store::try_new(engine, ())?;
         store.as_context_mut().0.rr.session = Some(try_new::<Box<_>>(Session {
@@ -123,6 +137,10 @@ impl Replayer {
             mode: Mode::Replaying(Replaying::default()),
             failure: None,
         })?);
+        #[cfg(target_has_atomic = "64")]
+        if engine.tunables().epoch_interruption {
+            store.set_epoch_deadline(1);
+        }
         Ok(Replayer {
             store,
             trampolines,
@@ -130,13 +148,18 @@ impl Replayer {
             trace: trace.into(),
             // `Trace` checks the magic.
             offset: codec::MAGIC.len(),
+            next_module: RecordedModule::from_u32(0),
             activations: TryVec::new(),
+            paused: None,
             observed: None,
             instances: TryVec::new(),
             pending_startup: None,
             observers: Vec::new(),
             stop_at_events: false,
             stop: None,
+            yield_now: false,
+            #[cfg(feature = "debug")]
+            settling: None,
             scratch: TryVec::new(),
             finished: false,
             failed: false,
@@ -175,18 +198,112 @@ impl Replayer {
         self.stop_at_events = enabled;
     }
 
+    /// Makes replay stop with [`ReplayStop::Interrupted`] once `flag` is set,
+    /// and clear it.
+    ///
+    /// This requires an engine that enables
+    /// [`Config::epoch_interruption`](crate::Config::epoch_interruption). Guest
+    /// code checks the flag when the engine's epoch advances, so call
+    /// [`Engine::increment_epoch`] after setting it.
+    pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.replaying().epochs.interrupt = Some(flag);
+    }
+
+    /// Sets how many epochs apart guest code yields to the async executor. See
+    /// [`Replayer::run`].
+    #[cfg(target_has_atomic = "64")]
+    pub fn epoch_yield_interval(&mut self, interval: Option<u64>) {
+        let epoch = self.store.engine().current_epoch();
+        self.replaying().epochs.yields = interval.map(|delta| (delta, epoch.saturating_add(delta)));
+    }
+
+    /// Sets how much fuel guest code consumes before yielding to the async
+    /// executor, as for [`Store::fuel_async_yield_interval`]. See
+    /// [`Replayer::run`].
+    #[cfg(feature = "async")]
+    pub fn fuel_yield_interval(&mut self, interval: Option<u64>) -> Result<()> {
+        self.store.fuel_async_yield_interval(interval)
+    }
+
+    /// Compiles every module in the trace now, rather than when replay reaches
+    /// it, and returns them in the order of the trace. Their bytecode must
+    /// already have been provided.
+    ///
+    /// With guest debugging enabled, they are also registered for debugging, as
+    /// with [`Store::debug_register_module`], so that a debugger can set
+    /// breakpoints in them before replay starts.
+    pub fn preload_modules(&mut self) -> Result<Vec<Module>> {
+        let trace = self.trace.clone();
+        let mut reader = Reader::at(&trace.bytes, codec::MAGIC.len());
+        while reader.peek_tag().is_some() {
+            let (tag, mut body) = reader.record()?;
+            if tag == codec::MODULE {
+                let id = RecordedModule::from_u32(body.u32()?);
+                self.compile(id, &body.checksum()?)?;
+            }
+        }
+        let modules = &self.store.as_context().0.rr_objects().modules;
+        let modules = modules.values().cloned().collect::<Vec<_>>();
+        #[cfg(feature = "debug")]
+        if self.store.engine().tunables().debug_guest {
+            for module in &modules {
+                self.store.debug_register_module(module)?;
+            }
+        }
+        Ok(modules)
+    }
+
     /// Replays until the next stop.
     ///
-    /// This yields to the async executor periodically, so a long replay can
-    /// be cancelled by dropping the future, and then resumed by calling this
-    /// again. After an error, replay cannot be resumed.
+    /// This yields to the async executor periodically, between records of the
+    /// trace. Guest code that runs for longer also yields if the engine enables
+    /// epoch interruption or fuel, and an interval is set with
+    /// [`Replayer::epoch_yield_interval`] or [`Replayer::fuel_yield_interval`].
+    /// Epochs and fuel otherwise do not affect replay: guest code never runs out
+    /// of fuel or traps at an epoch deadline, as the recording did not.
+    ///
+    /// Dropping the future cancels replay, which can then be resumed by calling
+    /// this again. After an error, replay cannot be resumed.
     pub async fn run(&mut self) -> Result<ReplayStop> {
+        loop {
+            let stop = self.run_to_stop().await?;
+            #[cfg(feature = "debug")]
+            let Some(stop) = self.settle_interrupt(stop)? else {
+                continue;
+            };
+            return Ok(stop);
+        }
+    }
+
+    /// Interrupts stop at epoch checks, where frames cannot be inspected, so
+    /// with guest debugging this single-steps to the next instruction. Returns
+    /// `None` if replay should continue.
+    #[cfg(feature = "debug")]
+    fn settle_interrupt(&mut self, stop: ReplayStop) -> Result<Option<ReplayStop>> {
+        if stop == ReplayStop::Interrupted && self.store.engine().tunables().debug_guest {
+            if self.settling.is_none() {
+                self.settling = Some(self.store().is_single_step());
+                self.edit_breakpoints(|b| b.single_step(true))?;
+            }
+            return Ok(None);
+        }
+        let Some(single_step) = self.settling.take() else {
+            return Ok(Some(stop));
+        };
+        self.edit_breakpoints(|b| b.single_step(single_step))?;
+        Ok(Some(match stop {
+            ReplayStop::Breakpoint => ReplayStop::Interrupted,
+            stop => stop,
+        }))
+    }
+
+    async fn run_to_stop(&mut self) -> Result<ReplayStop> {
         // Invalidate handles to state that Wasm may mutate, as ordinary calls
         // into Wasm do when they return to the host.
         self.store.as_context_mut().0.on_wasm_to_host_transition();
         core::future::poll_fn(|cx| {
             for _ in 0..256 {
-                if self.finished {
+                if self.finished && self.paused.is_none() {
                     return Poll::Ready(Ok(ReplayStop::Finished));
                 }
                 let offset = self.offset;
@@ -196,6 +313,9 @@ impl Replayer {
                 }
                 if let Some(stop) = self.stop.take() {
                     return Poll::Ready(Ok(stop));
+                }
+                if core::mem::take(&mut self.yield_now) {
+                    break;
                 }
             }
             cx.waker().wake_by_ref();
@@ -213,7 +333,7 @@ impl Replayer {
     /// The store being replayed into, for inspection.
     ///
     /// Only the replay may change the store's state, so this gives only shared
-    /// access to it. GC objects are read as [`Unrooted`](crate::Unrooted)
+    /// access to it, but see [`Replayer::edit_breakpoints`]. GC objects are read as [`Unrooted`](crate::Unrooted)
     /// references, which are valid until replay continues.
     pub fn store(&self) -> StoreContext<'_, ()> {
         self.store.as_context()
@@ -230,6 +350,54 @@ impl Replayer {
         self.store.as_context().0.rr_pending_exception()
     }
 
+    /// Edits the store's breakpoints, single-stepping, and watchpoints, as
+    /// [`Store::edit_breakpoints`] does. These are not part of the replay's
+    /// state.
+    #[cfg(feature = "debug")]
+    pub fn edit_breakpoints<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::BreakpointState<'_>) -> Result<R>,
+    ) -> Result<R> {
+        self.store.edit_breakpoints(f)
+    }
+
+    /// The exit frames of the activation that stopped, as for
+    /// [`Store::debug_exit_frames`], and then of those suspended in host calls,
+    /// most recently started first. For nested calls, where a host function
+    /// calls back into the guest, this is the order of the calls.
+    ///
+    /// This is empty unless [`Replayer::run`] stopped within guest code. The
+    /// frames can be inspected with [`Replayer::store`] until replay continues.
+    #[cfg(feature = "debug")]
+    pub fn debug_exit_frames(&mut self) -> Vec<crate::FrameHandle> {
+        let Some(paused) = self.paused else {
+            return Vec::new();
+        };
+        let (paused, parked) = self
+            .activations
+            .iter()
+            .rev()
+            .filter(|a| a.call == paused || a.host.is_some())
+            .partition::<Vec<_>, _>(|a| a.call == paused);
+        // SAFETY: suspended activations' stacks are intact until replay
+        // continues, which invalidates the frames.
+        unsafe {
+            let activations = paused
+                .into_iter()
+                .chain(parked)
+                .map(|a| a.exit_state().activation());
+            let store = self.store.as_context_mut().0;
+            store.debug_exit_frames_of(activations).collect()
+        }
+    }
+
+    /// Looks up a function in `instance`'s function index space, as
+    /// [`Instance::debug_function`] does. See [`Replayer::get_export`].
+    #[cfg(feature = "debug")]
+    pub fn debug_function(&mut self, instance: Instance, function_index: u32) -> Option<Func> {
+        instance.debug_function(&mut self.store, function_index)
+    }
+
     /// Looks up `instance`'s export `name`, as [`Instance::get_export`] does.
     ///
     /// Functions are initialized lazily, which [`Replayer::store`]'s shared
@@ -237,6 +405,10 @@ impl Replayer {
     /// called.
     pub fn get_export(&mut self, instance: Instance, name: &str) -> Option<Extern> {
         instance.get_export(&mut self.store, name)
+    }
+
+    fn replaying(&mut self) -> &mut Replaying {
+        self.store.as_context_mut().0.rr_session().mode.replaying()
     }
 
     /// Checks that no guest code is running: every activation is parked at a
@@ -253,6 +425,12 @@ impl Replayer {
     fn step(&mut self) -> Result<()> {
         ensure!(!self.failed, "replay cannot continue after it failed");
         self.failed = true;
+        if let Some(paused) = self.paused.take() {
+            let index = self.activations.iter().position(|a| a.call == paused);
+            self.resume_running(index.unwrap(), None)?;
+            self.failed = false;
+            return Ok(());
+        }
         let trace = self.trace.clone();
         let mut reader = Reader::at(&trace.bytes, self.offset);
         let (tag, mut body) = reader.record()?;
@@ -280,10 +458,11 @@ impl Replayer {
             _ => {
                 self.require_idle()?;
                 match tag {
-                    codec::HOST | codec::MODULE | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
+                    codec::HOST | codec::GLOBAL | codec::MEMORY | codec::TABLE => {
                         let store = self.store.as_context_mut().0;
-                        init::replay_object(store, &self.trampolines, &self.bytecode, tag, body)
+                        init::replay_object(store, &self.trampolines, tag, body)
                     }
+                    codec::MODULE => self.module(body),
                     codec::INSTANCE => {
                         // Allocating the instance may collect garbage.
                         self.publish_parked(None)?;
@@ -308,6 +487,32 @@ impl Replayer {
                 }
             }
         }
+    }
+
+    /// Replays a module's first instantiation, which the instance's record
+    /// follows.
+    fn module(&mut self, body: &mut Reader<'_>) -> Result<()> {
+        let id = RecordedModule::from_u32(body.u32()?);
+        let checksum = body.checksum()?;
+        body.end()?;
+        self.compile(id, &checksum)?;
+        ensure!(id == self.next_module, "invalid module ID in trace");
+        self.next_module = RecordedModule::from_u32(id.as_u32() + 1);
+        Ok(())
+    }
+
+    /// Compiles the trace's module with the given ID, if it has not been.
+    fn compile(&mut self, id: RecordedModule, checksum: &Checksum) -> Result<()> {
+        let modules = &self.store.as_context().0.rr_objects().modules;
+        if modules.is_valid(id) {
+            return Ok(());
+        }
+        ensure!(id == modules.next_key(), "invalid module ID in trace");
+        let bytecode = self.bytecode.get(checksum)?;
+        let module = init::compile_module(self.store.engine(), bytecode)?;
+        let store = self.store.as_context_mut().0;
+        store.rr_session().objects.modules.push(module)?;
+        Ok(())
     }
 
     /// Starts a recorded call into Wasm.
@@ -444,7 +649,8 @@ impl Replayer {
                 Err(e) => format!(" ({e:#})"),
             }
         );
-        let activation = self.activations.swap_remove(index);
+        // Keep these in the order in which they started.
+        let activation = self.activations.drain(index..=index).next().unwrap();
         activation.dispose(self.store.as_context_mut().0);
         Ok(())
     }
@@ -509,13 +715,17 @@ impl Replayer {
         Ok(())
     }
 
-    /// Runs the activation at `index` until its next yield; see
-    /// [`Activation::resume`].
+    /// Runs the activation at `index`, which is new or parked at a host call,
+    /// until its next yield; see [`Activation::resume`].
     fn resume(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
         let mut growth_failures = self.read_growth_failures()?;
         growth_failures.reverse();
-        let store = self.store.as_context_mut().0;
-        store.rr_session().mode.replaying().growth_failures = growth_failures;
+        self.replaying().growth_failures = growth_failures;
+        self.resume_running(index, pending)
+    }
+
+    /// Like `resume`, but the activation may also be paused.
+    fn resume_running(&mut self, index: usize, pending: Option<Error>) -> Result<()> {
         self.publish_parked(Some(index))?;
         let store = self.store.as_context_mut().0;
         let activation = &mut self.activations[index];
@@ -525,16 +735,23 @@ impl Replayer {
         if let Some(e) = store.rr_session().failure.take() {
             return Err(e);
         }
+        if let Yield::Stopped = yielded {
+            self.paused = Some(activation.call);
+            match self.replaying().stop.take() {
+                Some(Stop::Yield) => self.yield_now = true,
+                Some(Stop::Breakpoint) => self.stop = Some(ReplayStop::Breakpoint),
+                #[cfg(feature = "debug")]
+                Some(Stop::Watchpoint(hit)) => self.stop = Some(ReplayStop::Watchpoint(hit)),
+                Some(Stop::Interrupt) => self.stop = Some(ReplayStop::Interrupted),
+                None => bail!("replay activation stopped for no reason"),
+            }
+            return Ok(());
+        }
+        let activation = activation.call;
         ensure!(
-            store
-                .rr_session()
-                .mode
-                .replaying()
-                .growth_failures
-                .is_empty(),
+            self.replaying().growth_failures.is_empty(),
             "the guest diverged from the trace: its memory or table growth should have failed"
         );
-        let activation = activation.call;
         self.observed = Some(match yielded {
             Yield::Host(func, values) => Observed::Host {
                 activation,
@@ -542,6 +759,7 @@ impl Replayer {
                 values,
             },
             Yield::Complete(result) => Observed::Complete { activation, result },
+            Yield::Stopped => unreachable!(),
         });
         Ok(())
     }
@@ -549,14 +767,8 @@ impl Replayer {
     /// Publishes the suspended activations, other than the `running` one, whose
     /// frames the garbage collector must trace.
     fn publish_parked(&mut self, running: Option<usize>) -> Result<()> {
-        let parked = &mut self
-            .store
-            .as_context_mut()
-            .0
-            .rr_session()
-            .mode
-            .replaying()
-            .parked;
+        let store = self.store.as_context_mut().0;
+        let parked = &mut store.rr_session().mode.replaying().parked;
         parked.clear();
         for (i, activation) in self.activations.iter().enumerate() {
             if Some(i) != running && activation.host.is_some() {

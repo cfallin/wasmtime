@@ -201,11 +201,24 @@ impl StoreOpaque {
         } else {
             vec![]
         };
+        // SAFETY: these activations are currently active.
+        unsafe { self.debug_exit_frames_of(activations) }
+    }
 
+    /// The exit frames of `activations`.
+    ///
+    /// # Safety
+    ///
+    /// The activations must be of this store, with intact stacks until it next
+    /// runs Wasm.
+    pub(crate) unsafe fn debug_exit_frames_of(
+        &mut self,
+        activations: impl IntoIterator<Item = Activation>,
+    ) -> impl Iterator<Item = FrameHandle> {
         activations
             .into_iter()
-            // SAFETY: each activation is currently active and will
-            // remain so (we have a mutable borrow of the store).
+            // SAFETY: inherited from this function's contract; we have a
+            // mutable borrow of the store.
             .filter_map(|act| unsafe { FrameHandle::exit_frame(self, act) })
     }
 

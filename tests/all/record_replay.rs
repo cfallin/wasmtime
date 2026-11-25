@@ -868,8 +868,8 @@ async fn fuel_and_epoch_recordings_replay_without_them() -> Result<()> {
     }
     let mut config = Config::new();
     config.rr(Some(RrConfig::Replaying)).consume_fuel(true);
-    let err = Replayer::new(&Engine::new(&config)?, fuel).err().unwrap();
-    assert!(err.to_string().contains("does not support fuel"), "{err}");
+    // Replay never runs out of fuel.
+    replay_with(&Engine::new(&config)?, &fuel).await?;
     Ok(())
 }
 
@@ -2580,5 +2580,392 @@ async fn event_sinks_record_at_the_next_boundary() -> Result<()> {
     // Direct events are recorded immediately; sunk ones at the next boundary,
     // which for the last one is the end of the recording.
     assert_eq!(*seen.lock().unwrap(), [9, 1, 2, 0, 3]);
+    Ok(())
+}
+
+/// A guest that counts in a global and in memory, grows its memory and table
+/// part-way, and reports each step through a host function that records an
+/// event.
+const COUNTER: &str = r#"(module
+  (import "" "report" (func $report (param i32)))
+  (memory (export "memory") 1)
+  (table (export "table") 1 funcref)
+  (global $count (export "count") (mut i32) (i32.const 0))
+  (func (export "run") (param $n i32) (local $i i32)
+    (loop $l
+      (global.set $count (i32.add (global.get $count) (i32.const 1)))
+      (i32.store (i32.mul (local.get $i) (i32.const 4)) (global.get $count))
+      (if (i32.eq (local.get $i) (i32.const 2))
+        (then
+          (drop (memory.grow (i32.const 1)))
+          (drop (table.grow (ref.null func) (i32.const 3)))))
+      (call $report (local.get $i))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.lt_u (local.get $i) (local.get $n))))))"#;
+
+fn record_counter(steps: i32) -> Result<rr::Trace> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(&mut store, |mut caller: Caller<'_, ()>, i: i32| {
+        rr::record_event(&mut caller, &Step(i))
+    });
+    let module = new_module(&recording, COUNTER)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let run = instance.get_typed_func::<i32, ()>(&mut store, "run")?;
+    run.call(&mut store, steps)?;
+    store.finish_recording()
+}
+
+const PAGES: &str = r#"
+(module
+  (import "" "report" (func $report (param i32)))
+  (memory (export "memory") 4)
+  (data (i32.const 0) "abc")
+  (func (export "step") (param $k i32)
+    (i32.store (i32.mul (local.get $k) (i32.const 8192))
+               (i32.add (local.get $k) (i32.const 1)))
+    (memory.fill (i32.add (i32.const 100000) (i32.mul (local.get $k) (i32.const 16)))
+                 (local.get $k) (i32.const 16))
+    (call $report (local.get $k))))
+"#;
+
+const PAGES_SEGMENT: &str = r#"
+(module
+  (import "" "memory" (memory 4))
+  (data (i32.const 150000) "xyz"))
+"#;
+
+/// Guest stores and bulk writes, host writes, and another instance's data
+/// segment, each writing a few bytes of memory at a time.
+fn record_pages() -> Result<rr::Trace> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let report = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, ()>, k: i32| -> Result<()> {
+            rr::record_event(&mut caller, &Step(k))?;
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            memory.write(&mut caller, 200_000 + k as usize, &[k as u8 + 1; 3])?;
+            Ok(())
+        },
+    );
+    let module = new_module(&recording, PAGES)?;
+    let instance = Instance::new(&mut store, &module, &[report.into()])?;
+    let step = instance.get_typed_func::<i32, ()>(&mut store, "step")?;
+    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    for k in 0..6 {
+        if k == 3 {
+            let module = new_module(&recording, PAGES_SEGMENT)?;
+            Instance::new(&mut store, &module, &[memory.into()])?;
+        }
+        step.call(&mut store, k)?;
+    }
+    store.finish_recording()
+}
+
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
+struct Step(i32);
+
+impl rr::TraceEvent for Step {
+    const TAG: u32 = 2;
+}
+
+#[cfg(feature = "debug")]
+fn debug_engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config.rr(Some(RrConfig::Replaying)).guest_debug(true);
+    Engine::new(&config)
+}
+
+/// Where the counter guest is stopped: its function, PC, loop index, and the
+/// replay's view of the counter.
+#[cfg(feature = "debug")]
+fn position(replayer: &mut Replayer) -> Result<(u32, u32, i32, i32)> {
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    let frame = &frames[0];
+    let instance = replayer.instances()[0];
+    let store = replayer.store();
+    assert!(frame.parent(&store)?.is_none());
+    let (func, pc) = frame.wasm_function_index_and_pc(&store)?.unwrap();
+    let i = frame.local(&store, 1)?.unwrap_i32();
+    let count = instance
+        .get_global(&store, "count")
+        .unwrap()
+        .get(&store)
+        .unwrap_i32();
+    // The replayer looks up functions, which are initialized lazily.
+    let run = replayer.debug_function(instance, func.as_u32()).unwrap();
+    assert_eq!(run.ty(&replayer.store()).params().len(), 1);
+    Ok((func.as_u32(), pc.raw(), i, count))
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn single_stepping_and_breakpoints_on_replay() -> Result<()> {
+    let trace = record_counter(4)?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    replayer.on_event(move |Step(i)| observed.lock().unwrap().push(i));
+
+    // Run until the guest first reports, then single-step it to the end,
+    // recording every stop.
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+    let mut trail = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        trail.push(position(&mut replayer)?);
+    }
+    assert!(trail.len() > 20, "{} steps", trail.len());
+    assert_eq!(trail.last().unwrap().3, 4);
+    assert!(trail.windows(2).all(|w| w[0].2 <= w[1].2));
+    assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3]);
+
+    // A breakpoint at a PC in the loop stops replay once per iteration.
+    let pc = trail[0].1;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    let module = replayer.preload_modules()?.pop().unwrap();
+    replayer.edit_breakpoints(|b| b.add_breakpoint(&module, ModulePC::new(pc)))?;
+    let mut hits = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        hits.push(position(&mut replayer)?);
+    }
+    assert!(hits.iter().all(|h| h.1 == pc));
+    let iterations = hits.iter().map(|h| h.2).collect::<Vec<_>>();
+    assert_eq!(iterations, [0, 1, 2, 3]);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn debugging_nested_activations_through_host_frames() -> Result<()> {
+    let (mut record, run, _) = nested()?;
+    run.typed::<(), i32>(&record)?.call(&mut record, ())?;
+    let trace = record.finish_recording()?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+
+    // Each stop's defined functions, innermost first: `callback` is 0, `fail`
+    // is 1, and `run` is 2.
+    fn stack(replayer: &mut Replayer) -> Result<Vec<u32>> {
+        let frames = replayer.debug_exit_frames();
+        let store = replayer.store();
+        frames
+            .iter()
+            .map(|f| Ok(f.wasm_function_index_and_pc(&store)?.unwrap().0.as_u32()))
+            .collect()
+    }
+    let mut stacks = Vec::new();
+    while replayer.run().await? == ReplayStop::Breakpoint {
+        stacks.push(stack(&mut replayer)?);
+    }
+    // Callbacks from the host function are separate activations, shown
+    // beneath the stopped one.
+    assert!(stacks.contains(&vec![2]));
+    assert!(stacks.contains(&vec![0, 2]));
+    assert!(stacks.contains(&vec![1, 2]));
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn watchpoints_stop_replay_before_writes() -> Result<()> {
+    let trace = record_pages()?;
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    let instance = replayer.instances()[0];
+    let memory = instance.get_memory(replayer.store(), "memory").unwrap();
+    // Step 1's store, and the second instance's data segment.
+    replayer.edit_breakpoints(|b| b.watch(memory, 8192..8194))?;
+    replayer.edit_breakpoints(|b| b.watch(memory, 150_002..150_010))?;
+
+    let mut hits = Vec::new();
+    loop {
+        match replayer.run().await? {
+            ReplayStop::Watchpoint(hit) => {
+                assert_eq!(
+                    hit.memory.debug_index_in_store(),
+                    memory.debug_index_in_store()
+                );
+                // The write has not happened yet.
+                let at = usize::try_from(hit.address)?;
+                let data = memory.data(replayer.store());
+                assert!(data[at..at + 4].iter().all(|b| *b == 0));
+                hits.push((hit.address, hit.len, hit.value));
+            }
+            ReplayStop::Finished => break,
+            stop => panic!("unexpected stop {stop:?}"),
+        }
+    }
+    assert_eq!(hits, [(8192, 4, Some(2)), (150_000, 3, None)]);
+    let data = memory.data(replayer.store());
+    assert_eq!(&data[8192..8196], &2_u32.to_le_bytes());
+    assert_eq!(&data[150_000..150_003], b"xyz");
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn preloaded_modules_take_breakpoints_before_replay() -> Result<()> {
+    let trace = record_counter(4)?;
+    // Find a PC in the loop by single-stepping into it.
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    let modules = replayer.preload_modules()?;
+    assert_eq!(modules.len(), 1);
+    replayer.stop_at_events(true);
+    assert_eq!(replayer.run().await?, ReplayStop::Event(2));
+    replayer.stop_at_events(false);
+    replayer.edit_breakpoints(|b| b.single_step(true))?;
+    assert_eq!(replayer.run().await?, ReplayStop::Breakpoint);
+    let (_, pc, _, _) = position(&mut replayer)?;
+    // While stopped, the store's own debug API sees the stopped frames, in
+    // the module that was preloaded.
+    let frames = replayer.debug_exit_frames();
+    let s = replayer.store();
+    let instance = frames[0].instance(&s)?;
+    assert!(Module::same(instance.module(&s), &modules[0]));
+    drop(replayer);
+
+    // A breakpoint set in a preloaded module before replay starts is hit.
+    let mut replayer = new_replayer_with(&debug_engine()?, &trace)?;
+    let modules = replayer.preload_modules()?;
+    assert_eq!(replayer.store().debug_all_modules().len(), 1);
+    replayer.edit_breakpoints(|b| b.add_breakpoint(&modules[0], ModulePC::new(pc)))?;
+    assert_eq!(replayer.run().await?, ReplayStop::Breakpoint);
+    assert_eq!(position(&mut replayer)?.1, pc);
+    Ok(())
+}
+
+#[cfg(feature = "debug")]
+#[tokio::test]
+async fn interrupting_replay_with_epochs() -> Result<()> {
+    // A long loop with no trace events, which only an epoch check can stop.
+    const SPIN: &str = r#"
+    (module
+      (func (export "spin") (param $n i32) (result i32)
+        (local $i i32) (local $acc i32)
+        loop
+          (local.set $acc (i32.add (local.get $acc) (i32.mul (local.get $i) (i32.const 3))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br_if 0 (i32.lt_u (local.get $i) (local.get $n)))
+        end
+        local.get $acc))
+    "#;
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let module = new_module(&recording, SPIN)?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 10_000_000)?;
+    let trace = store.finish_recording()?;
+
+    let mut config = Config::new();
+    config
+        .rr(Some(RrConfig::Replaying))
+        .guest_debug(true)
+        .epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut replayer = new_replayer_with(&engine, &trace)?;
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    replayer.set_interrupt_flag(flag.clone());
+    // An interrupt request stops replay at the next epoch check once the
+    // epoch advances (in practice, from another thread while replay runs).
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, ReplayStop::Interrupted);
+    assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+    // Stopped in the function, whose frame can be inspected.
+    let frames = replayer.debug_exit_frames();
+    assert_eq!(frames.len(), 1);
+    frames[0].local(replayer.store(), 1)?.unwrap_i32();
+    // Epoch ticks without a request do not stop replay.
+    engine.increment_epoch();
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    Ok(())
+}
+
+/// A recording of a long loop with no trace events.
+fn record_spin() -> Result<Trace> {
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let module = new_module(
+        &recording,
+        r#"(module
+        (func (export "spin") (param $n i32) (result i32)
+          (local $acc i32)
+          loop
+            (local.set $acc (i32.add (local.get $acc) (local.get $n)))
+            (local.tee $n (i32.sub (local.get $n) (i32.const 1)))
+            br_if 0
+          end
+          local.get $acc))"#,
+    )?;
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let spin = instance.get_typed_func::<i32, i32>(&mut store, "spin")?;
+    spin.call(&mut store, 1_000_000)?;
+    store.finish_recording()
+}
+
+/// Replays to the end, returning how many times replay
+/// yielded to the async executor.
+async fn replay_yields(replayer: &mut Replayer) -> Result<usize> {
+    let (stop, yields) = count_yields(replayer.run()).await;
+    assert_eq!(stop?, ReplayStop::Finished);
+    Ok(yields)
+}
+
+#[tokio::test]
+async fn replay_yields_with_fuel_and_epochs() -> Result<()> {
+    let trace = record_spin()?;
+    // Without fuel or epochs, the loop runs to completion without yielding.
+    assert_eq!(replay_yields(&mut new_replayer(&trace)?).await?, 0);
+
+    let mut config = Config::new();
+    config.rr(Some(RrConfig::Replaying)).consume_fuel(true);
+    let mut replayer = new_replayer_with(&Engine::new(&config)?, &trace)?;
+    replayer.fuel_yield_interval(Some(10_000))?;
+    let yields = replay_yields(&mut replayer).await?;
+    assert!(yields >= 100, "{yields}");
+
+    let mut config = Config::new();
+    config
+        .rr(Some(RrConfig::Replaying))
+        .epoch_interruption(true);
+    let engine = Engine::new(&config)?;
+    let mut replayer = new_replayer_with(&engine, &trace)?;
+    replayer.epoch_yield_interval(Some(2));
+    // Two epochs later, the guest yields at its next epoch check, and does
+    // not yield again until two more have passed.
+    engine.increment_epoch();
+    engine.increment_epoch();
+    let (stop, yields) = count_yields(replayer.run()).await;
+    assert_eq!(stop?, ReplayStop::Finished);
+    assert_eq!(yields, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_cancelled_at_a_yield_continues() -> Result<()> {
+    let trace = record_spin()?;
+    let mut config = Config::new();
+    config.rr(Some(RrConfig::Replaying)).consume_fuel(true);
+    let mut replayer = new_replayer_with(&Engine::new(&config)?, &trace)?;
+    replayer.fuel_yield_interval(Some(10_000))?;
+    for _ in 0..10 {
+        // Poll replay until it yields inside the loop, then drop it.
+        let mut run = std::pin::pin!(replayer.run());
+        std::future::poll_fn(|cx| {
+            assert!(run.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+    // Replay continues where it yielded, reproducing the recorded result.
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
     Ok(())
 }

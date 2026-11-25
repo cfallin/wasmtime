@@ -243,6 +243,7 @@ fn run_wast(test: &WastTest, config: WastConfig, record_replay: bool) -> wasmtim
         let mut replay = cfg.clone();
         replay
             .rr(Some(RrConfig::Replaying))
+            .guest_debug(true)
             .consume_fuel(false)
             .epoch_interruption(false);
         cfg.rr(Some(RrConfig::Recording));

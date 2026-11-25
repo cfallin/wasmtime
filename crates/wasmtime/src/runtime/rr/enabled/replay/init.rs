@@ -11,11 +11,11 @@ use crate::{
 use objects::{RecordedGlobal, RecordedModule, RecordedTable};
 use wasmtime_environ::{EntityIndex, Initializer};
 
-/// Replays a record of the construction of any object but an instance.
+/// Replays a record of the construction of an object other than a module or an
+/// instance.
 pub(super) fn replay_object(
     store: &mut StoreInner<()>,
     trampolines: &Trampolines,
-    bytecode: &super::Bytecode,
     tag: u8,
     body: &mut Reader<'_>,
 ) -> Result<()> {
@@ -32,13 +32,6 @@ pub(super) fn replay_object(
             let added = session.objects.add_func(store, func);
             store.rr.session = Some(session);
             check_id(RecordedFunc::from_u32(id), added?)?;
-        }
-        codec::MODULE => {
-            let checksum = body.checksum()?;
-            body.end()?;
-            let module = compile_module(store.engine(), bytecode.get(&checksum)?)?;
-            let added = store.rr_session().objects.modules.push(module)?;
-            check_id(RecordedModule::from_u32(id), added)?;
         }
         codec::GLOBAL => {
             let kind = body.kind()?;
@@ -118,18 +111,14 @@ pub(super) fn replay_instance(
     store: &mut StoreOpaque,
     body: &mut Reader<'_>,
 ) -> Result<(Instance, Option<RecordedFunc>)> {
-    fn find<T: Copy>(object: Option<&T>) -> Result<T> {
+    fn find<T: Clone>(object: Option<&T>) -> Result<T> {
         object
-            .copied()
+            .cloned()
             .ok_or_else(|| format_err!("invalid object ID in trace"))
     }
 
     let objects = store.rr_objects();
-    let module = objects
-        .modules
-        .get(RecordedModule::from_u32(body.u32()?))
-        .ok_or_else(|| format_err!("invalid module ID in trace"))?
-        .clone();
+    let module = find(objects.modules.get(RecordedModule::from_u32(body.u32()?)))?;
     let mut imports = TryVec::new();
     for initializer in &module.env_module().initializers {
         let Initializer::Import { index, .. } = *initializer;
