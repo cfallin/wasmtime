@@ -14,6 +14,7 @@ use crate::runtime::externals::{GlobalHashKey, TableHashKey, TagHashKey};
 use crate::runtime::memory::MemoryHashKey;
 use crate::runtime::vm::VMFuncRefHashKey;
 use wasmtime_environ::collections::TryPrimaryMap;
+use wasmtime_environ::{EngineOrModuleTypeIndex, VMSharedTypeIndex};
 
 macro_rules! define_ids {
     ($($(#[$attr:meta])* $name:ident;)*) => {
@@ -71,6 +72,7 @@ pub(super) struct Objects {
     pub flags: TryVec<RecordedGlobal>,
     /// Concrete types.
     pub types: TryPrimaryMap<RecordedType, crate::HeapType>,
+    types_by_index: TryHashMap<VMSharedTypeIndex, RecordedType>,
     pub modules: TryPrimaryMap<RecordedModule, crate::Module>,
 }
 
@@ -91,16 +93,32 @@ impl Objects {
         Ok(1 + self.find_func_ref(func)?.as_u32())
     }
 
+    pub fn add_type(&mut self, ty: crate::HeapType) -> Result<RecordedType> {
+        let index = ty
+            .as_registered_type()
+            .ok_or_else(|| format_err!("not a concrete type"))?
+            .index();
+        let id = self.types.push(ty)?;
+        self.types_by_index.insert(index, id)?;
+        Ok(id)
+    }
+
+    pub fn has_type(&self, index: VMSharedTypeIndex) -> bool {
+        self.types_by_index.contains_key(&index)
+    }
+
+    pub fn type_id(&self, index: EngineOrModuleTypeIndex) -> Result<RecordedType> {
+        index
+            .as_engine_type_index()
+            .and_then(|index| self.types_by_index.get(&index).copied())
+            .ok_or_else(|| format_err!("unrecorded type"))
+    }
+
     pub fn find_type(&self, ty: &crate::HeapType) -> Result<RecordedType> {
-        self.types
-            .iter()
-            .find_map(|(id, t)| crate::HeapType::eq(t, ty).then_some(id))
-            .ok_or_else(|| {
-                format_err!(
-                    "record/replay does not support types of modules that have not been \
-                     instantiated"
-                )
-            })
+        let ty = ty
+            .as_registered_type()
+            .ok_or_else(|| format_err!("not a concrete type"))?;
+        self.type_id(ty.index().into())
     }
 
     /// The function that `id` refers to in a trace.

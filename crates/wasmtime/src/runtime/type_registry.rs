@@ -429,10 +429,17 @@ impl RegisteredType {
         ))
     }
 
-    /// Whether this is the only type in its recursion group.
+    /// The types in this type's recursion group, in order.
     #[cfg(feature = "rr")]
-    pub fn is_only_type_in_rec_group(&self) -> bool {
-        self.entry.0.shared_type_indices.len() == 1
+    pub fn rec_group_types(&self) -> Vec<(VMSharedTypeIndex, Arc<WasmSubType>)> {
+        let inner = self.engine.signatures().0.read();
+        let indices = self.entry.0.shared_type_indices.iter();
+        indices
+            .map(|index| {
+                let id = shared_type_index_to_slab_id(*index);
+                (*index, inner.types[id].clone().unwrap())
+            })
+            .collect()
     }
 
     /// Create an owning handle to the given index's associated type, if that

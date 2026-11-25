@@ -1,138 +1,15 @@
 //! Recording core object construction. Modules are recorded as the checksums of their
-//! Wasm bytecode, and host functions as their signatures.
+//! Wasm bytecode, and host functions as their types.
 
 use super::*;
 use crate::{Global, HeapType, Instance, Module, Tag, ValType};
 use objects::RecordedGlobal;
 use wasmtime_environ::packed_option::ReservedValue;
 use wasmtime_environ::{
-    DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, DefinedTagIndex,
-    EngineOrModuleTypeIndex, EntityIndex, TypeIndex, VMSharedTypeIndex,
+    DefinedGlobalIndex, DefinedMemoryIndex, DefinedTableIndex, DefinedTagIndex, EntityIndex,
 };
 
-/// The type at `index` in a module's type section.
-pub(super) fn module_type(module: &Module, index: TypeIndex) -> Option<VMSharedTypeIndex> {
-    match *module.env_module().types.get(index)? {
-        EngineOrModuleTypeIndex::Engine(index) => Some(index),
-        EngineOrModuleTypeIndex::Module(index) => module.signatures().shared_type(index),
-        EngineOrModuleTypeIndex::RecGroup(_) => None,
-    }
-}
-
 impl Session {
-    /// Records the definition of a concrete type that a value type refers to.
-    fn record_type(&mut self, ty: &ValType) -> Result<()> {
-        match ty {
-            ValType::Ref(ty) => self.record_heap_type(ty.heap_type()),
-            _ => Ok(()),
-        }
-    }
-
-    /// Records a concrete type's definition, if it has not been recorded.
-    pub(super) fn record_heap_type(&mut self, ty: &HeapType) -> Result<()> {
-        let target = match ty {
-            HeapType::ConcreteFunc(t) => t.type_index(),
-            HeapType::ConcreteStruct(t) => t.type_index(),
-            HeapType::ConcreteArray(t) => t.type_index(),
-            _ => return Ok(()),
-        };
-        if self.objects.find_type(ty).is_ok() {
-            return Ok(());
-        }
-        for (module_id, module) in self.objects.modules.iter() {
-            for index in module.env_module().types.keys() {
-                if module_type(module, index) == Some(target) {
-                    let id = self.objects.types.push(ty.clone())?;
-                    let mut body = TryVec::new();
-                    body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-                    body.push(codec::TYPE_MODULE)?;
-                    body.extend_from_slice(&module_id.as_u32().to_le_bytes())?;
-                    body.extend_from_slice(&index.as_u32().to_le_bytes())?;
-                    return self.append(codec::TYPE, &body);
-                }
-            }
-        }
-        self.record_host_type(ty)
-    }
-
-    /// Records the definition of a type that the host created. The host can
-    /// only create types that are the only ones in their recursion groups, and
-    /// so do not refer to themselves.
-    fn record_host_type(&mut self, ty: &HeapType) -> Result<()> {
-        let (registered, finality, supertype) = match ty {
-            HeapType::ConcreteFunc(t) => (
-                t.registered_type(),
-                t.finality(),
-                t.supertype().map(HeapType::ConcreteFunc),
-            ),
-            HeapType::ConcreteStruct(t) => (
-                t.registered_type(),
-                t.finality(),
-                t.supertype().map(HeapType::ConcreteStruct),
-            ),
-            HeapType::ConcreteArray(t) => (
-                t.registered_type(),
-                t.finality(),
-                t.supertype().map(HeapType::ConcreteArray),
-            ),
-            _ => unreachable!("not a concrete type"),
-        };
-        let fields = match ty {
-            HeapType::ConcreteStruct(t) => t.fields().collect::<Vec<_>>(),
-            HeapType::ConcreteArray(t) => vec![t.field_type()],
-            _ => Vec::new(),
-        };
-        let (params, results) = match ty {
-            HeapType::ConcreteFunc(t) => (t.params().collect(), t.results().collect()),
-            _ => (Vec::new(), Vec::new()),
-        };
-        let values = fields.iter().filter_map(|f| f.element_type().as_val_type());
-        let values = values.chain(&params).chain(&results);
-        let refers_to_itself = values
-            .clone()
-            .any(|v| v.as_ref().is_some_and(|r| HeapType::eq(r.heap_type(), ty)));
-        ensure!(
-            registered.is_only_type_in_rec_group() && !refers_to_itself,
-            "record/replay does not support types of modules that have not been instantiated"
-        );
-        // The types that this one refers to come first.
-        for value in values {
-            self.record_type(value)?;
-        }
-        if let Some(supertype) = &supertype {
-            self.record_heap_type(supertype)?;
-        }
-
-        let mut body = TryVec::new();
-        let id = self.objects.types.next_key();
-        body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-        body.push(match ty {
-            HeapType::ConcreteFunc(_) => codec::TYPE_FUNC,
-            HeapType::ConcreteStruct(_) => codec::TYPE_STRUCT,
-            _ => codec::TYPE_ARRAY,
-        })?;
-        body.push(u8::from(finality.is_final()))?;
-        let supertype = match &supertype {
-            Some(ty) => 1 + self.objects.find_type(ty)?.as_u32(),
-            None => 0,
-        };
-        body.extend_from_slice(&supertype.to_le_bytes())?;
-        if let HeapType::ConcreteFunc(_) = ty {
-            for types in [&params, &results] {
-                let mut encoded = TryVec::new();
-                for ty in types {
-                    codec::val_type(&mut encoded, ty, &self.objects)?;
-                }
-                codec::blob(&mut body, &encoded)?;
-            }
-        }
-        for field in &fields {
-            codec::field_type(&mut body, field, &self.objects)?;
-        }
-        self.objects.types.push(ty.clone())?;
-        self.append(codec::TYPE, &body)
-    }
-
     fn import_tag(&mut self, store: &StoreOpaque, tag: Tag) -> Result<()> {
         let ty = HeapType::ConcreteFunc(tag._ty(store).ty().clone());
         self.record_heap_type(&ty)?;
@@ -153,18 +30,13 @@ impl Session {
         let id = self.objects.add_func(store, func)?;
         let f = &self.objects.funcs[id];
         ensure!(f.host, "unregistered guest function in instance imports");
-        let ty = func.load_ty(store);
         let mut body = TryVec::new();
         body.extend_from_slice(&id.as_u32().to_le_bytes())?;
-        let params = ty.params().collect::<Vec<_>>();
-        let results = ty.results().collect::<Vec<_>>();
-        for types in [params, results] {
-            let mut encoded = TryVec::new();
-            for ty in types {
-                self.record_type(&ty)?;
-                codec::val_type(&mut encoded, &ty, &self.objects)?;
-            }
-            codec::blob(&mut body, &encoded)?;
+        let ty = HeapType::ConcreteFunc(func.load_ty(store));
+        self.record_heap_type(&ty)?;
+        if let Mode::Recording(_) = self.mode {
+            let ty = self.objects.find_type(&ty)?;
+            body.extend_from_slice(&ty.as_u32().to_le_bytes())?;
         }
         self.append(codec::HOST, &body)?;
         Ok(id)

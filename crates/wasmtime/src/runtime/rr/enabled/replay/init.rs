@@ -6,12 +6,12 @@ use super::Trampolines;
 use crate::runtime::vm;
 use crate::store::AutoAssertNoGc;
 use crate::{
-    ArrayType, Extern, Finality, FuncType, Global, GlobalType, HeapType, Instance, MemoryType,
-    Module, Mutability, StoreContextMut, StructType, Table, TableType, Tag, TagType, Val, ValType,
+    Extern, FuncType, Global, GlobalType, HeapType, Instance, MemoryType, Module, Mutability,
+    StoreContextMut, Table, TableType, Tag, TagType, Val, ValType,
 };
 use core::mem::MaybeUninit;
 use objects::{RecordedGlobal, RecordedModule, RecordedTable, RecordedTag, RecordedType};
-use wasmtime_environ::{EntityIndex, Initializer, TypeIndex, VMSharedTypeIndex};
+use wasmtime_environ::{EntityIndex, Initializer};
 
 /// Replays a record of the construction of an object other than a module or an
 /// instance.
@@ -24,22 +24,13 @@ pub(super) fn replay_object(
     let id = body.u32()?;
     match tag {
         codec::HOST => {
-            let objects = store.rr_objects();
-            let params = Reader::new(body.blob()?).val_types(objects)?;
-            let results = Reader::new(body.blob()?).val_types(objects)?;
+            let ty = func_type(store, body)?;
             body.end()?;
-            let ty = FuncType::new(store.engine(), params, results);
             let func = trampolines.host_stub(store, ty)?;
             let mut session = store.rr.session.take().unwrap();
             let added = session.objects.add_func(store, func);
             store.rr.session = Some(session);
             check_id(RecordedFunc::from_u32(id), added?)?;
-        }
-        codec::TYPE => {
-            let ty = replay_type(store, body)?;
-            body.end()?;
-            let added = store.rr_session().objects.types.push(ty)?;
-            check_id(RecordedType::from_u32(id), added)?;
         }
         codec::GLOBAL => {
             let ty = body.val_type(store.rr_objects())?;
@@ -97,13 +88,10 @@ pub(super) fn replay_object(
             Table::new(StoreContextMut(store), ty, init)?;
         }
         codec::TAG => {
-            let ty = RecordedType::from_u32(body.u32()?);
+            let ty = func_type(store, body)?;
             body.end()?;
-            let objects = store.rr_objects();
-            check_id(RecordedTag::from_u32(id), objects.tags.next_key())?;
-            let Some(HeapType::ConcreteFunc(ty)) = objects.types.get(ty).cloned() else {
-                bail!("invalid tag type in trace");
-            };
+            let next = store.rr_objects().tags.next_key();
+            check_id(RecordedTag::from_u32(id), next)?;
             ensure!(ty.results().len() == 0, "invalid tag type in trace");
             Tag::new(StoreContextMut(store), &TagType::new(ty))?;
         }
@@ -171,76 +159,12 @@ pub(super) fn value(store: &mut StoreOpaque, body: &mut Reader<'_>, ty: &ValType
     Ok(unsafe { Val::_from_raw(&mut store, slot[0].assume_init(), ty) })
 }
 
-fn replay_type(store: &StoreOpaque, body: &mut Reader<'_>) -> Result<HeapType> {
-    let engine = store.engine();
-    let objects = store.rr_objects();
-    let kind = body.u8()?;
-    if kind == codec::TYPE_MODULE {
-        let module = RecordedModule::from_u32(body.u32()?);
-        let index = TypeIndex::from_u32(body.u32()?);
-        return objects
-            .modules
-            .get(module)
-            .and_then(|module| super::super::init::module_type(module, index))
-            .and_then(|index| heap_type(engine, index))
-            .ok_or_else(|| format_err!("invalid type in trace"));
+fn func_type(store: &StoreOpaque, body: &mut Reader<'_>) -> Result<FuncType> {
+    let ty = RecordedType::from_u32(body.u32()?);
+    match store.rr_objects().types.get(ty) {
+        Some(HeapType::ConcreteFunc(ty)) => Ok(ty.clone()),
+        _ => bail!("invalid function type in trace"),
     }
-    let finality = if body.bool()? {
-        Finality::Final
-    } else {
-        Finality::NonFinal
-    };
-    let supertype = body.u32()?.checked_sub(1).map(|id| {
-        let ty = objects.types.get(RecordedType::from_u32(id));
-        ty.ok_or_else(|| format_err!("invalid type ID in trace"))
-    });
-    let supertype = supertype.transpose()?;
-    Ok(match kind {
-        codec::TYPE_FUNC => {
-            let params = Reader::new(body.blob()?).val_types(objects)?;
-            let results = Reader::new(body.blob()?).val_types(objects)?;
-            let supertype = match supertype {
-                None => None,
-                Some(HeapType::ConcreteFunc(ty)) => Some(ty),
-                Some(_) => bail!("invalid supertype in trace"),
-            };
-            let ty = FuncType::with_finality_and_supertype(
-                engine, finality, supertype, params, results,
-            )?;
-            HeapType::ConcreteFunc(ty)
-        }
-        codec::TYPE_STRUCT => {
-            let mut fields = Vec::new();
-            while body.end().is_err() {
-                fields.push(body.field_type(objects)?);
-            }
-            let supertype = match supertype {
-                None => None,
-                Some(HeapType::ConcreteStruct(ty)) => Some(ty),
-                Some(_) => bail!("invalid supertype in trace"),
-            };
-            let ty = StructType::with_finality_and_supertype(engine, finality, supertype, fields)?;
-            HeapType::ConcreteStruct(ty)
-        }
-        codec::TYPE_ARRAY => {
-            let field = body.field_type(objects)?;
-            let supertype = match supertype {
-                None => None,
-                Some(HeapType::ConcreteArray(ty)) => Some(ty),
-                Some(_) => bail!("invalid supertype in trace"),
-            };
-            let ty = ArrayType::with_finality_and_supertype(engine, finality, supertype, field)?;
-            HeapType::ConcreteArray(ty)
-        }
-        _ => bail!("invalid type in trace"),
-    })
-}
-
-fn heap_type(engine: &Engine, index: VMSharedTypeIndex) -> Option<HeapType> {
-    FuncType::from_shared_type_index(engine, index)
-        .map(HeapType::ConcreteFunc)
-        .or_else(|| StructType::from_shared_type_index(engine, index).map(HeapType::ConcreteStruct))
-        .or_else(|| ArrayType::from_shared_type_index(engine, index).map(HeapType::ConcreteArray))
 }
 
 fn limits(body: &mut Reader<'_>) -> Result<(u64, Option<u64>)> {

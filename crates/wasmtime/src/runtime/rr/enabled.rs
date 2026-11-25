@@ -19,6 +19,7 @@ mod init;
 mod mutation;
 mod objects;
 mod replay;
+mod types;
 
 use codec::{Kind, Reader};
 #[cfg(feature = "component-model")]

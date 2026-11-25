@@ -555,12 +555,8 @@ impl Replayer {
             _ => {
                 self.require_idle()?;
                 match tag {
-                    codec::HOST
-                    | codec::TYPE
-                    | codec::GLOBAL
-                    | codec::MEMORY
-                    | codec::TABLE
-                    | codec::TAG => {
+                    codec::TYPE => self.types(),
+                    codec::HOST | codec::GLOBAL | codec::MEMORY | codec::TABLE | codec::TAG => {
                         let store = self.store.as_context_mut().0;
                         let scope = store.enter_gc_lifo_scope();
                         let result = init::replay_object(store, &self.trampolines, tag, body);
@@ -621,6 +617,20 @@ impl Replayer {
             globals: objects.globals.len(),
             instances: self.instances.len(),
         };
+    }
+
+    /// Adds all of the trace's types, upon reaching the first of them. They mean
+    /// the same wherever they are in the trace.
+    fn types(&mut self) -> Result<()> {
+        if !self.store.as_context().0.rr_objects().types.is_empty() {
+            return Ok(());
+        }
+        let types = types::read_types(self.store.engine(), &self.trace.bytes)?;
+        let objects = &mut self.store.as_context_mut().0.rr_session().objects;
+        for ty in types {
+            objects.add_type(ty)?;
+        }
+        Ok(())
     }
 
     /// Replays a module's first instantiation, which the instance's record

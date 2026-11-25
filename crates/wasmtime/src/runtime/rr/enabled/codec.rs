@@ -6,12 +6,11 @@
 use super::{Handles, Objects, RecordedCall};
 use crate::prelude::*;
 use crate::store::StoreOpaque;
-use crate::{
-    FieldType, HeapTopType, HeapType, Mutability, RefType, StorageType, Trap, ValRaw, ValType,
-};
+use crate::{HeapTopType, HeapType, RefType, Trap, ValRaw, ValType};
 use core::mem::MaybeUninit;
+use wasmtime_environ::{WasmHeapType, WasmValType};
 
-pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x11";
+pub(super) const MAGIC: &[u8; 8] = b"WTRR\0\0\0\x12";
 pub(super) const END: u8 = 0;
 pub(super) const ENTER_WASM: u8 = 1;
 pub(super) const LEAVE_WASM: u8 = 2;
@@ -21,6 +20,7 @@ pub(super) const WRITE: u8 = 5;
 /// A memory's growth by the host: `[id, new size in bytes]`.
 pub(super) const RESIZE: u8 = 6;
 
+/// A host function: `[id, type]`.
 pub(super) const HOST: u8 = 7;
 /// A module's first instantiation: `[id, SHA-256 of its bytecode]`.
 pub(super) const MODULE: u8 = 8;
@@ -34,15 +34,9 @@ pub(super) const GROWTH_FAILED: u8 = 13;
 pub(super) const GLOBAL_WRITE: u8 = 14;
 /// An embedder-defined event: `[tag, postcard payload]`.
 pub(super) const EVENT: u8 = 15;
-/// A type of GC object or function: `[id, kind]` and
-/// - `TYPE_MODULE`: `[module, index of a type in it]`
-/// - `TYPE_FUNC`: `[finality and supertype, params, results]`
-/// - `TYPE_STRUCT` and `TYPE_ARRAY`: `[finality and supertype, fields]`
+/// A recursion group of types, with the next IDs: a `rectype` in the Wasm binary
+/// format.
 pub(super) const TYPE: u8 = 16;
-pub(super) const TYPE_MODULE: u8 = 0;
-pub(super) const TYPE_FUNC: u8 = 1;
-pub(super) const TYPE_STRUCT: u8 = 2;
-pub(super) const TYPE_ARRAY: u8 = 3;
 /// The release of a GC handle: `[handle]`.
 pub(super) const RELEASE: u8 = 18;
 /// A tag that the host created: `[id, type]`.
@@ -145,7 +139,7 @@ impl Kind {
 }
 
 /// Abstract heap types, as encoded in the Wasm binary format.
-fn abstract_heap_types() -> [(u8, HeapType); 12] {
+fn abstract_heap_types() -> [(u8, HeapType); 14] {
     [
         (0x70, HeapType::Func),
         (0x6f, HeapType::Extern),
@@ -159,56 +153,68 @@ fn abstract_heap_types() -> [(u8, HeapType); 12] {
         (0x72, HeapType::NoExtern),
         (0x71, HeapType::None),
         (0x74, HeapType::NoExn),
+        (0x68, HeapType::Cont),
+        (0x75, HeapType::NoCont),
     ]
 }
 
 /// Appends a type in the encoding of a `valtype` in the Wasm binary format, in
 /// which the trace's types are the index space of types.
 pub(super) fn val_type(bytes: &mut TryVec<u8>, ty: &ValType, objects: &Objects) -> Result<()> {
+    wasm_val_type(bytes, &ty.to_wasm_type(), objects)
+}
+
+/// Like [`val_type`].
+pub(super) fn wasm_val_type(
+    bytes: &mut TryVec<u8>,
+    ty: &WasmValType,
+    objects: &Objects,
+) -> Result<()> {
     let ty = match ty {
-        ValType::I32 => return Ok(bytes.push(0x7f)?),
-        ValType::I64 => return Ok(bytes.push(0x7e)?),
-        ValType::F32 => return Ok(bytes.push(0x7d)?),
-        ValType::F64 => return Ok(bytes.push(0x7c)?),
-        ValType::V128 => return Ok(bytes.push(0x7b)?),
-        ValType::Ref(ty) => ty,
+        WasmValType::I32 => return Ok(bytes.push(0x7f)?),
+        WasmValType::I64 => return Ok(bytes.push(0x7e)?),
+        WasmValType::F32 => return Ok(bytes.push(0x7d)?),
+        WasmValType::F64 => return Ok(bytes.push(0x7c)?),
+        WasmValType::V128 => return Ok(bytes.push(0x7b)?),
+        WasmValType::Ref(ty) => ty,
     };
     let abstract_ = abstract_heap_types()
         .into_iter()
-        .find(|(_, abstract_)| HeapType::eq(abstract_, ty.heap_type()));
+        .find(|(_, abstract_)| abstract_.to_wasm_type() == ty.heap_type);
     if let Some((code, _)) = abstract_ {
-        if !ty.is_nullable() {
+        if !ty.nullable {
             bytes.push(0x64)?;
         }
         return Ok(bytes.push(code)?);
     }
-    let mut id = objects.find_type(ty.heap_type())?.as_u32();
-    bytes.push(if ty.is_nullable() { 0x63 } else { 0x64 })?;
-    // Signed LEB128, of a nonnegative number.
-    while id >= 0x40 {
-        bytes.push(u8::try_from(id & 0x7f)? | 0x80)?;
-        id >>= 7;
-    }
-    bytes.push(u8::try_from(id)?)?;
-    Ok(())
+    let (WasmHeapType::ConcreteFunc(index)
+    | WasmHeapType::ConcreteStruct(index)
+    | WasmHeapType::ConcreteArray(index)
+    | WasmHeapType::ConcreteCont(index)) = ty.heap_type
+    else {
+        bail!("unsupported type in record/replay");
+    };
+    let id = objects.type_id(index)?.as_u32();
+    bytes.push(if ty.nullable { 0x63 } else { 0x64 })?;
+    signed_leb128(bytes, id)
 }
 
-/// Appends a type in the encoding of a `fieldtype` in the Wasm binary format.
-pub(super) fn field_type(bytes: &mut TryVec<u8>, ty: &FieldType, objects: &Objects) -> Result<()> {
-    match ty.element_type() {
-        StorageType::I8 => bytes.push(0x78)?,
-        StorageType::I16 => bytes.push(0x77)?,
-        StorageType::ValType(ty) => val_type(bytes, ty, objects)?,
+/// Appends a number in unsigned LEB128.
+pub(super) fn leb128(bytes: &mut TryVec<u8>, mut value: u32) -> Result<()> {
+    while value >= 0x80 {
+        bytes.push(u8::try_from(value & 0x7f)? | 0x80)?;
+        value >>= 7;
     }
-    bytes.push(u8::from(ty.mutability().is_var()))?;
-    Ok(())
+    Ok(bytes.push(u8::try_from(value)?)?)
 }
 
-pub(super) fn blob(bytes: &mut TryVec<u8>, value: &[u8]) -> Result<()> {
-    let len = u32::try_from(value.len())?;
-    bytes.extend_from_slice(&len.to_le_bytes())?;
-    bytes.extend_from_slice(value)?;
-    Ok(())
+/// Appends a nonnegative number in signed LEB128.
+pub(super) fn signed_leb128(bytes: &mut TryVec<u8>, mut value: u32) -> Result<()> {
+    while value >= 0x40 {
+        bytes.push(u8::try_from(value & 0x7f)? | 0x80)?;
+        value >>= 7;
+    }
+    Ok(bytes.push(u8::try_from(value)?)?)
 }
 
 /// Begins a record whose payload, of `len` bytes, the caller then appends.
@@ -460,36 +466,6 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Reads a type from [`field_type`].
-    pub fn field_type(&mut self, objects: &Objects) -> Result<FieldType> {
-        let storage = match self.peek_tag() {
-            Some(code @ (0x78 | 0x77)) => {
-                self.u8()?;
-                if code == 0x78 {
-                    StorageType::I8
-                } else {
-                    StorageType::I16
-                }
-            }
-            _ => StorageType::ValType(self.val_type(objects)?),
-        };
-        let mutability = if self.bool()? {
-            Mutability::Var
-        } else {
-            Mutability::Const
-        };
-        Ok(FieldType::new(mutability, storage))
-    }
-
-    /// Reads a list of types that fills the rest of these bytes.
-    pub fn val_types(&mut self, objects: &Objects) -> Result<Vec<ValType>> {
-        let mut types = Vec::new();
-        while self.end().is_err() {
-            types.push(self.val_type(objects)?);
-        }
-        Ok(types)
-    }
-
     /// Reads a value. A GC reference has yet to be exposed to Wasm, and only
     /// the nullability of a reference has been checked.
     fn value(&mut self, kind: Kind, store: &StoreOpaque) -> Result<ValRaw> {
@@ -600,9 +576,9 @@ mod tests {
         ] {
             let mut bytes = TryVec::new();
             val_type(&mut bytes, &ty, &objects)?;
-            let decoded = Reader::new(&bytes).val_types(&objects)?;
-            assert_eq!(decoded.len(), 1);
-            assert!(ValType::eq(&decoded[0], &ty));
+            let mut reader = Reader::new(&bytes);
+            assert!(ValType::eq(&reader.val_type(&objects)?, &ty));
+            reader.end()?;
             let mut reader = wasmparser::BinaryReader::new(&bytes, 0);
             assert_eq!(reader.read::<V>()?, wasm);
             assert!(reader.eof());

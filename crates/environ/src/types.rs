@@ -915,6 +915,11 @@ impl WasmContType {
         WasmContType(idx)
     }
 
+    /// Returns the index of the underlying function type.
+    pub fn type_index(self) -> EngineOrModuleTypeIndex {
+        self.0
+    }
+
     /// Returns the (module interned) index to the underlying function type.
     pub fn unwrap_module_type_index(self) -> ModuleInternedTypeIndex {
         match self.0 {

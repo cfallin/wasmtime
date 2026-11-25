@@ -673,8 +673,7 @@ impl Module {
     #[cfg(any(
         feature = "gc-drc",
         feature = "gc-copying",
-        feature = "component-model",
-        feature = "rr",
+        feature = "component-model"
     ))]
     pub(crate) fn signatures(&self) -> &crate::type_registry::TypeCollection {
         self.inner.code.signatures()

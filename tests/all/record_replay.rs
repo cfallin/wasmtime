@@ -4245,18 +4245,7 @@ fn record_host_gc(collector: Collector, calls: usize) -> Result<(Trace, Vec<i32>
     let mut store = Store::new_recording(&recording, Vec::new())?;
     let module = new_module(&recording, HOST_GC)?;
 
-    // An instance whose only purpose is for its module's types to be in the
-    // trace, so that the host can allocate objects for the imports.
-    let types = new_module(
-        &recording,
-        r#"(module
-        (rec
-          (type $node (struct (field (mut i32)) (field (mut (ref null $node)))))
-          (type $unused (struct (field (ref null $node)))))
-        (global (export "node") (mut (ref null $node)) (ref.null $node)))"#,
-    )?;
-    let types = Instance::new(&mut store, &types, &[])?;
-    let node_ref = types.get_global(&mut store, "node").unwrap().ty(&store);
+    let node_ref = module.get_export("head").unwrap().unwrap_global().clone();
     let node_ref = node_ref.content().unwrap_ref().clone();
     let node = node_ref.heap_type().unwrap_concrete_struct().clone();
 
@@ -4764,29 +4753,224 @@ async fn rewinding_host_mutation_of_globals_and_tables() -> Result<()> {
     Ok(())
 }
 
+/// Records the use of types of a module that has yet to be instantiated, as its
+/// imports require.
 #[cfg(feature = "gc")]
-#[test]
-fn types_of_uninstantiated_modules_poison_the_recording() -> Result<()> {
-    let recording = gc_engine(RrConfig::Recording, Collector::Auto)?;
-    let mut store = Store::new_recording(&recording, ())?;
+fn record_types_of_uninstantiated_module(collector: Collector) -> Result<(Trace, Vec<i32>)> {
+    let recording = gc_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, Vec::new())?;
     let module = new_module(
         &recording,
         r#"(module
-        (rec (type $a (struct (field (ref null $b)))) (type $b (struct)))
-        (func (export "f") (param (ref null $a))))"#,
+        (type $unused (struct (field f64)))
+        (type $base (sub (struct (field i32))))
+        (rec
+          (type $a (sub $base (struct (field i32) (field (mut (ref null $b))))))
+          (type $b (struct (field (ref null $a)) (field (mut i8)) (field (ref null $f))))
+          (type $f (sub (func (param (ref null $a)) (result i32)))))
+        (rec
+          (type $x (struct))
+          (type $g (sub final $f (func (param (ref null $a)) (result i32)))))
+        (type $s (sub (func (result i32))))
+        (type $array (array (mut (ref null $b))))
+        (import "" "global" (global $global (mut (ref null $a))))
+        (import "" "table" (table $table 1 (ref null $array)))
+        (import "" "f" (func $f (type $f)))
+        (import "" "s" (func $s (type $s)))
+        (import "" "log" (func $log (param i32)))
+        (elem declare func $f)
+        (export "f" (func $f))
+        (func (export "run") (param (ref null $a))
+          (call $log (struct.get $a 0 (global.get $global)))
+          (call $log (call $f (local.get 0)))
+          (call $log (call_ref $f (local.get 0)
+            (struct.get $b 2 (struct.get $a 1 (global.get $global)))))
+          (call $log (call_ref $f (local.get 0)
+            (struct.get $b 2 (array.get $array (table.get $table (i32.const 0)) (i32.const 1)))))
+          (call $log (call $s))
+          ;; The host functions' types are exact.
+          (call $log (ref.test (ref $g) (ref.func $f)))
+          (call $log (ref.test (ref $f) (ref.func $f)))
+          (call $log (ref.test (ref $base) (local.get 0)))))"#,
     )?;
+    let import = |name: &str| module.imports().find(|i| i.name() == name).unwrap().ty();
+    let global_ty = import("global").unwrap_global().clone();
+    let a = global_ty.content().unwrap_ref().heap_type().clone();
+    let a = a.unwrap_concrete_struct().clone();
+    let b = a.field(1).unwrap().element_type().unwrap_val_type().clone();
+    let b = b.unwrap_ref().heap_type().unwrap_concrete_struct().clone();
+    let table_ty = import("table").unwrap_table().clone();
+    let array = table_ty.element().heap_type().unwrap_concrete_array();
+
+    let f_ty = import("f").unwrap_func().clone();
+    let f = Func::new(&mut store, f_ty, |mut caller, args, results| {
+        let a = args[0].unwrap_anyref().unwrap().unwrap_rooted();
+        let a = a.unwrap_struct(&caller)?;
+        results[0] = a.field(&mut caller, 0)?;
+        Ok(())
+    });
+    let s = import("s").unwrap_func().clone();
+    let s = Func::new(&mut store, s, |_, _, results| {
+        results[0] = Val::I32(9);
+        Ok(())
+    });
+    let log = Func::wrap(
+        &mut store,
+        |mut caller: Caller<'_, Vec<i32>>, value: i32| caller.data_mut().push(value),
+    );
+
+    // A global that is null is enough to need its type.
+    let null = Val::AnyRef(None);
+    let null_global = Global::new(&mut store, global_ty.clone(), null)?;
+    let (global, table) = {
+        let mut scope = RootScope::new(&mut store);
+        let b_pre = StructRefPre::new(&mut scope, b);
+        let fields = [Val::AnyRef(None), Val::I32(1), Val::from(f)];
+        let b = StructRef::new(&mut scope, &b_pre, &fields)?;
+        let a_pre = StructRefPre::new(&mut scope, a.clone());
+        let fields = [Val::I32(5), Val::from(b.to_anyref())];
+        let object = StructRef::new(&mut scope, &a_pre, &fields)?;
+        let value = Val::from(object.to_anyref());
+        let global = Global::new(&mut scope, global_ty, value)?;
+        let array_pre = ArrayRefPre::new(&mut scope, array.clone());
+        let elems = [Val::AnyRef(None), Val::from(b.to_anyref())];
+        let elems = ArrayRef::new_fixed(&mut scope, &array_pre, &elems)?;
+        let table = Table::new(&mut scope, table_ty, Ref::from(elems.to_anyref()))?;
+        (global, table)
+    };
+    rr::record_event(&mut store, &Step(0))?;
+    for global in [null_global, global] {
+        let imports = [global.into(), table.into(), f.into(), s.into(), log.into()];
+        let instance = Instance::new(&mut store, &module, &imports)?;
+        let run = instance.get_func(&mut store, "run").unwrap();
+        let mut scope = RootScope::new(&mut store);
+        let pre = StructRefPre::new(&mut scope, a.clone());
+        let object = StructRef::new(&mut scope, &pre, &[Val::I32(6), Val::AnyRef(None)])?;
+        let result = run.call(&mut scope, &[Val::from(object.to_anyref())], &mut []);
+        // This traps as it reads from null.
+        assert_eq!(result.is_err(), scope.as_context().data().is_empty());
+        rr::record_event(&mut scope, &Step(1))?;
+    }
+    let log = store.data().clone();
+    Ok((store.finish_recording()?, log))
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn types_of_uninstantiated_modules() -> Result<()> {
+    for collector in COLLECTORS {
+        let (trace, log) = record_types_of_uninstantiated_module(collector)?;
+        assert_eq!(log, [5, 6, 6, 6, 9, 0, 1, 1]);
+        for replay_collector in COLLECTORS {
+            let engine = gc_engine(RrConfig::Replaying, replay_collector)?;
+            replay_with(&engine, &trace).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn rewinding_types_of_uninstantiated_modules() -> Result<()> {
+    let collector = Collector::DeferredReferenceCounting;
+    let (trace, _) = record_types_of_uninstantiated_module(collector)?;
+    let mut replayer = new_replayer_with(&gc_engine(RrConfig::Replaying, collector)?, &trace)?;
+    replayer.stop_at_events(true);
+    let mut checkpoints = vec![replayer.checkpoint()?];
+    while let ReplayStop::Event(_) = replayer.run().await? {
+        checkpoints.push(replayer.checkpoint()?);
+    }
+    replayer.stop_at_events(false);
+    for i in [2, 0, 1, 3, 0] {
+        replayer.restore(&checkpoints[i])?;
+        assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    }
+    Ok(())
+}
+
+/// Corrupted types may be rejected or not, but replay must not panic.
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn corrupt_types() -> Result<()> {
+    const HOST: u8 = 7;
+    const TYPE: u8 = 16;
+    let collector = Collector::DeferredReferenceCounting;
+    let engine = gc_engine(RrConfig::Replaying, collector)?;
+    let (trace, _) = record_types_of_uninstantiated_module(collector)?;
+    let frames = frames(trace.as_bytes());
+    let mut rejected = 0;
+    for (i, (tag, body)) in frames.iter().enumerate() {
+        if ![HOST, TYPE].contains(tag) {
+            continue;
+        }
+        for at in *body..frames[i + 1].1 - 5 {
+            for flip in [0x01, 0x03, 0x10, 0xff] {
+                let mut bytes = trace.as_bytes().to_vec();
+                bytes[at] ^= flip;
+                let result = replay_with(&engine, &Trace::from_bytes(bytes)?).await;
+                rejected += usize::from(result.is_err());
+            }
+        }
+    }
+    assert!(rejected > 0);
+    Ok(())
+}
+
+/// Recording a type records all those that it refers to, however deeply.
+#[cfg(feature = "gc")]
+#[tokio::test]
+async fn deeply_nested_types() -> Result<()> {
+    let collector = Collector::DeferredReferenceCounting;
+    let recording = gc_engine(RrConfig::Recording, collector)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let mut wat = String::from("(module (type $t0 (struct))\n");
+    let depth = 20_000;
+    for i in 1..=depth {
+        let j = i - 1;
+        wat.push_str(&format!(
+            "(type $t{i} (struct (field (ref null $t{j})) (field (ref null $t{j}))))\n"
+        ));
+    }
+    wat.push_str(&format!(
+        "(import \"\" \"\" (global (ref null $t{depth}))))"
+    ));
+    // This is too large for all other tests to be given its bytecode.
+    let wasm = wat::parse_str(&wat)?;
+    let module = Module::new(&recording, &wasm)?;
     let ty = module
-        .exports()
+        .imports()
         .next()
         .unwrap()
         .ty()
-        .unwrap_func()
-        .param(0)
-        .unwrap();
-    let ty = ty.unwrap_ref().heap_type().unwrap_concrete_struct().clone();
-    let pre = StructRefPre::new(&mut store, ty);
-    assert!(StructRef::new(&mut store, &pre, &[Val::AnyRef(None)]).is_err());
-    let err = store.finish_recording().err().unwrap().to_string();
-    assert!(err.contains("have not been instantiated"), "{err}");
+        .unwrap_global()
+        .clone();
+    let global = Global::new(&mut store, ty, Val::AnyRef(None))?;
+    Instance::new(&mut store, &module, &[global.into()])?;
+    let trace = store.finish_recording()?;
+    let engine = gc_engine(RrConfig::Replaying, collector)?;
+    let mut replayer = Replayer::new(&engine, trace)?;
+    replayer.add_bytecode(&wasm)?;
+    assert_eq!(replayer.run().await?, ReplayStop::Finished);
+    Ok(())
+}
+
+/// The host can create non-final function types without the GC proposal.
+#[tokio::test]
+async fn non_final_function_types() -> Result<()> {
+    let engine = |rr| {
+        let mut config = Config::new();
+        config.rr(Some(rr)).wasm_gc(false);
+        Engine::new(&config)
+    };
+    let recording = engine(RrConfig::Recording)?;
+    let mut store = Store::new_recording(&recording, ())?;
+    let ty = FuncType::with_finality_and_supertype(&recording, Finality::NonFinal, None, [], [])?;
+    let f = Func::new(&mut store, ty, |_, _, _| Ok(()));
+    let ty = GlobalType::new(ValType::FUNCREF, Mutability::Const);
+    let global = Global::new(&mut store, ty, Val::from(f))?;
+    let module = new_module(&recording, r#"(module (import "" "" (global funcref)))"#)?;
+    Instance::new(&mut store, &module, &[global.into()])?;
+    let trace = store.finish_recording()?;
+    replay_with(&engine(RrConfig::Replaying)?, &trace).await?;
     Ok(())
 }
